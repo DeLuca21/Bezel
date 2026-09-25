@@ -1,0 +1,1 @@
+Distro marks from [Simple Icons](https://github.com/simple-icons/simple-icons/tree/develop/icons), downloaded 2026-09-24. SVG geometry is unchanged; filenames have a `-symbolic` suffix so GNOME can tint them with the selected palette. See LICENSE.md (CC0). Marks identify the corresponding distributions; this project is not affiliated with them.

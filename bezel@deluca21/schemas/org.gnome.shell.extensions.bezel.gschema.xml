@@ -1,0 +1,204 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.bezel" path="/org/gnome/shell/extensions/bezel/">
+    <key name="config" type="s">
+      <default>""</default>
+    </key>
+    <key name="edit-mode" type="b">
+      <default>false</default>
+    </key>
+    <key name="edge-panels" type="b">
+      <default>true</default>
+      <summary>Open the dashboard and session drawer from the center of the screen edges</summary>
+    </key>
+
+    <key name="launcher-shortcut" type="as"><default>['&lt;Super&gt;space']</default></key>
+    <key name="overview-shortcut" type="as"><default>[]</default></key>
+    <key name="shortcut-overrides" type="s"><default>"[]"</default></key>
+    <key name="super-launcher" type="b"><default>false</default></key>
+    <key name="launcher-width" type="i"><default>600</default><range min="360" max="1000"/></key>
+    <key name="panel-indicators" type="b"><default>true</default></key>
+    <key name="indicator-bar" type="i"><default>0</default><range min="0" max="4"/></key>
+    <key name="saved-layouts" type="s"><default>"[]"</default></key>
+    <key name="indicator-spacing" type="i"><default>16</default><range min="0" max="40"/></key>
+    <key name="indicator-order" type="as"><default>[]</default></key>
+    <key name="indicator-side" type="s">
+      <default>"after"</default>
+      <choices>
+        <choice value="before"/>
+        <choice value="after"/>
+      </choices>
+    </key>
+    <key name="known-indicators" type="as"><default>[]</default></key>
+    <key name="frame-notifications" type="b"><default>true</default></key>
+    <key name="indicator-icon-size" type="i"><default>22</default><range min="12" max="40"/></key>
+    <key name="previous-layout" type="s"><default>""</default></key>
+    <key name="power-hover" type="b"><default>false</default></key>
+    <key name="clock-hover" type="b"><default>true</default></key>
+    <key name="power-button-hover" type="b"><default>true</default></key>
+    <key name="dashboard-hover" type="b"><default>true</default></key>
+    <key name="status-hover" type="b"><default>true</default></key>
+    <key name="hover-delay" type="i"><default>300</default><range min="100" max="1000"/></key>
+    <key name="animation-duration" type="i"><default>320</default><range min="0" max="800"/></key>
+    <key name="frame-shadow" type="i"><default>8</default><range min="0" max="24"/></key>
+    <key name="dashboard-width" type="i"><default>880</default><range min="480" max="1200"/></key>
+
+    <key name="theme" type="s">
+      <default>"catppuccin-mocha"</default>
+      <choices>
+        <choice value="catppuccin-latte"/>
+        <choice value="catppuccin-frappe"/>
+        <choice value="catppuccin-macchiato"/>
+        <choice value="catppuccin-mocha"/>
+        <choice value="nord"/>
+        <choice value="rose-pine"/>
+        <choice value="rose-pine-moon"/>
+        <choice value="rose-pine-dawn"/>
+        <choice value="bezel-forest"/>
+        <choice value="bezel-sage"/>
+        <choice value="bezel-ocean"/>
+        <choice value="bezel-sand"/>
+        <choice value="bezel-ember"/>
+        <choice value="bezel-monochrome"/>
+        <choice value="custom"/>
+      </choices>
+    </key>
+    <key name="custom-bg" type="s">
+      <default>"#1e1e2e"</default>
+    </key>
+    <key name="custom-surface" type="s">
+      <default>"#313244"</default>
+    </key>
+    <key name="custom-fg" type="s">
+      <default>"#cdd6f4"</default>
+    </key>
+    <key name="custom-muted" type="s">
+      <default>"#a6adc8"</default>
+    </key>
+    <key name="custom-accent" type="s">
+      <default>"#cba6f7"</default>
+    </key>
+    <key name="custom-border" type="s">
+      <default>"#45475a"</default>
+    </key>
+
+    <key name="bar-edge" type="s">
+      <default>"top"</default>
+      <choices>
+        <choice value="top"/>
+        <choice value="bottom"/>
+        <choice value="left"/>
+        <choice value="right"/>
+      </choices>
+    </key>
+    <key name="bar-behavior" type="s">
+      <default>"static"</default>
+      <choices>
+        <choice value="static"/>
+        <choice value="autohide"/>
+      </choices>
+    </key>
+    <key name="popout-placement" type="s">
+      <default>"attached"</default>
+      <choices>
+        <choice value="attached"/>
+        <choice value="centered"/>
+      </choices>
+    </key>
+    <key name="margin-ends" type="i">
+      <default>0</default>
+      <range min="0" max="800"/>
+    </key>
+    <key name="margin-edge" type="i">
+      <default>0</default>
+      <range min="0" max="200"/>
+    </key>
+    <key name="thickness" type="i">
+      <default>42</default>
+      <range min="24" max="160"/>
+    </key>
+    <key name="radius" type="i">
+      <default>0</default>
+      <range min="0" max="80"/>
+    </key>
+    <key name="opacity" type="d">
+      <default>1.0</default>
+      <range min="0.2" max="1.0"/>
+    </key>
+    <key name="border-width" type="i">
+      <default>0</default>
+      <range min="0" max="8"/>
+    </key>
+    <key name="reserve-space" type="b">
+      <default>true</default>
+    </key>
+    <key name="hide-overview-dock" type="b"><default>true</default><summary>Hide the built-in dock in GNOME Overview</summary></key>
+    <key name="hide-gnome-panel" type="b">
+      <default>true</default>
+    </key>
+
+    <key name="widgets-start" type="as">
+      <default>["overview", "workspaces"]</default>
+    </key>
+    <key name="widgets-center" type="as">
+      <default>["clock"]</default>
+    </key>
+    <key name="widgets-end" type="as">
+      <default>["session"]</default>
+    </key>
+
+    <key name="show-frame" type="b">
+      <default>true</default>
+    </key>
+    <key name="frame-inset" type="i">
+      <default>8</default>
+      <range min="0" max="80"/>
+    </key>
+    <key name="frame-width" type="i">
+      <default>12</default>
+      <range min="4" max="48"/>
+    </key>
+    <key name="frame-radius" type="i">
+      <default>28</default>
+      <range min="0" max="80"/>
+    </key>
+    <key name="hidden-indicators" type="as"><default>[]</default><summary>Extension roles hidden from Bezel</summary></key>
+    <key name="power-position" type="s"><default>'icon'</default><summary>Power drawer position</summary></key>
+    <key name="power-style" type="s">
+      <default>'list'</default>
+      <summary>Power menu layout</summary>
+      <choices>
+        <choice value="list"/>
+        <choice value="rail"/>
+      </choices>
+    </key>
+    <key name="slider-style" type="s">
+      <default>'drawer'</default>
+      <summary>Volume and brightness controls</summary>
+      <choices>
+        <choice value="drawer"/>
+        <choice value="edge"/>
+      </choices>
+    </key>
+    <key name="session-dim" type="b">
+      <default>false</default>
+      <summary>Dim the desktop behind the power menu</summary>
+    </key>
+    <key name="dashboard-position" type="s"><default>'icon'</default><summary>Dashboard drawer position</summary></key>
+    <key name="notifications-position" type="s"><default>'top-right'</default><summary>Notification history and arrival position</summary></key>
+    <key name="weather-dashboard" type="b"><default>true</default><summary>Show weather on dashboard</summary></key>
+    <key name="weather-clock" type="b"><default>false</default><summary>Show weather beside clock</summary></key>
+    <key name="date-format" type="s">
+      <default>'medium'</default>
+      <summary>Date widget format</summary>
+      <choices>
+        <choice value="weekday"/>
+        <choice value="short"/>
+        <choice value="medium"/>
+        <choice value="long"/>
+        <choice value="numeric"/>
+        <choice value="iso"/>
+      </choices>
+    </key>
+  </schema>
+</schemalist>

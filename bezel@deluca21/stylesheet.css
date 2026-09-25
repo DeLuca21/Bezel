@@ -1,0 +1,75 @@
+.bezel-collapsed-panel {
+    height: 0;
+    min-height: 0;
+    border: none;
+}
+
+.bezel-button {
+    border-radius: 12px;
+    padding: 4px;
+    transition-duration: 150ms;
+}
+
+.bezel-button:hover, .bezel-button:focus,
+.bezel-workspace:hover, .bezel-workspace:focus {
+    background-color: rgba(144, 122, 169, 0.18);
+}
+
+.bezel-button:active, .bezel-action:active {
+    background-color: rgba(144, 122, 169, 0.3);
+}
+
+.bezel-workspace {
+    padding: 4px;
+    border-radius: 12px;
+}
+
+.bezel-action {
+    padding: 8px;
+    border-radius: 12px;
+    transition-duration: 150ms;
+}
+
+.bezel-action:hover, .bezel-action:focus {
+    box-shadow: inset 0 0 0 2px rgba(144, 122, 169, 0.5);
+}
+
+.bezel-popout-scroll StScrollBar,
+.bezel-popout-scroll StScrollBar StBin#trough,
+.bezel-popout-scroll StScrollBar StButton#vhandle,
+.bezel-popout-scroll StScrollBar StButton#hhandle {
+    min-width: 0;
+    min-height: 0;
+    width: 0;
+    height: 0;
+    padding: 0;
+    margin: 0;
+    border: none;
+    background-color: transparent;
+}
+
+.bezel-calendar-day:hover, .bezel-calendar-day:focus {
+    box-shadow: inset 0 0 0 2px rgba(144, 122, 169, 0.65);
+}
+
+.bezel-indicators .panel-button {
+    padding: 0;
+    min-width: 0;
+    min-height: 0;
+    -minimum-hpadding: 0px;
+    -natural-hpadding: 0px;
+    color: inherit;
+}
+
+.bezel-indicators .panel-button StBoxLayout,
+.bezel-indicators .panel-button StBin,
+.bezel-indicators .panel-button StIcon,
+.bezel-indicators .system-status-icon,
+.bezel-indicators StLabel {
+    padding: 0;
+    min-width: 0;
+    min-height: 0;
+    -minimum-hpadding: 0px;
+    -natural-hpadding: 0px;
+    color: inherit;
+}

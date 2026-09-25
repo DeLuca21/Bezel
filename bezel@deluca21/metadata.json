@@ -1,0 +1,13 @@
+{
+  "uuid": "bezel@deluca21",
+  "name": "Bezel",
+  "description": "Customizable bars, docks, and popouts drawn over GNOME.",
+  "shell-version": [
+    "48",
+    "49",
+    "50",
+    "51"
+  ],
+  "settings-schema": "org.gnome.shell.extensions.bezel",
+  "version": 1
+}
