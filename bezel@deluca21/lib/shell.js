@@ -1,6 +1,7 @@
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
+import Meta from 'gi://Meta';
 import Pango from 'gi://Pango';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
@@ -11,7 +12,7 @@ import * as SystemActions from 'resource:///org/gnome/shell/misc/systemActions.j
 
 import {resolveTheme} from './theme.js';
 
-import {PLACES, DATE_FORMATS, readState, saveBars, clamp, settingFlag, settingChoice, isSpacer} from './config.js';
+import {PLACES, DATE_FORMATS, timePattern, barDateFormat, barTimeFormat, readState, readBars, saveBars, clamp, settingFlag, settingChoice, isSpacer, barGroups} from './config.js';
 import {sideWidths, reservedWidths, cornerRadius, horizontalZoneWidths} from './geometry.js';
 import {paintCorner} from './drawing.js';
 import {Services} from './services.js';
@@ -28,19 +29,34 @@ import * as Config from 'resource:///org/gnome/shell/misc/config.js';
 import {allowsMotion, chromeOptions} from './compat.js';
 import {NotificationBridge, buildNotificationCenter} from './notifications.js';
 import {decorateScroll} from './overflow.js';
+import {MODULES, createGroup, deleteGroup, assignGroup, resizeSpacer, addBar, addModule, patchBar, removeBar, removeModule, setFloating, setKind, nudgeUnit} from './settingsModel.js';
 import {bindToggle, darkStyleControl, dndControl, moduleSection, nightLightControl, openScreenshot, performanceMenu, settingsMenu, vpnMenu} from './tools.js';
 
 export class BezelOverlay {
-    constructor(settings, openPreferences = () => {}) {
-        this.openPreferences = openPreferences;
+    constructor(settings, openPreferences) {
+        this._openPreferences = openPreferences;
         this._settings = settings;
+        this.settingsBar = null;
+        this._editAdds = [];
+        this._editEscape = 0;
         this.services = new Services();
         this.weather = new Weather();
         this._chrome = [];
         this._frames = new Map();
         this._bars = [];
         this._id = settings.connect('changed', (_settings, key) => {
-            if (!['known-indicators', 'saved-layouts', 'previous-layout', 'shortcut-overrides'].includes(key)) this.queueRebuild();
+            if (key === 'edit-mode')
+                this._syncEditEscape();
+            if (key === 'preferences-bar') {
+                this.settingsBar = this._settings.get_int(key);
+                for (const bar of this._bars) bar.syncEditOutline();
+                return;
+            }
+            if (key === 'show-settings') {
+                this.openSettings();
+                return;
+            }
+            if (!['known-indicators', 'saved-layouts', 'previous-layout', 'shortcut-overrides', 'show-settings', 'preferences-bar'].includes(key)) this.queueRebuild();
         });
         this._monitors = Main.layoutManager.connect('monitors-changed', () => this.queueRebuild());
         this._overview = Main.overview.connect('showing', () => this._bars.forEach(bar => bar._close()));
@@ -137,15 +153,79 @@ export class BezelOverlay {
                 }
                 if (monitor.index === Main.layoutManager.primaryIndex && this._settings.get_boolean('frame-notifications'))
                     this._notifications = new NotificationBridge(physicalMonitor, side, theme, state.border, state.radius, this._frames.get(monitor.index), this._settings);
+                if (state.editMode)
+                    this._addEdgeHandle(physicalMonitor, theme, state);
                 const reserved = reservedWidths(state);
                 for (const [edge, width] of Object.entries(reserved)) {
                     if (width > 0)
                         this._chrome.push(strut(physicalMonitor, edge, width + (edge === 'top' ? topInset : 0)));
                 }
             }
+            this._syncEditEscape();
         } catch (error) {
             this._clear();
             throw error;
+        }
+    }
+
+    openPreferences() {
+        this.openSettings();
+    }
+
+    openSettings(options = {}) {
+        try {
+            this._settings.set_int('preferences-bar', Number.isInteger(options.barIndex) ? options.barIndex : -1);
+            this._openPreferences?.()?.catch?.(error => console.error('Bezel preferences failed', error));
+        } catch (error) {
+            console.error('Bezel settings failed to open', error);
+        }
+    }
+
+    _syncEditEscape() {
+        const editing = this._settings?.get_boolean('edit-mode');
+        if (editing && !this._editEscape) {
+            this._editEscape = global.stage.connect('captured-event', (_stage, event) => {
+                if (!this._settings?.get_boolean('edit-mode'))
+                    return Clutter.EVENT_PROPAGATE;
+                if (event.type() !== Clutter.EventType.KEY_PRESS || event.get_key_symbol() !== Clutter.KEY_Escape)
+                    return Clutter.EVENT_PROPAGATE;
+                this._settings.set_boolean('edit-mode', false);
+                return Clutter.EVENT_STOP;
+            });
+        } else if (!editing && this._editEscape) {
+            global.stage.disconnect(this._editEscape);
+            this._editEscape = 0;
+        }
+    }
+
+    _addEdgeHandle(monitor, theme, state) {
+        const used = new Set(state.bars.map(bar => bar.edge));
+        for (const edge of ['left', 'top', 'right', 'bottom']) {
+            if (used.has(edge))
+                continue;
+            const button = new St.Button({
+                label: '+',
+                reactive: true,
+                can_focus: true,
+                width: 28,
+                height: 28,
+                accessible_name: `Add a bar on the ${edge}`,
+                style: `background-color: ${theme.accent}; color: ${theme.bg}; border-radius: 14px; font-weight: bold;`,
+            });
+            button._bezelEdge = edge;
+            const size = 28;
+            if (edge === 'left')
+                button.set_position(monitor.x + 10, monitor.y + Math.round(monitor.height / 2 - size / 2));
+            else if (edge === 'right')
+                button.set_position(monitor.x + monitor.width - size - 10, monitor.y + Math.round(monitor.height / 2 - size / 2));
+            else if (edge === 'top')
+                button.set_position(monitor.x + Math.round(monitor.width / 2 - size / 2), monitor.y + 10);
+            else
+                button.set_position(monitor.x + Math.round(monitor.width / 2 - size / 2), monitor.y + monitor.height - size - 10);
+            button.connect('clicked', () => addBar(this._settings, edge));
+            chrome(button, true, false);
+            this._chrome.push(button);
+            this._editAdds.push(button);
         }
     }
 
@@ -239,6 +319,10 @@ export class BezelOverlay {
             Main.overview.disconnect(this._overview);
         if (this._fullscreen)
             global.display.disconnect(this._fullscreen);
+        if (this._editEscape) {
+            global.stage.disconnect(this._editEscape);
+            this._editEscape = 0;
+        }
         this._clear();
         this.services.destroy();
         this.weather.destroy();
@@ -357,6 +441,7 @@ export class BezelOverlay {
     }
 
     _clear() {
+        this._editAdds = [];
         this._notifications?.destroy();
         this._notifications = null;
         this._indicators?.destroy();
@@ -396,6 +481,13 @@ class Bar {
 
     destroy() {
         this._destroyed = true;
+        this._endGeom(false);
+        if (this._appsHandleLater)
+            global.compositor.get_laters().remove(this._appsHandleLater);
+        this._appsHandleLater = 0;
+        if (this._appsOffsetLater)
+            global.compositor.get_laters().remove(this._appsOffsetLater);
+        this._appsOffsetLater = 0;
         this._close();
         this._endDrag();
         this._revealTimeline?.stop();
@@ -406,6 +498,9 @@ class Bar {
         this._timers.clear();
         for (const [obj, id] of this._signals)
             obj.disconnect(id);
+        for (const handle of Object.values(this._editHandles ?? {}))
+            drop(handle);
+        this._editHandles = null;
         drop(this._actor);
         drop(this._trigger);
     }
@@ -420,6 +515,8 @@ class Bar {
             clip_to_allocation: true,
             style: `background-color: ${this._joinedAutohide ? 'transparent' : this._theme.bg}; spacing: 8px; padding: 6px; border-radius: ${this._state.kind === 'dock' || this._state.margin || this._state.length < 100 ? this._state.rounding : 0}px; ${this._state.kind === 'dock' ? 'box-shadow: 0 3px 10px rgba(0,0,0,0.22);' : ''}`,
         });
+        this._baseStyle = this._actor.style;
+        this.syncEditOutline();
         const icon = this._state.iconSize;
         const zones = {
             start: this._zone(),
@@ -439,8 +536,6 @@ class Bar {
                 dragId = item.group;
             } else {
                 actor = this._module(item.id, icon);
-                if (item.id === 'volume' || item.id === 'network' || item.id === 'battery')
-                    dragId = 'status';
             }
             if (!actor)
                 continue;
@@ -451,6 +546,14 @@ class Bar {
             if (this._state.editMode)
                 this._drag(actor, dragId);
         }
+        this._zoneAdds = [];
+        if (this._state.editMode) {
+            for (const place of ['start', 'center', 'end']) {
+                const plus = this._zonePlus(place);
+                zones[place].add_child(plus);
+                this._zoneAdds.push(plus);
+            }
+        }
         this._zones = zones;
         // Vertical rails use equal cells; horizontal panels share unused space
         // so a long app list is not confined to an otherwise empty third.
@@ -460,96 +563,360 @@ class Bar {
         if (this._state.kind === 'dock') {
             this._dockContent = new St.BoxLayout({orientation: this._actor.orientation,
                 x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER,
-                x_expand: true, y_expand: true, style: 'spacing: 12px;'});
-            this._dockScroll = new St.BoxLayout({orientation: this._actor.orientation,
-                x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER,
-                style: 'spacing: 12px;'});
-            this._dockViewport = this._scrollView();
-            this._dockViewport.set_child(this._dockScroll);
-            this._actor.add_child(this._dockContent);
+                x_expand: true, y_expand: true, clip_to_allocation: true, style: 'spacing: 12px;'});
+            this._dockViewport = this._appsClip();
+            this._dockCell = new St.Widget({layout_manager: new Clutter.BinLayout(),
+                x_expand: true, y_expand: true});
+            this._dockCell.add_child(this._dockContent);
+            this._actor.add_child(this._dockCell);
         }
         for (const [place, zone] of Object.entries(zones)) {
             if (this._state.kind === 'dock') {
-                this._attachZone(zone, place, this._dockContent, this._dockScroll);
+                this._attachZone(zone, place, this._dockContent);
                 continue;
             }
             this._cells.push(this._attachZone(zone, place));
             this._actor.add_child(this._cells[this._cells.length - 1]);
         }
-        if (this._state.kind === 'dock' && this._dockViewport.get_parent() !== this._dockContent)
+        if (this._state.kind === 'dock' && !this._dockViewport.get_parent())
             this._dockContent.add_child(this._dockViewport);
         chrome(this._actor, true);
         this._place();
+        this._ensureEditHandles();
+        this._signals.push([this._actor, this._actor.connect('captured-event', (_actor, event) => this._barClick(event))]);
+        this._signals.push([this._actor, this._actor.connect('captured-event', (_actor, event) => this._barScroll(event))]);
         if (this._state.autohide)
             this._enableAutohide();
     }
 
-    _isPinnedChrome(actor) {
-        return this._order.some(item => ['logo', 'workspaces'].includes(item.id) && item.actor === actor);
+    syncEditOutline() {
+        if (!this._actor || !this._baseStyle)
+            return;
+        const selected = this._state.editMode && this._overlay.settingsBar === this._index;
+        const quiet = this._state.editMode && !selected;
+        const color = selected ? this._theme.accent : this._theme.muted;
+        this._actor.style = `${this._baseStyle}${quiet || selected ? ` border: 2px solid ${color};` : ''}`;
     }
 
-    _placeInOrder(zone, parent, insertScroll) {
-        const apps = this._order.find(item => item.id === 'apps' && zone.contains(item.actor))?.actor;
-        if (!apps || zone.get_n_children() < 2)
-            return false;
-        for (const actor of [...zone.get_children()]) {
-            if (actor === apps)
-                insertScroll();
-            else {
-                zone.remove_child(actor);
-                parent.add_child(actor);
-            }
+    _zonePlus(place) {
+        const button = new St.Button({
+            label: '+',
+            reactive: true,
+            can_focus: true,
+            accessible_name: `Add to ${place}`,
+            style: `color: ${this._theme.accent}; background-color: ${this._theme.surface}; border-radius: 99px; padding: 0 7px; font-weight: bold;`,
+        });
+        button.connect('clicked', () => this._toggle(`add-${place}`, button, () => this._addMenu(place)));
+        return button;
+    }
+
+    _barClick(event) {
+        if (this._destroyed || event.type() !== Clutter.EventType.BUTTON_PRESS || event.get_button() !== 3)
+            return Clutter.EVENT_PROPAGATE;
+        const [x, y] = event.get_coords();
+        const picked = event.get_source();
+        // App menus also work when apps belong to a custom module group.
+        for (let actor = picked; actor && actor !== this._actor; actor = actor.get_parent?.()) {
+            if (actor._bezelAppId)
+                return Clutter.EVENT_PROPAGATE;
         }
-        return true;
+        if (this._appViewport && inside(this._appViewport, x, y)) {
+            this._toggle('bar-menu', this._actor, () => this._barMenu());
+            return Clutter.EVENT_STOP;
+        }
+        let module = this._order.find(item => {
+            const actor = item.actor;
+            if (!actor)
+                return false;
+            if (picked && (actor === picked || actor.contains(picked)))
+                return true;
+            return inside(actor, x, y);
+        });
+        if (module?.id === 'apps') {
+            const icons = module.actor?.get_children?.() ?? [];
+            const onIcon = icons.some(icon => icon === picked || icon.contains?.(picked));
+            if (onIcon)
+                return Clutter.EVENT_PROPAGATE;
+            module = null;
+        }
+        if (this._state.editMode && module)
+            this._toggle(`module-${module.id}`, module.actor, () => this._moduleSettingsMenu(module.id));
+        else
+            this._toggle('bar-menu', this._actor, () => this._barMenu());
+        return Clutter.EVENT_STOP;
     }
 
-    _attachZone(zone, place, pinParent = null, scrollParent = null) {
+    // The icons are the pick target, so the wheel has to be caught on the bar
+    // and the row slid by translation. A layout pass puts a plain position back.
+    _barScroll(event) {
+        if (this._destroyed || event.type() !== Clutter.EventType.SCROLL)
+            return Clutter.EVENT_PROPAGATE;
+        const view = this._appViewport;
+        if (!view)
+            return Clutter.EVENT_PROPAGATE;
+        const [x, y] = event.get_coords();
+        if (!inside(view, x, y))
+            return Clutter.EVENT_PROPAGATE;
+        if (!this._scrollAppsBy(scrollStep(event)))
+            return Clutter.EVENT_PROPAGATE;
+        this._cancel('_appHover');
+        return Clutter.EVENT_STOP;
+    }
+
+    _barMenu() {
+        const settings = this._overlay._settings;
+        const bar = readBars(settings)[this._index];
+        const editing = this._state.editMode;
+        const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 8px;'});
+        box.add_child(this._action('Settings', 'preferences-system-symbolic', () => {
+            this._overlay.openSettings({barIndex: this._index, mode: 'bar', beside: true});
+        }));
+        box.add_child(this._action(editing ? 'Done' : 'Edit bars', editing ? 'object-select-symbolic' : 'document-edit-symbolic', () => {
+            settings.set_boolean('edit-mode', !editing);
+        }));
+        box.add_child(this._action(bar.kind === 'dock' ? 'Use as panel' : 'Use as dock', 'view-list-symbolic', () => {
+            setKind(settings, this._index, bar.kind === 'dock' ? 'panel' : 'dock');
+        }));
+        box.add_child(this._action(bar.margin > 0 ? 'Attach to the edge' : 'Float', 'view-fullscreen-symbolic', () => {
+            setFloating(settings, this._index, !(bar.margin > 0));
+        }));
+        box.add_child(this._action(bar.autohide ? 'Keep visible' : 'Hide until the pointer hits the edge', 'view-conceal-symbolic', () => {
+            patchBar(settings, this._index, {autohide: !bar.autohide});
+        }));
+        if (readBars(settings).length > 1)
+            box.add_child(this._action('Remove bar', 'user-trash-symbolic', () => removeBar(settings, this._index)));
+        return box;
+    }
+
+    _moduleSettingsMenu(id) {
+        const settings = this._overlay._settings;
+        const members = this._state.modules.filter(item => item.id === id || item.group === id);
+        const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 8px;'});
+        if (members.some(item => item.id === 'logo') || id === 'logo') {
+            for (const [action, title] of [['launcher', 'Bezel launcher'], ['overview', 'GNOME Overview'], ['apps', 'App grid']])
+                box.add_child(this._action(title, 'start-here-symbolic', () => patchBar(settings, this._index, {logoAction: action})));
+        }
+        if (members.some(item => item.id === 'date') || id === 'date') {
+            const current = barDateFormat(readBars(settings)[this._index], settings);
+            for (const [key, item] of Object.entries(DATE_FORMATS))
+                box.add_child(this._action(key === current ? `${item.label} · on` : item.label, 'x-office-calendar-symbolic', () => patchBar(settings, this._index, {dateFormat: key})));
+        }
+        if (members.some(item => item.id === 'clock') || id === 'clock')
+            this._timeActions(box, readBars(settings)[this._index]);
+        if (id === 'dashboard' || members.some(item => item.id === 'dashboard'))
+            this._dashboardClockActions(box);
+        if (members.some(item => item.id === 'battery') || id === 'battery') {
+            const shown = readBars(settings)[this._index].batteryPercentage === true;
+            box.add_child(this._action(shown ? 'Hide battery percentage' : 'Show battery percentage', 'battery-symbolic', () => {
+                patchBar(settings, this._index, {batteryPercentage: !shown});
+            }));
+        }
+        const group = barGroups(readBars(settings)[this._index]).find(item => item.id === id);
+        if (group) {
+            box.add_child(this._action('Ungroup · keep contents', 'edit-clear-symbolic', () => deleteGroup(settings, this._index, id)));
+            for (const member of members) {
+                box.add_child(this._action(`Remove ${isSpacer(member.id) ? 'empty space' : member.id} from group`, 'list-remove-symbolic', () => assignGroup(settings, this._index, member.id, '')));
+                if (isSpacer(member.id)) this._spacerMenu(box, member);
+            }
+            for (const item of readBars(settings)[this._index].modules.filter(item => item.group !== id))
+                box.add_child(this._action(`Add ${isSpacer(item.id) ? 'empty space' : item.id} to group`, 'list-add-symbolic', () => assignGroup(settings, this._index, item.id, id)));
+            box.add_child(this._action('Add empty space to group', 'list-add-symbolic', () => {
+                const before = new Set(readBars(settings)[this._index].modules.map(item => item.id));
+                addModule(settings, this._index, 'spacer', members[0]?.place ?? 'center');
+                const added = readBars(settings)[this._index].modules.find(item => !before.has(item.id));
+                if (added) assignGroup(settings, this._index, added.id, id);
+            }));
+        } else {
+            if (isSpacer(id)) this._spacerMenu(box, members[0]);
+            box.add_child(this._action('Create group with this item', 'list-add-symbolic', () => createGroup(settings, this._index, 'New group', [id])));
+            for (const candidate of barGroups(readBars(settings)[this._index]))
+                box.add_child(this._action(`Move to ${candidate.name}`, 'list-add-symbolic', () => assignGroup(settings, this._index, id, candidate.id)));
+            box.add_child(this._action('Remove item', 'user-trash-symbolic', () => removeModule(settings, this._index, id)));
+        }
+        this._layoutActions(box, id);
+        return box;
+    }
+
+    _layoutActions(box, id) {
+        const settings = this._overlay._settings;
+        const bar = readBars(settings)[this._index];
+        const item = bar?.modules.find(module => module.id === id || module.group === id);
+        if (!item)
+            return;
+        const place = item.place || 'center';
+        box.add_child(new St.Label({text: 'On the bar', style: `color: ${this._theme.muted};`}));
+        for (const spot of ['start', 'center', 'end'])
+            box.add_child(this._action(spot === place ? `${spot[0].toUpperCase()}${spot.slice(1)} · here` : `${spot[0].toUpperCase()}${spot.slice(1)}`, 'object-flip-horizontal-symbolic', () => this._setModulePlace(id, spot)));
+        box.add_child(this._action('Earlier', 'go-up-symbolic', () => this._nudgeModule(id, -1)));
+        box.add_child(this._action('Later', 'go-down-symbolic', () => this._nudgeModule(id, 1)));
+    }
+
+    _setModulePlace(id, place) {
+        const settings = this._overlay._settings;
+        const bars = readBars(settings);
+        const bar = bars[this._index];
+        if (!bar)
+            return;
+        bar.modules = bar.modules.map(module => module.id === id || module.group === id ? {...module, place} : module);
+        bar.groups = barGroups(bar).map(group => group.id === id ? {...group, place} : group);
+        saveBars(settings, bars);
+    }
+
+    _nudgeModule(id, delta) {
+        nudgeUnit(this._overlay._settings, this._index, id, delta);
+    }
+
+    _timeActions(box, bar) {
+        const settings = this._overlay._settings;
+        const gnome = new Gio.Settings({schema_id: 'org.gnome.desktop.interface'}).get_string('clock-format');
+        const format = barTimeFormat(bar, gnome);
+        box.add_child(this._action(format === '12h' ? 'Use 24-hour time' : 'Use 12-hour time', 'preferences-system-time-symbolic', () => patchBar(settings, this._index, {timeFormat: format === '12h' ? '24h' : '12h'})));
+        box.add_child(this._action(bar.clockSeconds ? 'Hide seconds' : 'Show seconds', 'appointment-soon-symbolic', () => patchBar(settings, this._index, {clockSeconds: !bar.clockSeconds})));
+    }
+
+    _dashboardClockActions(box) {
+        const settings = this._overlay._settings;
+        const date = settingChoice(settings, 'dashboard-date-format', 'long', Object.keys(DATE_FORMATS));
+        for (const [key, item] of Object.entries(DATE_FORMATS))
+            box.add_child(this._action(key === date ? `Dashboard · ${item.label} · on` : `Dashboard · ${item.label}`, 'x-office-calendar-symbolic', () => settings.set_string('dashboard-date-format', key)));
+        const time = settingChoice(settings, 'dashboard-time-format', '24h', ['24h', '12h']);
+        box.add_child(this._action(time === '12h' ? 'Dashboard · 24-hour time' : 'Dashboard · 12-hour time', 'preferences-system-time-symbolic', () => settings.set_string('dashboard-time-format', time === '12h' ? '24h' : '12h')));
+        const seconds = settingFlag(settings, 'dashboard-clock-seconds');
+        box.add_child(this._action(seconds ? 'Dashboard · hide seconds' : 'Dashboard · show seconds', 'appointment-soon-symbolic', () => settings.set_boolean('dashboard-clock-seconds', !seconds)));
+    }
+
+    _spacerMenu(box, item) {
+        if (!item) return;
+        box.add_child(new St.Label({text: `Empty space · ${item.size} px`}));
+        for (const delta of [-8, 8])
+            box.add_child(this._action(delta < 0 ? 'Shrink space (−8 px)' : 'Grow space (+8 px)',
+                delta < 0 ? 'list-remove-symbolic' : 'list-add-symbolic', () => {
+                    const current = readBars(this._overlay._settings)[this._index]?.modules.find(module => module.id === item.id);
+                    if (current) resizeSpacer(this._overlay._settings, this._index, item.id, current.size + delta);
+                }));
+    }
+
+    _addMenu(place) {
+        const settings = this._overlay._settings;
+        const bar = readBars(settings)[this._index];
+        const used = new Set(bar.modules.map(item => item.id));
+        const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 8px;'});
+        box.add_child(this._action('Create group', 'list-add-symbolic', () => createGroup(settings, this._index, 'New group', [], place)));
+        for (const group of barGroups(bar))
+            box.add_child(this._action(`Remove group: ${group.name} · keep contents`, 'edit-clear-symbolic', () => deleteGroup(settings, this._index, group.id)));
+        box.add_child(this._action('Empty space', 'content-loading-symbolic', () => addModule(settings, this._index, 'spacer', place)));
+        for (const [id, title] of MODULES) {
+            if (!used.has(id))
+                box.add_child(this._action(title, 'list-add-symbolic', () => addModule(settings, this._index, id, place)));
+        }
+        return box;
+    }
+
+    _attachZone(zone, place, pinParent = null) {
         this._alignZone(zone, place);
-        if (pinParent && scrollParent) {
-            if (!zone.get_n_children()) {
-                zone.destroy();
-                return null;
-            }
-            if (this._placeInOrder(zone, pinParent, () => {
-                if (this._dockViewport.get_parent() !== pinParent)
-                    pinParent.add_child(this._dockViewport);
-                this._appViewport = this._dockViewport;
-            })) {
-                scrollParent.add_child(zone);
-                return this._appViewport;
-            }
-            const pinned = zone.get_children().some(child => this._isPinnedChrome(child));
-            if (pinned)
+        const apps = this._appsRow;
+        const holdsApps = apps && zone.contains(apps);
+        if (holdsApps) {
+            this._appsZone = zone;
+            this._appsPlace = place;
+            this._centerApps = place === 'center';
+            const parent = apps.get_parent();
+            const index = parent.get_children().indexOf(apps);
+            parent.remove_child(apps);
+            const view = pinParent ? this._dockViewport : this._appsClip();
+            const scroll = view._bezelScroll ?? view;
+            for (const child of [...scroll.get_children()])
+                if (child !== apps)
+                    scroll.remove_child(child);
+            if (apps.get_parent() !== scroll)
+                scroll.add_child(apps);
+            apps.x_expand = false;
+            apps.y_expand = false;
+            parent.insert_child_at_index(view, index);
+            this._appViewport = view;
+        }
+        // Each zone is one packed row. Extra apps space is balanced around
+        // the visible contents while the viewport owns the trailing edge.
+        zone.x_expand = this._vertical;
+        zone.y_expand = !this._vertical;
+        if (pinParent) {
+            zone._bezelEdge = place;
+            if (zone.get_n_children())
                 pinParent.add_child(zone);
-            else {
-                if (this._dockViewport.get_parent() !== pinParent)
-                    pinParent.add_child(this._dockViewport);
-                scrollParent.add_child(zone);
-            }
             return null;
         }
-        const shell = new St.BoxLayout({
-            orientation: this._actor.orientation, x_expand: true, y_expand: true, style: 'spacing: 12px;',
-        });
-        this._alignZone(shell, place);
-        if (this._placeInOrder(zone, shell, () => {
+        if (!holdsApps) {
+            this._alignZone(zone, place);
             const cell = this._scrollView();
-            shell.add_child(cell);
-            this._appViewport = cell;
-        })) {
-            this._appViewport.set_child(zone);
-            return shell;
+            cell.set_child(zone);
+            return cell;
         }
-        const cell = this._scrollView();
-        cell.set_child(zone);
+        const cell = new St.Widget({layout_manager: new Clutter.BinLayout(),
+            x_expand: false, y_expand: false, clip_to_allocation: true});
+        cell.add_child(zone);
+        cell._bezelPack = zone;
         return cell;
+    }
+
+    // The outer widget is the size of the visible window. The scroll view is
+    // forced to that window, while the icon row keeps its real length inside it.
+    _appsClip() {
+        const scroll = new St.ScrollView({
+            clip_to_allocation: true,
+            overlay_scrollbars: true,
+            reactive: true,
+            x_expand: true,
+            y_expand: true,
+            hscrollbar_policy: this._vertical ? St.PolicyType.NEVER : St.PolicyType.AUTOMATIC,
+            vscrollbar_policy: this._vertical ? St.PolicyType.AUTOMATIC : St.PolicyType.NEVER,
+        });
+        try {
+            scroll.set_mouse_scrolling(false);
+        } catch {
+            /* Older Shell builds only expose the property. */
+        }
+        const clip = new St.Widget({
+            clip_to_allocation: true,
+            layout_manager: new Clutter.BinLayout(),
+            reactive: true,
+            x_expand: false,
+            y_expand: false,
+        });
+        scroll.x_align = Clutter.ActorAlign.FILL;
+        scroll.y_align = Clutter.ActorAlign.FILL;
+        clip.add_child(scroll);
+        clip._bezelScroll = scroll;
+        return clip;
+    }
+
+    _appsAdjustment() {
+        const scroll = this._appViewport?._bezelScroll ?? this._appViewport;
+        if (!scroll)
+            return null;
+        return this._vertical ? scroll.vadjustment : scroll.hadjustment;
+    }
+
+    _scrollAppsBy(steps) {
+        const adjustment = this._appsAdjustment();
+        if (!adjustment || !steps)
+            return false;
+        const lower = adjustment.lower;
+        const limit = adjustment.upper - adjustment.page_size;
+        if (!(limit > lower + 0.5))
+            return false;
+        const stride = (this._state.iconSize || 22) + (this._state.appSpacing || 0) + 10;
+        adjustment.value = clamp(adjustment.value + steps * stride, lower, limit);
+        this._appsOffset = adjustment.value;
+        this._appsScrollPin = adjustment.page_size;
+        return true;
     }
 
     _scrollView() {
         const view = new St.ScrollView({
-            clip_to_allocation: true, overlay_scrollbars: true, x_expand: true, y_expand: true,
-            hscrollbar_policy: this._vertical ? St.PolicyType.NEVER : St.PolicyType.EXTERNAL,
-            vscrollbar_policy: this._vertical ? St.PolicyType.EXTERNAL : St.PolicyType.NEVER,
+            clip_to_allocation: true, overlay_scrollbars: true, reactive: false,
+            x_expand: false, y_expand: false,
+            hscrollbar_policy: St.PolicyType.NEVER,
+            vscrollbar_policy: St.PolicyType.NEVER,
         });
         this._wireHorizontalScroll(view);
         return view;
@@ -566,19 +933,14 @@ class Bar {
 
     _wireHorizontalScroll(view) {
         if (this._vertical) return;
-        // St otherwise handles the wheel first and moves the vertical adjustment
-        // even when its scrollbar is hidden. Own scrolling on horizontal bars.
         view.set_mouse_scrolling(false);
         view.connect('scroll-event', (_actor, event) => {
             view.vadjustment.value = view.vadjustment.lower;
             const adjustment = view.hadjustment;
             const limit = adjustment.upper - adjustment.page_size;
             if (limit <= adjustment.lower) return Clutter.EVENT_PROPAGATE;
-            let delta = scrollStep(event);
-            if (event.get_scroll_direction() === Clutter.ScrollDirection.SMOOTH) {
-                const [dx, dy] = event.get_scroll_delta();
-                delta = Math.abs(dx) > Math.abs(dy) ? dx : dy;
-            }
+            const delta = scrollStep(event);
+            if (!delta) return Clutter.EVENT_PROPAGATE;
             adjustment.value = clamp(adjustment.value + delta * (this._state.iconSize + this._state.appSpacing + 10),
                 adjustment.lower, limit);
             this._cancel('_appHover');
@@ -735,7 +1097,400 @@ class Bar {
         this[key] = 0;
     }
 
-    _place() {
+    _boxSpacing(actor) {
+        const match = /spacing:\s*(\d+(?:\.\d+)?)/.exec(actor?.style ?? '');
+        return match ? Number(match[1]) : 0;
+    }
+
+    _longPreferred(actor) {
+        return this._vertical ? actor.get_preferred_height(-1) : actor.get_preferred_width(-1);
+    }
+
+    // Sum the real contents. A scroll view reports the space it was last given,
+    // which kept the apps clipped while empty space sat beside them.
+    _contentSpan(actor, depth = 0, raw = false) {
+        if (!actor || depth > 14)
+            return 0;
+        try {
+            if (actor._bezelBalance || actor.visible === false)
+                return 0;
+            if (actor === this._appViewport && this._appsRow) {
+                const inner = this._iconRowSpan(this._appsRow);
+                return raw ? inner : Math.max(0, this._appsLimit(inner) - this._appsLeadingSpace());
+            }
+            if (actor._bezelPack)
+                return this._contentSpan(actor._bezelPack, depth + 1, raw);
+            if (actor._bezelApps)
+                return this._iconRowSpan(actor);
+            if (actor instanceof St.ScrollView) {
+                const inner = this._contentSpan(actor.child ?? actor.get_child?.(), depth + 1, raw);
+                return !raw && actor === this._appViewport
+                    ? this._appsLimit(inner) - this._appsLeadingSpace() : inner;
+            }
+            if (actor instanceof St.Button) {
+                const [, size] = this._longPreferred(actor);
+                return size || 0;
+            }
+            const children = actor.get_n_children?.() > 0 ? actor.get_children() : [];
+            if (children.length && actor instanceof St.BoxLayout) {
+                let total = 0;
+                let shown = 0;
+                for (const child of children) {
+                    if (child.visible === false)
+                        continue;
+                    total += this._contentSpan(child, depth + 1, raw);
+                    shown++;
+                }
+                return total + Math.max(0, shown - 1) * this._boxSpacing(actor) +
+                    (!raw && actor === this._appsZone ? this._appsLeadingSpace() : 0);
+            }
+            const [, size] = this._longPreferred(actor);
+            return size || 0;
+        } catch {
+            return 0;
+        }
+    }
+
+    // The apps row is the icons themselves. A stretched allocation would leave
+    // a gap after the last icon and would not shrink when an app closes.
+    _iconRowSpan(box) {
+        const icons = box.get_children().filter(child => child.visible !== false);
+        const count = icons.length;
+        if (!count)
+            return 0;
+        const each = (this._state.iconSize || 22) + 16;
+        const stretched = Math.max(each * 4, 180);
+        let total = 0;
+        for (const icon of icons) {
+            let size = 0;
+            try {
+                size = this._longPreferred(icon)[1] || 0;
+            } catch {
+                size = 0;
+            }
+            total += size > 0 && size <= stretched ? size : each;
+        }
+        return total + Math.max(0, count - 1) * (this._state.appSpacing || 0);
+    }
+
+    // 0 follows the icons. A longer drag is a minimum and still grows when more apps open.
+    // A shorter drag is a cap, and the apps scroll inside it.
+    _appsLimit(natural) {
+        const chosen = this._chosenApps();
+        if (!chosen)
+            return natural;
+        return this._layoutAppsCap ? chosen : Math.max(chosen, natural);
+    }
+
+    _appsLeadingSpace() {
+        if (!this._appsRow || this._appsPlace === 'start')
+            return 0;
+        const natural = this._iconRowSpan(this._appsRow);
+        const extra = Math.max(0, this._appsLimit(natural) - natural);
+        if (!extra)
+            return 0;
+        return this._appsPlace === 'end' ? extra : extra / 2;
+    }
+
+    _sizeAppsViewport(room, cross) {
+        const view = this._appViewport ?? this._dockViewport;
+        const natural = this._contentSpan(view, 0, true);
+        const desired = Math.max(1, this._appsLimit(natural));
+        // A minimum reserves a total footprint, shared before the logo and
+        // after the apps. Closing apps cannot make the dock grow wider.
+        const footprint = Math.max(1, Math.min(desired, room));
+        const extra = Math.max(0, footprint - natural);
+        const leading = this._appsPlace === 'end' ? extra : this._centerApps ? extra / 2 : 0;
+        const length = footprint - leading;
+        if (this._appsZone) {
+            const side = this._vertical ? 'top' : 'left';
+            this._appsZone.style = `spacing: 12px; padding-${side}: ${leading}px;`;
+            this._applyAppsAlign(this._appsZone);
+        }
+        view.x_expand = false;
+        view.y_expand = false;
+        view.clip_to_allocation = true;
+        view._bezelCap = length;
+        this._applyAppsAlign(view);
+        view.set_size(this._vertical ? cross : length, this._vertical ? length : cross);
+        this._syncAppsScrollRange(length);
+        return length + leading;
+    }
+
+    _placeAppsRow() {
+        const row = this._appsRow;
+        if (!row)
+            return;
+        // A forced length makes the scroll view think the icons already fit.
+        row.x_expand = false;
+        row.y_expand = false;
+        row.translation_x = 0;
+        row.translation_y = 0;
+        try {
+            if (this._vertical)
+                row.set_height(-1);
+            else
+                row.set_width(-1);
+        } catch {
+            /* The row keeps whatever size the icons ask for. */
+        }
+    }
+
+    // Start hugs the start of its section, end hugs the end. Only the center floats in the middle.
+    _applyAppsAlign(actor) {
+        if (!actor)
+            return;
+        const along = this._appsPlace === 'end' ? Clutter.ActorAlign.END
+            : this._appsPlace === 'start' ? Clutter.ActorAlign.START
+            : Clutter.ActorAlign.CENTER;
+        if (this._vertical) {
+            actor.x_align = Clutter.ActorAlign.CENTER;
+            actor.y_align = along;
+        } else {
+            actor.x_align = along;
+            actor.y_align = Clutter.ActorAlign.CENTER;
+        }
+    }
+
+    // The row has to keep its real length, or a short viewport has nothing to scroll.
+    _syncAppsScrollRange(length) {
+        const row = this._appsRow;
+        if (!row)
+            return;
+        const capped = this._layoutAppsCap && this._chosenApps() > 0;
+        if (!capped)
+            this._appsOffset = 0;
+        else if (this._appsPlace === 'end' && this._appsScrollPin !== length)
+            this._appsOffset = Number.MAX_SAFE_INTEGER;
+        this._appsScrollPin = capped ? length : 0;
+        this._placeAppsRow();
+        this._queueAppsOffset();
+    }
+
+    _queueAppsOffset() {
+        if (this._destroyed || this._appsOffsetLater)
+            return;
+        this._appsOffsetLater = global.compositor.get_laters().add(Meta.LaterType.BEFORE_REDRAW, () => {
+            this._appsOffsetLater = 0;
+            this._applyAppsOffset();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _applyAppsOffset() {
+        const adjustment = this._appsAdjustment();
+        if (!adjustment)
+            return;
+        const lower = adjustment.lower;
+        const limit = adjustment.upper - adjustment.page_size;
+        if (!(limit > lower + 0.5))
+            return;
+        adjustment.value = clamp(this._appsOffset || 0, lower, limit);
+        this._appsOffset = adjustment.value;
+    }
+
+    _sectionSpans() {
+        const view = this._dockViewport;
+        const content = this._dockContent;
+        if (content && view && view.get_parent() === content) {
+            const children = content.get_children().filter(child => child.visible !== false);
+            const index = children.indexOf(view);
+            const before = children.slice(0, Math.max(0, index)).reduce((sum, child) => sum + this._contentSpan(child), 0);
+            const after = index < 0 ? 0 : children.slice(index + 1).reduce((sum, child) => sum + this._contentSpan(child), 0);
+            return [before, this._contentSpan(view), after];
+        }
+        const cells = this._cells ?? [];
+        if (cells.length === 3)
+            return cells.map(cell => this._contentSpan(cell));
+        return ['start', 'center', 'end'].map(place => this._contentSpan(this._zones?.[place]));
+    }
+
+    _fitDock(outerW, outerH) {
+        const content = this._dockContent;
+        const view = this._dockViewport;
+        if (!content || !view || !content.contains(view))
+            return;
+        for (const child of [...content.get_children()])
+            if (child._bezelBalance)
+                content.remove_child(child);
+        const children = content.get_children().filter(child => child.visible !== false);
+        const apps = Math.max(1, this._contentSpan(view));
+        const others = Math.max(0, this._contentSpan(content) - apps - this._appsLeadingSpace() -
+            this._boxSpacing(content) * Math.max(0, children.length - 1));
+        for (const child of children) {
+            if (child === view)
+                continue;
+            child.x_expand = false;
+            child.y_expand = false;
+            child.x_align = Clutter.ActorAlign.CENTER;
+            child.y_align = Clutter.ActorAlign.CENTER;
+        }
+        const gaps = this._boxSpacing(content) * Math.max(0, children.length - 1);
+        const along = Math.max(1, this._vertical ? outerH : outerW);
+        const cross = Math.max(1, this._vertical ? outerW : outerH);
+        const room = Math.max(1, along - others - gaps);
+        const appsSpan = this._sizeAppsViewport(room, cross);
+        const pinEdge = this._appsPlace === 'start' || this._appsPlace === 'end';
+        if (pinEdge) {
+            this._anchorDockCenter(content, along, cross);
+            return;
+        }
+        let packed = Math.min(along, others + appsSpan + gaps);
+        const centerIndex = children.findIndex(child => child._bezelEdge === 'center');
+        let padding = '';
+        if (centerIndex >= 0) {
+            const sideSpan = side => side.reduce((sum, child) => sum + this._contentSpan(child), 0) +
+                side.length * this._boxSpacing(content);
+            const before = sideSpan(children.slice(0, centerIndex));
+            const after = sideSpan(children.slice(centerIndex + 1));
+            const balance = Math.abs(before - after);
+            if (packed + balance <= along) {
+                const side = this._vertical ? (before < after ? 'top' : 'bottom')
+                    : (before < after ? 'left' : 'right');
+                padding = ` padding-${side}: ${balance}px;`;
+                packed += balance;
+            }
+        }
+        content.style = `spacing: 12px;${padding}`;
+        // Center the packed row; requested apps space is already inside view.
+        content.x_expand = this._vertical;
+        content.y_expand = !this._vertical;
+        content.x_align = Clutter.ActorAlign.CENTER;
+        content.y_align = Clutter.ActorAlign.CENTER;
+        content.set_size(this._vertical ? cross : packed, this._vertical ? packed : cross);
+    }
+
+    // Apps stay on the start or end edge. The center group stays on the bar midpoint,
+    // so a shorter apps window must not drag that group with it.
+    _anchorDockCenter(content, along, cross) {
+        const startZone = content.get_children().find(child => child._bezelEdge === 'start');
+        const centerZone = content.get_children().find(child => child._bezelEdge === 'center');
+        const endZone = content.get_children().find(child => child._bezelEdge === 'end');
+        const placeZone = (zone, edge) => {
+            if (!zone)
+                return;
+            const alongAlign = edge === 'end' ? Clutter.ActorAlign.END
+                : edge === 'center' ? Clutter.ActorAlign.CENTER
+                : Clutter.ActorAlign.START;
+            zone.x_expand = false;
+            zone.y_expand = false;
+            if (this._vertical) {
+                zone.x_align = Clutter.ActorAlign.CENTER;
+                zone.y_align = alongAlign;
+            } else {
+                zone.x_align = alongAlign;
+                zone.y_align = Clutter.ActorAlign.CENTER;
+            }
+        };
+        placeZone(startZone, 'start');
+        placeZone(centerZone, 'center');
+        placeZone(endZone, 'end');
+        const spanOf = zone => zone ? this._contentSpan(zone) : 0;
+        const fitZone = zone => {
+            if (!zone)
+                return;
+            const need = Math.max(1, Math.round(spanOf(zone)));
+            if (this._vertical)
+                zone.set_height(need);
+            else
+                zone.set_width(need);
+        };
+        fitZone(startZone);
+        fitZone(centerZone);
+        fitZone(endZone);
+        const startSpan = spanOf(startZone);
+        const centerSpan = spanOf(centerZone);
+        const endSpan = spanOf(endZone);
+        if (!centerZone) {
+            const spacer = new St.Widget({
+                x_expand: !this._vertical, y_expand: this._vertical,
+            });
+            spacer._bezelBalance = true;
+            const endAt = content.get_children().findIndex(child => child._bezelEdge === 'end');
+            content.insert_child_at_index(spacer, endAt < 0 ? content.get_n_children() : endAt);
+            content.style = 'spacing: 12px;';
+        } else {
+            const gap = 12;
+            const earliest = startSpan + (startZone ? gap : 0);
+            const latest = along - endSpan - (endZone ? gap : 0) - centerSpan;
+            let centerTop = (along - centerSpan) / 2;
+            if (latest >= earliest)
+                centerTop = clamp(centerTop, earliest, latest);
+            else
+                centerTop = earliest;
+            const before = Math.max(0, centerTop - startSpan);
+            const after = Math.max(0, along - endSpan - centerTop - centerSpan);
+            const spacer = size => {
+                const widget = new St.Widget({x_expand: false, y_expand: false});
+                widget._bezelBalance = true;
+                const length = Math.max(1, Math.round(size));
+                widget.set_size(this._vertical ? 1 : length, this._vertical ? length : 1);
+                return widget;
+            };
+            content.style = 'spacing: 0;';
+            const centerAt = content.get_children().indexOf(centerZone);
+            if (before > 0)
+                content.insert_child_at_index(spacer(before), centerAt);
+            if (after > 0)
+                content.insert_child_at_index(spacer(after), content.get_children().indexOf(centerZone) + 1);
+        }
+        content.x_expand = true;
+        content.y_expand = true;
+        content.set_size(this._vertical ? cross : along, this._vertical ? along : cross);
+    }
+
+    // The side cell is tall so the center group can sit on the bar midpoint.
+    // The apps themselves stay only as tall as their window and hug the outer edge.
+    _pinEdgeZones() {
+        const place = this._appsPlace;
+        const zone = this._appsZone;
+        if (!zone || this._dockContent || (place !== 'start' && place !== 'end'))
+            return;
+        const need = Math.max(1, Math.round(this._contentSpan(zone)));
+        const edge = place === 'end' ? Clutter.ActorAlign.END : Clutter.ActorAlign.START;
+        // BinLayout honors ActorAlign on expanding axes; otherwise its default
+        // CENTER alignment moves the whole pack inward when the apps shrink.
+        // The explicit size below keeps the pack compact within the full cell.
+        zone.x_expand = true;
+        zone.y_expand = true;
+        if (this._vertical) {
+            zone.x_align = Clutter.ActorAlign.CENTER;
+            zone.y_align = edge;
+            zone.set_height(need);
+        } else {
+            zone.y_align = Clutter.ActorAlign.CENTER;
+            zone.x_align = edge;
+            zone.set_width(need);
+        }
+    }
+
+    _stickOuterEdge() {
+        const place = this._appsPlace;
+        if ((place !== 'start' && place !== 'end') || this._dockContent)
+            return;
+        const cells = this._cells ?? [];
+        if (cells.length < 3)
+            return;
+        const outerPlace = place === 'start' ? 'end' : 'start';
+        const cell = cells[outerPlace === 'end' ? 2 : 0];
+        const zone = this._zones?.[outerPlace];
+        if (!cell || !zone)
+            return;
+        const along = cell._bezelAlong || 0;
+        const need = this._contentSpan(zone);
+        const pad = outerPlace === 'end' ? Math.max(0, Math.round(along - need)) : 0;
+        const side = this._vertical ? 'top' : 'left';
+        zone.style = `spacing: 12px; padding-${side}: ${pad}px;`;
+    }
+
+    _place(overrides = null) {
+        overrides ??= this._geomDrag?.pending;
+        this._layoutApps = overrides && overrides.appsLength != null
+            ? overrides.appsLength
+            : (this._state.appsLength || 0);
+        this._layoutAppsCap = overrides && overrides.appsCap != null
+            ? overrides.appsCap === true
+            : this._state.appsCap === true;
         let {x, y, width, height} = this._monitor;
         // Attached vertical rails own the corners; horizontal bars fit between them.
         if (!this._vertical) {
@@ -747,7 +1502,7 @@ class Bar {
             x += left;
         }
         const edge = this._state.edge;
-        const span = this._state.thickness;
+        const span = overrides?.thickness ?? this._state.thickness;
         let px = x;
         let py = y;
         let w = width;
@@ -763,23 +1518,24 @@ class Bar {
             py = y + height - span;
             h = span;
         }
-        const margin = this._state.margin;
+        const margin = overrides?.margin ?? this._state.margin;
         const maxLength = (this._vertical ? height : width) - margin * 2;
-        let length = maxLength * this._state.length / 100;
-        if (this._state.kind === 'dock' && this._state.fitContent) {
-            // Measure each piece from its icons. The viewport keeps the last
-            // allocated size, so using that neither grows for a new app nor
-            // shrinks when one closes.
-            let natural = 0;
-            const pieces = this._dockContent.get_children();
-            for (const child of pieces) {
-                const actor = child === this._dockViewport ? this._dockScroll : child;
-                const [, size] = this._vertical ? actor.get_preferred_height(-1) : actor.get_preferred_width(-1);
-                natural += size;
-            }
-            natural += Math.max(0, pieces.length - 1) * 12;
-            length = Math.min(maxLength, Math.max(span, this._state.dockMinLength, natural + 28));
-        }
+        const configured = maxLength * (overrides?.length ?? this._state.length) / 100;
+        const [startSize, centerSize, endSize] = this._sectionSpans();
+        const dockReal = this._dockContent?.get_children().filter(child => !child._bezelBalance && child.visible !== false) ?? [];
+        const dockGaps = this._dockContent
+            ? this._boxSpacing(this._dockContent) * Math.max(0, dockReal.length - 1) : 0;
+        const packed = startSize + centerSize + endSize + dockGaps + 28;
+        const centered = 2 * Math.max(startSize, endSize) + centerSize + 28;
+        // Reserve symmetric room around the center group when it fits.
+        // Requested extra apps length remains part of that group.
+        const needed = Math.max(packed, centered + dockGaps);
+        let length = configured;
+        if (this._state.kind === 'dock' && this._state.fitContent)
+            length = Math.max(span, overrides?.dockMinLength ?? this._state.dockMinLength, needed);
+        else if (this._state.kind !== 'dock')
+            length = Math.max(configured, needed);
+        length = Math.min(maxLength, length);
         if (this._vertical) {
             py = y + (height - length) / 2;
             h = length;
@@ -796,12 +1552,365 @@ class Bar {
             this._dockContent.set_size(Math.max(1, w - 12), Math.max(1, h - 12));
         else
             this._dockViewport?.set_size(Math.max(1, w - 12), Math.max(1, h - 12));
-        // Bound overflow to each zone without wasting empty horizontal sections.
-        const widths = !this._vertical && this._state.kind !== 'dock'
-            ? horizontalZoneWidths(w - 28, Object.values(this._zones).map(zone => zone.get_preferred_width(h - 12)[1])) : [];
-        for (const [index, cell] of (this._cells ?? []).entries())
-            cell.set_size(this._vertical ? Math.max(1, w - 12) : widths[index],
-                this._vertical ? Math.max(1, (h - 28) / 3) : Math.max(1, h - 12));
+        this._fitDock(Math.max(1, w - 12), Math.max(1, h - 12));
+        const available = (this._vertical ? h : w) - 28;
+        const sizes = horizontalZoneWidths(available, [startSize, centerSize, endSize]);
+        for (const [index, cell] of (this._cells ?? []).entries()) {
+            const pinned = (this._appsPlace === 'start' || this._appsPlace === 'end')
+                && (cell === this._appViewport || cell.contains?.(this._appViewport));
+            cell.x_expand = this._vertical && !pinned;
+            cell.y_expand = !this._vertical && !pinned;
+            cell._bezelAlong = sizes[index];
+            cell.set_size(this._vertical ? Math.max(1, w - 12) : sizes[index],
+                this._vertical ? sizes[index] : Math.max(1, h - 12));
+        }
+        this._stickOuterEdge();
+        this._alignAppsContents();
+        this._pinEdgeZones();
+        this._layoutEditHandles();
+    }
+
+    _chosenApps() {
+        const value = Number(this._layoutApps);
+        return value > 0 ? clamp(Math.round(value), 48, 2400) : 0;
+    }
+
+    // Icons stay against the logo; excess space is balanced around the visible row.
+    _alignAppsContents() {
+        const view = this._appViewport;
+        if (!view)
+            return;
+        view.reactive = true;
+        view.clip_to_allocation = true;
+        this._applyAppsAlign(view);
+        const child = this._appsRow;
+        if (child) {
+            child.x_expand = false;
+            child.y_expand = false;
+        }
+        const parent = view.get_parent();
+        if (parent && parent !== this._actor && !this._dockContent && this._box) {
+            const cell = this._cells.find(candidate => candidate.contains(view));
+            const pack = cell?._bezelPack;
+            const budget = cell?._bezelAlong ?? 1;
+            const others = pack ? Math.max(0, this._contentSpan(pack) - this._contentSpan(view) - this._appsLeadingSpace()) : 0;
+            const room = Math.max(1, budget - others);
+            const cross = Math.max(1, this._vertical ? this._box.width - 12 : this._box.height - 12);
+            this._sizeAppsViewport(room, cross);
+        }
+        if (!this._appsAllocWatch) {
+            this._appsAllocWatch = view.connect('notify::allocation', () => {
+                this._queueAppsHandle();
+                this._applyAppsOffset();
+            });
+            this._signals.push([view, this._appsAllocWatch]);
+        }
+    }
+
+    _ensureEditHandles() {
+        if (!this._state.editMode || this._editHandles)
+            return;
+        const make = (name, mark) => {
+            const button = new St.Button({
+                label: mark,
+                reactive: true,
+                can_focus: true,
+                width: 22,
+                height: 22,
+                accessible_name: name,
+                style: `background-color: ${this._theme.accent}; color: ${this._theme.bg}; border: 2px solid ${this._theme.bg}; border-radius: 11px; font-size: 12px; font-weight: bold;`,
+            });
+            chrome(button, true);
+            return button;
+        };
+        const end = make('Drag along the bar to change its length, or across it to change thickness', this._vertical ? '↕' : '↔');
+        const gap = make('Drag to move the bar from the edge', this._vertical ? '↔' : '↕');
+        end.connect('button-press-event', (_actor, event) => this._beginGeom(event, 'size'));
+        gap.connect('button-press-event', (_actor, event) => this._beginGeom(event, 'distance'));
+        const apps = new St.Button({
+            label: '–',
+            reactive: true,
+            can_focus: true,
+            width: 48,
+            height: 14,
+            accessible_name: 'Drag this edge to set where the apps stop',
+            style: `background-color: ${this._theme.accent}; color: ${this._theme.bg}; border: 2px solid ${this._theme.bg}; border-radius: 8px; font-size: 11px; font-weight: bold;`,
+        });
+        chrome(apps, true);
+        apps.connect('button-press-event', (_actor, event) => this._beginGeom(event, 'apps'));
+        apps.visible = false;
+        this._editHandles = {end, gap, apps};
+        this._layoutEditHandles();
+    }
+
+    _layoutEditHandles() {
+        const handles = this._editHandles;
+        const box = this._box;
+        if (!handles || !box)
+            return;
+        const size = 22;
+        const edge = this._state.edge;
+        const monitor = this._monitor;
+        const place = (button, px, py) => button.set_position(
+            Math.round(clamp(px, monitor.x + 4, monitor.x + monitor.width - size - 4)),
+            Math.round(clamp(py, monitor.y + 4, monitor.y + monitor.height - size - 4)));
+        if (this._vertical) {
+            place(handles.end, box.x + (box.width - size) / 2, box.y + box.height - size * 0.35);
+            place(handles.gap, edge === 'left' ? box.x - size - 6 : box.x + box.width + 6, box.y + box.height - size * 2 - 8);
+        } else {
+            place(handles.end, box.x + box.width - size * 0.35, box.y + (box.height - size) / 2);
+            place(handles.gap, box.x + box.width - size * 2 - 8, edge === 'top' ? box.y - size - 6 : box.y + box.height + 6);
+        }
+        this._queueAppsHandle();
+    }
+
+    _queueAppsHandle() {
+        if (this._destroyed || !this._editHandles?.apps || this._appsHandleLater)
+            return;
+        // Runs after the entire actor tree has allocated, including parent moves.
+        this._appsHandleLater = global.compositor.get_laters().add(Meta.LaterType.BEFORE_REDRAW, () => {
+            this._appsHandleLater = 0;
+            this._snapAppsHandle();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _placeAppsHandleAt(along) {
+        const handle = this._editHandles?.apps;
+        const box = this._box;
+        if (!handle || !box || !Number.isFinite(along))
+            return;
+        const edge = this._state.edge;
+        const wide = 36;
+        const thick = 10;
+        const vertical = this._vertical;
+        const barStart = vertical ? box.y : box.x;
+        const barEnd = barStart + (vertical ? box.height : box.width);
+        if (along < barStart - 4 || along > barEnd + 4)
+            return;
+        handle.set_size(vertical ? wide : thick, vertical ? thick : wide);
+        const px = vertical
+            ? (edge === 'left' ? box.x + box.width + 4 : box.x - wide - 4)
+            : along - thick / 2;
+        const py = vertical
+            ? along - thick / 2
+            : (edge === 'top' ? box.y + box.height + 4 : box.y - wide - 4);
+        const monitor = this._monitor;
+        handle.set_position(
+            Math.round(vertical ? clamp(px, monitor.x + 4, monitor.x + monitor.width - wide - 4) : px),
+            Math.round(vertical ? py : clamp(py, monitor.y + 4, monitor.y + monitor.height - wide - 4)));
+        handle.visible = true;
+    }
+
+    _snapAppsHandle() {
+        const handle = this._editHandles?.apps;
+        const view = this._appViewport;
+        if (!handle || !view || this._destroyed || !this._state.editMode)
+            return;
+        try {
+            const [ax, ay] = view.get_transformed_position();
+            const [aw, ah] = view.get_transformed_size();
+            if (aw <= 0 || ah <= 0)
+                return;
+            const box = this._box;
+            if (!box)
+                return;
+            const atEnd = this._appsPlace === 'end';
+            const along = this._vertical ? (atEnd ? ay : ay + ah) : (atEnd ? ax : ax + aw);
+            const crossStart = this._vertical ? ax : ay;
+            const crossEnd = crossStart + (this._vertical ? aw : ah);
+            const barCross = this._vertical ? box.x : box.y;
+            const barCrossEnd = barCross + (this._vertical ? box.width : box.height);
+            if (crossEnd < barCross - 8 || crossStart > barCrossEnd + 8)
+                return;
+            this._placeAppsHandleAt(along);
+        } catch {
+            /* Leave the handle where the last good edge put it. */
+        }
+    }
+
+    _beginGeom(event, mode) {
+        if (!event || event.get_button() !== 1)
+            return Clutter.EVENT_PROPAGATE;
+        const [px, py] = event.get_coords();
+        this._endGeom(false);
+        this._geomDrag = {
+            mode,
+            px, py,
+            axis: null,
+            barBase: this._vertical ? this._box.height : this._box.width,
+            thickness: this._state.thickness,
+            length: this._state.length,
+            margin: this._state.margin,
+            dockMinLength: this._state.dockMinLength ?? 240,
+            appsLength: this._state.appsLength || 0,
+            appsCap: this._state.appsCap === true,
+            pending: null,
+        };
+        if (mode === 'apps') {
+            const actor = this._appsRow;
+            const natural = actor ? this._iconRowSpan(actor) : 48;
+            const size = this._appViewport?.get_transformed_size();
+            const sections = this._sectionSpans();
+            const others = sections.reduce((sum, span) => sum + span, 0) -
+                this._contentSpan(this._appViewport) - this._appsLeadingSpace();
+            const room = this._lengthBudget(this._state.margin) - others - 28;
+            this._geomDrag.appsMax = Math.max(48, room);
+            this._geomDrag.appsNatural = natural;
+            const allocated = size ? size[this._vertical ? 1 : 0] : natural;
+            this._geomDrag.appsBase = allocated + (this._centerApps ? Math.max(0, allocated - natural) : 0);
+            const place = this._state.modules.find(item => item.id === 'apps')?.place ?? 'center';
+            // A centered group's trailing edge moves half its change in length.
+            this._geomDrag.appsScale = this._state.kind === 'dock' || place === 'center' ? 2 : 1;
+        }
+        if (this._state.autohide)
+            this._slide(true, false);
+        try {
+            global.display.set_cursor(Meta.Cursor.MOVE);
+        } catch {
+            /* Cursor enums differ across Shell versions. */
+        }
+        this._geomWatch = global.stage.connect('captured-event', (_stage, captured) => this._onGeom(captured));
+        return Clutter.EVENT_STOP;
+    }
+
+    _onGeom(event) {
+        if (!event || !this._geomDrag || this._destroyed) {
+            this._endGeom(false);
+            return Clutter.EVENT_PROPAGATE;
+        }
+        if (event.type() === Clutter.EventType.KEY_PRESS && event.get_key_symbol() === Clutter.KEY_Escape) {
+            this._endGeom(false);
+            return Clutter.EVENT_PROPAGATE;
+        }
+        const moving = event.type() === Clutter.EventType.MOTION;
+        const release = event.type() === Clutter.EventType.BUTTON_RELEASE && event.get_button() === 1;
+        if (!moving && !release)
+            return Clutter.EVENT_PROPAGATE;
+        const [px, py] = event.get_coords();
+        const drag = this._geomDrag;
+        drag.pending = this._geomValues(drag, px - drag.px, py - drag.py);
+        this._place(drag.pending);
+        if (release)
+            this._endGeom(true);
+        return Clutter.EVENT_STOP;
+    }
+
+    _geomValues(drag, dx, dy) {
+        const values = {
+            thickness: drag.thickness,
+            length: drag.length,
+            margin: drag.margin,
+            dockMinLength: drag.dockMinLength,
+            appsLength: drag.appsLength,
+            appsCap: drag.appsCap === true,
+        };
+        const edge = this._state.edge;
+        if (drag.mode === 'apps') {
+            const along = this._vertical ? dy : dx;
+            if (!drag.moved && Math.abs(along) < 3)
+                return values;
+            drag.moved = true;
+            // End is pinned to the far side, so its handle is the inner edge and drags the other way.
+            const next = drag.appsBase + along * drag.appsScale * (this._appsPlace === 'end' ? -1 : 1);
+            const fitted = Math.abs(next - drag.appsNatural) < 20;
+            values.appsLength = fitted ? 0 : clamp(Math.round(next), 48, Math.min(2400, drag.appsMax));
+            values.appsCap = !fitted && next < drag.appsNatural;
+            return values;
+        }
+        if (drag.mode === 'distance') {
+            const outward = edge === 'left' ? dx : edge === 'right' ? -dx : edge === 'top' ? dy : -dy;
+            values.margin = clamp(Math.round(drag.margin + outward), 0, 64);
+            return values;
+        }
+        if (!drag.axis) {
+            if (Math.abs(dx) < 4 && Math.abs(dy) < 4)
+                return values;
+            const along = this._vertical ? Math.abs(dy) : Math.abs(dx);
+            const across = this._vertical ? Math.abs(dx) : Math.abs(dy);
+            drag.axis = along >= across ? 'length' : 'thickness';
+        }
+        if (drag.axis === 'thickness') {
+            const across = edge === 'left' ? dx : edge === 'right' ? -dx : edge === 'top' ? dy : -dy;
+            values.thickness = clamp(Math.round(drag.thickness + across * 2), 44, 88);
+            return values;
+        }
+        const along = this._vertical ? dy : dx;
+        if (this._state.kind === 'dock' && this._state.fitContent) {
+            values.dockMinLength = clamp(Math.round(drag.barBase + along * 2),
+                64, Math.min(10000, this._lengthBudget(drag.margin)));
+            return values;
+        }
+        const budget = Math.max(1, this._lengthBudget(drag.margin));
+        const next = (drag.barBase ?? budget * drag.length / 100) + along * 2;
+        values.length = clamp(Math.round(next / budget * 100), 20, 100);
+        return values;
+    }
+
+    _lengthBudget(margin) {
+        let {width, height} = this._monitor;
+        if (!this._vertical) {
+            const occupied = edge => Math.max(0, ...this._state.bars.filter(bar =>
+                bar.edge === edge && bar.kind !== 'dock' && !bar.margin && bar.length === 100)
+                .map(bar => bar.thickness));
+            width = Math.max(this._state.thickness, width - occupied('left') - occupied('right'));
+        }
+        return (this._vertical ? height : width) - margin * 2;
+    }
+
+    _endGeom(save) {
+        const drag = this._geomDrag;
+        if (this._geomWatch) {
+            const watch = this._geomWatch;
+            this._geomWatch = 0;
+            global.stage.disconnect(watch);
+        }
+        this._geomDrag = null;
+        if (!drag)
+            return;
+        try {
+            global.display.set_cursor(Meta.Cursor.DEFAULT);
+        } catch {
+            /* Cursor enums differ across Shell versions. */
+        }
+        if (!save || this._destroyed) {
+            if (!this._destroyed)
+                this._place();
+            return;
+        }
+        const values = drag.pending;
+        if (!values)
+            return;
+        const patch = {};
+        if (values.thickness !== drag.thickness)
+            patch.thickness = values.thickness;
+        if (values.length !== drag.length)
+            patch.length = values.length;
+        if (values.margin !== drag.margin)
+            patch.margin = values.margin;
+        if (values.dockMinLength !== drag.dockMinLength)
+            patch.dockMinLength = values.dockMinLength;
+        if (values.appsLength !== drag.appsLength || values.appsCap !== drag.appsCap) {
+            patch.appsLength = values.appsLength;
+            patch.appsCap = values.appsCap === true;
+        }
+        if (Object.keys(patch).length) {
+            if ('appsLength' in patch)
+                this._state.appsLength = patch.appsLength;
+            if ('appsCap' in patch)
+                this._state.appsCap = patch.appsCap;
+            if (drag.mode === 'apps') {
+                this._overlay.skipRebuild(() => patchBar(this._overlay._settings, this._index, patch));
+                for (const bar of this._overlay._bars) {
+                    if (bar !== this && bar._index === this._index) {
+                        bar._state.appsLength = values.appsLength;
+                        bar._state.appsCap = values.appsCap;
+                        bar._place();
+                    }
+                }
+            } else
+                patchBar(this._overlay._settings, this._index, patch);
+        }
     }
 
     _enableAutohide() {
@@ -911,10 +2020,26 @@ class Bar {
     _module(id, icon) {
         switch (id) {
         case 'logo': {
-            const button = this._button(this._state.logoIcon, icon);
+            const mark = new St.Icon({
+                icon_name: this._state.logoIcon,
+                icon_size: icon,
+                style: `color: ${this._theme.fg};`,
+            });
             const file = logoFile(this._state.logoIcon);
             if (file?.query_exists(null))
-                button.child.gicon = new Gio.FileIcon({file});
+                mark.gicon = new Gio.FileIcon({file});
+            // Match an app button: padding, then the icon, then the slot the running dot uses.
+            const column = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 3px;'});
+            column.add_child(mark);
+            column.add_child(new St.Widget({height: 3, width: 14, opacity: 0}));
+            const button = new St.Button({
+                reactive: true,
+                can_focus: true,
+                x_align: Clutter.ActorAlign.CENTER,
+                y_align: Clutter.ActorAlign.CENTER,
+                child: column,
+                style: 'padding: 5px; border-radius: 12px;',
+            });
             button.accessible_name = this._state.logoAction === 'launcher' ? 'Application launcher' : 'GNOME applications and overview';
             button._activate = () => {
                 if (this._state.logoAction === 'overview') Main.overview.toggle();
@@ -1028,7 +2153,7 @@ class Bar {
             const face = this._groupFace(id, ids, icon);
             if (!face)
                 continue;
-            if (!['workspaces', 'apps', 'window', 'logo'].includes(id)) {
+            if (!isSpacer(id) && !['workspaces', 'apps', 'window', 'logo'].includes(id)) {
                 face._activate = () => this._toggle(popoutId, face, panel);
                 this._hoverDrawer(popoutId, face, panel, hover);
             }
@@ -1182,7 +2307,7 @@ class Bar {
             const win = global.display.focus_window;
             const app = win ? Shell.WindowTracker.get_default().get_window_app(win) : null;
             icon.gicon = app?.get_app_info()?.get_icon() ?? null;
-            button.accessible_name = win?.get_title() ?? 'Active window';
+            button.accessible_name = win?.get_title() ?? 'Focused app';
             button.visible = Boolean(win);
         };
         paint();
@@ -1201,7 +2326,17 @@ class Bar {
     }
 
     _apps(size) {
-        const box = new St.BoxLayout({orientation: this._actor.orientation, reactive: this._state.editMode, style: `spacing: ${this._state.appSpacing}px;`});
+        const box = new St.BoxLayout({
+            orientation: this._actor.orientation,
+            reactive: false,
+            x_expand: false,
+            y_expand: false,
+            x_align: this._vertical ? Clutter.ActorAlign.CENTER : Clutter.ActorAlign.START,
+            y_align: this._vertical ? Clutter.ActorAlign.START : Clutter.ActorAlign.CENTER,
+            style: `spacing: ${this._state.appSpacing}px;`,
+        });
+        box._bezelApps = true;
+        this._appsRow = box;
         const system = Shell.AppSystem.get_default();
         const refresh = () => {
             if (this._popoutId?.startsWith('app:'))
@@ -1329,39 +2464,37 @@ class Bar {
         const ampm = label(this._theme.muted, 10);
         const datePrimary = label(this._theme.accent, this._vertical ? 13 : 14);
         const dateSecondary = label(this._theme.muted, 11);
-        if (ids.includes('clock')) {
-            column.add_child(time);
-            column.add_child(minute);
-            column.add_child(ampm);
-        }
-        if (ids.includes('date')) {
-            column.add_child(datePrimary);
-            column.add_child(dateSecondary);
-        }
         const showWeather = ids.includes('weather');
         const weatherIcon = new St.Icon({icon_size: 16, style: `color: ${this._theme.accent};`});
         const temperature = label(this._theme.fg, this._vertical ? 11 : 12);
         temperature._bezelRailTemp = true;
         temperature.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
-        if (showWeather) {
-            column.add_child(weatherIcon);
-            column.add_child(temperature);
-        }
+        const pieces = {
+            clock: [time, minute, ampm],
+            date: [datePrimary, dateSecondary],
+            weather: [weatherIcon, temperature],
+        };
+        for (const id of ids)
+            for (const actor of pieces[id] ?? [])
+                column.add_child(actor);
         const names = {clock: '', date: ''};
         const clockSettings = new Gio.Settings({schema_id: 'org.gnome.desktop.interface'});
         const paint = () => {
+            const bar = readBars(this._overlay._settings)[this._index];
+            const twelve = barTimeFormat(bar, clockSettings.get_string('clock-format')) === '12h';
+            const seconds = bar?.clockSeconds === true;
             if (ids.includes('clock')) {
-                const twelve = clockSettings.get_string('clock-format') === '12h';
-                const hour = now(twelve ? '%I' : '%H');
-                time.text = this._vertical ? hour : `${hour}:${now('%M')}`;
-                minute.text = now('%M');
+                const shown = (GLib.DateTime.new_now_local().format(timePattern(twelve, seconds)) ?? '').replace(/^0/, '');
+                const hour = (GLib.DateTime.new_now_local().format(twelve ? '%I' : '%H') ?? '').replace(/^0/, '');
+                time.text = this._vertical ? hour : shown;
+                minute.text = seconds ? `${now('%M')}:${now('%S')}` : now('%M');
                 minute.visible = this._vertical;
                 ampm.text = twelve ? now('%p').toLowerCase() : '';
-                ampm.visible = twelve;
-                names.clock = now('%A, %B %e, %H:%M');
+                ampm.visible = twelve && this._vertical;
+                names.clock = shown;
             }
             if (ids.includes('date')) {
-                const key = settingChoice(this._overlay._settings, 'date-format', 'medium', Object.keys(DATE_FORMATS));
+                const key = barDateFormat(bar, this._overlay._settings);
                 const spec = DATE_FORMATS[key]?.format ?? DATE_FORMATS.medium.format;
                 const text = (GLib.DateTime.new_now_local().format(spec) ?? '').replace(/\s+/g, ' ').trim();
                 if (this._vertical) {
@@ -1383,7 +2516,7 @@ class Bar {
             this._signals.push([clockSettings, clockSettings.connect('changed::clock-format', paint)]);
         if (ids.includes('date') && this._overlay._settings.settings_schema.has_key('date-format'))
             this._signals.push([this._overlay._settings, this._overlay._settings.connect('changed::date-format', paint)]);
-        this._timers.add(GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 10, () => {
+        this._timers.add(GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, readBars(this._overlay._settings)[this._index]?.clockSeconds ? 1 : 10, () => {
             paint();
             return GLib.SOURCE_CONTINUE;
         }));
@@ -1400,12 +2533,15 @@ class Bar {
 
     _fillStatusIcons(box, button, ids, size) {
         const icons = {};
+        const percent = label(this._theme.fg, 12);
         for (const id of ids) {
             icons[id] = new St.Icon({icon_size: size, style: `color: ${this._theme.fg};`});
             box.add_child(icons[id]);
+            if (id === 'battery')
+                box.add_child(percent);
         }
-        const percent = label(this._theme.fg, 12);
-        box.add_child(percent);
+        if (!icons.battery)
+            box.add_child(percent);
         this._cleanups.push(this._overlay.services.subscribe(() => {
             const services = this._overlay.services;
             if (icons.volume)
@@ -1527,9 +2663,10 @@ class Bar {
         const cornered = corners.includes(location);
         // Corner drawers always join the frame. Autohide rails only join while
         // they are a full-length edge; otherwise the card sits on the thin hide.
+        const floating = (this._state.margin ?? 0) > 0;
         const attached = Boolean(frame) && !global.display.get_monitor_in_fullscreen(monitor.index)
             && (cornered || location !== 'icon' || id === 'launcher' || this._joinedAutohide
-                || this._state.kind !== 'dock');
+                || (this._state.kind !== 'dock' && !floating));
         this._popupFrame = attached ? frame : null;
         this._popupEdge = edge;
         this._popupLocation = location;
@@ -1569,9 +2706,10 @@ class Bar {
             hscrollbar_policy: St.PolicyType.NEVER, vscrollbar_policy: St.PolicyType.NEVER,
             x_expand: true, y_expand: true,
         });
+        const menu = this._menuPopup(id);
         scroll.clip_to_allocation = true;
         scroll.set_child(content);
-        this._popout.add_child(decorateScroll(scroll, this._theme));
+        this._popout.add_child(decorateScroll(scroll, this._theme, !menu));
         this._popupScroll = scroll;
         this._popupContent = content;
         this._popout.connect('notify::hover', () => {
@@ -1638,6 +2776,8 @@ class Bar {
             if (event.type() === Clutter.EventType.BUTTON_PRESS || event.type() === Clutter.EventType.TOUCH_BEGIN) {
                 const [px, py] = event.get_coords();
                 const picked = global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, px, py);
+                if (!picked)
+                    return Clutter.EVENT_PROPAGATE;
                 if (!this._popout.contains(picked) && picked !== this._popout
                     && !this._anchor?.contains(picked) && picked !== this._anchor)
                     this._close(true);
@@ -1732,7 +2872,7 @@ class Bar {
             });
         } else
             this._popout.height = height;
-        const scrolling = ['notifications', 'launcher', 'settings', 'vpn', 'performance'].includes(this._popoutId);
+        const scrolling = this._popupScrolls();
         if (scrolling && this._popupScroll) {
             const chrome = this._popupChrome?.height ?? 0;
             const room = Math.max(48, height - chrome - 24);
@@ -1744,13 +2884,23 @@ class Bar {
         this._popupScroll?.get_parent?.()?._bezelSyncOverflow?.();
     }
 
+    _menuPopup(id = this._popoutId) {
+        const name = String(id ?? '');
+        return name === 'bar-menu' || name.startsWith('add-') || name.startsWith('module-');
+    }
+
+    _popupScrolls() {
+        return ['notifications', 'launcher', 'settings', 'vpn', 'performance'].includes(this._popoutId)
+            || this._menuPopup();
+    }
+
     _fitPopup() {
         if (this._popupFitLock || this._popupLockedHeight || !this._popout || !this._popupContent)
             return;
         const pad = this._popoutId === 'status' ? 52 : this._popoutId === 'osd' || this._state.powerStyle === 'rail' && this._popoutId === 'power' ? 24 : 36;
         const width = Math.max(1, this._popout.width - pad);
         const app = String(this._popoutId).startsWith('app:');
-        const scrolling = ['notifications', 'launcher', 'settings', 'vpn', 'performance'].includes(this._popoutId);
+        const scrolling = this._popupScrolls();
         const cap = app ? 420 : scrolling ? 480
             : ['dashboard', 'status', 'clock', 'osd', 'power'].includes(this._popoutId) ? 900 : 400;
         const extent = this._stackHeight(this._popupContent, width, scrolling ? 8000 : cap);

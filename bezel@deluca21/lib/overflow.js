@@ -3,7 +3,7 @@ import St from 'gi://St';
 
 // St's overlay scrollbars paint under opaque children and show on 1px overflow.
 // Hide them and put a fade + thumb on top so you can still tell the list moves.
-export function decorateScroll(scroll, theme) {
+export function decorateScroll(scroll, theme, showThumb = true) {
     scroll.add_style_class_name('bezel-popout-scroll');
     scroll.overlay_scrollbars = true;
     scroll.hscrollbar_policy = St.PolicyType.NEVER;
@@ -32,7 +32,8 @@ export function decorateScroll(scroll, theme) {
     });
     overlay.add_child(fadeTop);
     overlay.add_child(fadeBottom);
-    overlay.add_child(thumb);
+    if (showThumb)
+        overlay.add_child(thumb);
     overlay.visible = false;
     overlay.opacity = 0;
     stack.add_child(scroll);

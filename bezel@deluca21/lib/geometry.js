@@ -26,27 +26,18 @@ export function cornerRadius(width, height, side, radius) {
         (height - side.top - side.bottom) / 2));
 }
 
-// Keep the center on the bar midpoint when possible, but never strand usable
-// space in empty zones while a populated zone is clipped.
+// Keep the center on the bar midpoint while it still fits. Once the center
+// would crowd an end, it takes the gap between the two ends and stops there.
 export function horizontalZoneWidths(available, natural) {
     const total = Math.max(0, available);
     const [start, center, end] = natural.map(n => Math.max(0, n));
     if (2 * Math.max(start, end) + center <= total)
         return [(total - center) / 2, center, (total - center) / 2];
-    const spare = total - start - center - end;
-    if (spare >= 0) return [start + spare / 2, center, end + spare / 2];
-    const needs = [start, center, end];
-    const widths = needs.map(n => Math.min(n, total / 3));
-    let remaining = total - widths.reduce((a, b) => a + b, 0);
-    for (let pass = 0; pass < 3 && remaining > 0.01; pass++) {
-        const hungry = needs.map((n, i) => n > widths[i] + 0.01 ? i : -1).filter(i => i >= 0);
-        if (!hungry.length) break;
-        const share = remaining / hungry.length;
-        for (const i of hungry) {
-            const extra = Math.min(share, needs[i] - widths[i]);
-            widths[i] += extra;
-            remaining -= extra;
-        }
-    }
-    return widths;
+    if (start + end <= total)
+        return [start, total - start - end, end];
+    const floor = center > 0 ? Math.min(center, total * 0.34) : 0;
+    const room = Math.max(0, total - floor);
+    const ends = start + end || 1;
+    const startWidth = room * (start / ends);
+    return [startWidth, total - startWidth - (room - startWidth), room - startWidth];
 }
