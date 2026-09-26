@@ -72,27 +72,18 @@ Bezel draws panels, docks, and popouts over GNOME Shell. Workspaces, apps, audio
 
 ## 📥 Installation
 
-Clone the repository, move the extension into GNOME’s extensions folder, compile the settings schema, then delete the clone:
+This installs Bezel, and it also replaces a copy that is already installed. Saved bars, pins, and palettes stay in GNOME. Only the extension files are replaced.
 
 ```sh
-git clone https://github.com/DeLuca21/Bezel.git
-cd Bezel
+git clone --depth 1 https://github.com/DeLuca21/Bezel.git /tmp/bezel-install
 mkdir -p ~/.local/share/gnome-shell/extensions
-mv bezel@deluca21 ~/.local/share/gnome-shell/extensions/
+rm -rf ~/.local/share/gnome-shell/extensions/bezel@deluca21
+cp -a /tmp/bezel-install/bezel@deluca21 ~/.local/share/gnome-shell/extensions/
 glib-compile-schemas --strict ~/.local/share/gnome-shell/extensions/bezel@deluca21/schemas
-cd ..
-rm -rf Bezel
+rm -rf /tmp/bezel-install
 ```
 
-Log out and back in, then enable **Bezel** in Extensions.
-
-Open preferences from Extensions, or:
-
-```sh
-gnome-extensions prefs bezel@deluca21
-```
-
-JavaScript changes need another logout on Wayland.
+Log out and back in. The first time, enable **Bezel** in Extensions. Wayland loads extension JavaScript at login, so an update needs that logout too.
 
 ---
 
