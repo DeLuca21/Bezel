@@ -98,11 +98,11 @@ JavaScript changes need another logout on Wayland.
 
 ## 🔧 Preferences
 
-Open **Layouts** to start from a built-in arrangement or load one you saved. Pins, the logo, and app behaviour carry over when you apply a built-in layout. Saved layouts keep the whole setup, including the palette.
+Bezel settings open in a dedicated custom app, from the dashboard, launcher, Extensions app, or a bar’s right-click menu. Its palette, rounded cards and visual editor match Bezel. It runs as a real window with normal stacking, resizing and Super-dragging.
 
-On **Bar**, pick the bar, then set its edge, modules, floating inset, length, and whether windows reserve that space. App pins belong to that bar. Removing one does not change GNOME favourites.
+Preset cards and saved-layout chips sit above an interactive desktop preview and independently scrollable editor. Click a bar to select it, then use Contents, Size & space, or Apps & logo. Modules appear as chips inside sections and groups. Palettes show swatch cards; custom colours use GNOME’s picker. Switching layouts with unsaved changes offers Cancel, Discard, or Save and switch.
 
-**Launcher** sets Super, the launcher shortcut, and the overview shortcut. Super opens the overview unless you hand it to the launcher. **Frame & motion** sets the frame, hover, and where power, the dashboard, and notification history open.
+Right-click a bar for settings, edit mode, panel or dock, floating, autohide, and remove. Edit mode outlines the bars, puts **+** on empty screen edges and on each section, and lets you drag what is already there. Edit mode never opens settings automatically. Right-click a module while editing to remove it, create a group, or move it into an existing group. Groups can contain any modules and empty spaces; removing a group keeps its contents. Resize spaces from their edit menu or click their chip in settings for an exact pixel size. App pins stay on the app’s right-click menu.
 
 ---
 

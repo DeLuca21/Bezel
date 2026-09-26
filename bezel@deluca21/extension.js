@@ -8,6 +8,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import {BezelOverlay} from './lib/shell.js';
+import {launchSettings} from './lib/settingsLauncher.js';
 
 export default class BezelExtension extends Extension {
     enable() {
@@ -16,7 +17,7 @@ export default class BezelExtension extends Extension {
             this._applyPanel();
         });
         try {
-            this._overlay = new BezelOverlay(this._settings, () => this.openPreferences());
+            this._overlay = new BezelOverlay(this._settings, () => launchSettings(this.path));
             this._applyPanel();
             this._superSetting = this._settings.connect('changed::super-launcher', () => this._syncSuper());
             this._syncSuper();

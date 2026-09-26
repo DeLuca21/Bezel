@@ -4,7 +4,7 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import St from 'gi://St';
 import Shell from 'gi://Shell';
-import {DASHBOARD_WIDGETS, readDashboard, saveDashboard} from './config.js';
+import {DASHBOARD_WIDGETS, readDashboard, saveDashboard, DATE_FORMATS, timePattern, settingChoice, settingFlag} from './config.js';
 import {allowsMotion} from './compat.js';
 import {profileAvatar} from './profile.js';
 import {weatherWidget} from './weather.js';
@@ -167,10 +167,14 @@ function widgetFor(bar, id, theme, reader, pendingCleanups, toggleEdit, editing)
         identity.add_child(clock);
         identity.add_child(date);
         const update = () => {
+            const settings = bar._overlay._settings;
+            const twelve = settingChoice(settings, 'dashboard-time-format', '24h', ['24h', '12h']) === '12h';
+            const seconds = settingFlag(settings, 'dashboard-clock-seconds');
+            const dateKey = settingChoice(settings, 'dashboard-date-format', 'long', Object.keys(DATE_FORMATS));
             const now = GLib.DateTime.new_now_local();
-            clock.text = now.format('%H:%M');
-            date.text = now.format('%a, %e %B');
-            bar._later('_dashboardTimer', 10000, update);
+            clock.text = (now.format(timePattern(twelve, seconds)) ?? '').replace(/^0/, '');
+            date.text = (now.format(DATE_FORMATS[dateKey]?.format ?? DATE_FORMATS.long.format) ?? '').replace(/\s+/g, ' ').trim();
+            bar._later('_dashboardTimer', seconds ? 1000 : 10000, update);
         };
         update();
         return identity;

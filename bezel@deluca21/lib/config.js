@@ -10,12 +10,6 @@ const OPTIONAL_MODULES = ['screenshot', 'dnd', 'performance', 'vpn', 'settings',
 export const DEFAULT_GROUPS = {
     clock: 'clock', date: 'clock', volume: 'status', network: 'status', battery: 'status',
 };
-export const GROUP_CHOICES = [
-    ['', 'Alone'],
-    ['clock', 'Clock'],
-    ['status', 'Status'],
-    ['tools', 'Tools'],
-];
 export const DATE_FORMATS = {
     weekday: {label: 'Weekday · Fri', format: '%a'},
     short: {label: 'Short · Fri 25', format: '%a %e'},
@@ -24,6 +18,14 @@ export const DATE_FORMATS = {
     numeric: {label: 'Numeric · 25/09', format: '%d/%m'},
     iso: {label: 'ISO · 2026-09-25', format: '%Y-%m-%d'},
 };
+export const timePattern = (twelve, seconds) => twelve
+    ? (seconds ? '%I:%M:%S %p' : '%I:%M %p')
+    : (seconds ? '%H:%M:%S' : '%H:%M');
+export const barDateFormat = (bar, settings) => DATE_FORMATS[bar?.dateFormat]
+    ? bar.dateFormat
+    : settingChoice(settings, 'date-format', 'medium', Object.keys(DATE_FORMATS));
+export const barTimeFormat = (bar, gnomeFormat = '24h') =>
+    bar?.timeFormat === '12h' || bar?.timeFormat === '24h' ? bar.timeFormat : (gnomeFormat === '12h' ? '12h' : '24h');
 export const EDGES = ['left', 'top', 'right', 'bottom'];
 export const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 export const settingFlag = (settings, key, fallback = false) =>
@@ -79,7 +81,7 @@ export function normalizeModules(list) {
         return [{
             id,
             place: ['start', 'center', 'end'].includes(item?.place) ? item.place : PLACES[id] ?? 'center',
-            group: spacer ? '' : normalizeGroup(id, item),
+            group: normalizeGroup(id, item),
             ...(spacer ? {size: number(item?.size, 24, 8, 400)} : {}),
         }];
     });
@@ -95,6 +97,23 @@ function normalizeGroup(id, item) {
     return DEFAULT_GROUPS[id] ?? '';
 }
 
+// Explicit definitions retain empty groups; older layouts infer them from members.
+export function barGroups(bar) {
+    const groups = new Map();
+    for (const group of Array.isArray(bar.groups) ? bar.groups : []) {
+        if (typeof group?.id === 'string' && /^[a-z][a-z0-9-]{0,24}$/.test(group.id))
+            groups.set(group.id, {id: group.id, name: String(group.name || group.id).slice(0, 60), place: group.place});
+    }
+    for (const item of bar.modules ?? []) {
+        if (item.group && !groups.has(item.group))
+            groups.set(item.group, {id: item.group, name: item.group[0].toUpperCase() + item.group.slice(1), place: item.place});
+    }
+    for (const group of groups.values())
+        group.place = ['start', 'center', 'end'].includes(group.place) ? group.place
+            : bar.modules?.find(item => item.group === group.id)?.place ?? 'center';
+    return [...groups.values()];
+}
+
 export function readBars(settings) {
     const config = readConfig(settings);
     const bars = Array.isArray(config.bars) && config.bars.length ? config.bars : [{}];
@@ -107,12 +126,14 @@ export function readBars(settings) {
             logoAction: ['launcher', 'overview', 'apps'].includes(bar.logoAction) ? bar.logoAction : 'launcher',
             kind: bar.kind === 'dock' ? 'dock' : 'panel',
             fitContent: bar.fitContent !== false,
-            dockMinLength: number(bar.dockMinLength ?? 240, 240, 64, 1200),
+            dockMinLength: number(bar.dockMinLength ?? 240, 240, 64, 10000),
             length: number(bar.length ?? 100, 100, 20, 100),
             margin: number(bar.margin ?? 0, 0, 0, 64),
             rounding: number(bar.rounding ?? 20, 20, 0, 48),
             runningApps: bar.runningApps !== false,
             appSpacing: number(bar.appSpacing ?? (bar.kind === 'dock' ? 12 : 8), 10, 0, 32),
+            appsLength: number(bar.appsLength ?? 0, 0, 0, 2400),
+            appsCap: bar.appsCap === true,
             batteryPercentage: bar.batteryPercentage === true,
             appClick: bar.appClick === 'activate' ? 'activate' : 'minimize',
             thickness: number(bar.thickness ?? 56, 56, 44, 88),

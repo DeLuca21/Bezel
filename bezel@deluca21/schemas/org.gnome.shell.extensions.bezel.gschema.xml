@@ -7,6 +7,10 @@
     <key name="edit-mode" type="b">
       <default>false</default>
     </key>
+    <key name="show-settings" type="i">
+      <default>0</default>
+      <summary>Increment to open the Bezel settings window</summary>
+    </key>
     <key name="edge-panels" type="b">
       <default>true</default>
       <summary>Open the dashboard and session drawer from the center of the screen edges</summary>
@@ -190,7 +194,7 @@
     <key name="weather-clock" type="b"><default>false</default><summary>Show weather beside clock</summary></key>
     <key name="date-format" type="s">
       <default>'medium'</default>
-      <summary>Date widget format</summary>
+      <summary>Fallback date format for bars that have not chosen one</summary>
       <choices>
         <choice value="weekday"/>
         <choice value="short"/>
@@ -200,5 +204,30 @@
         <choice value="iso"/>
       </choices>
     </key>
+    <key name="dashboard-date-format" type="s">
+      <default>'long'</default>
+      <summary>Date format on the dashboard</summary>
+      <choices>
+        <choice value="weekday"/>
+        <choice value="short"/>
+        <choice value="medium"/>
+        <choice value="long"/>
+        <choice value="numeric"/>
+        <choice value="iso"/>
+      </choices>
+    </key>
+    <key name="dashboard-time-format" type="s">
+      <default>'24h'</default>
+      <summary>Time format on the dashboard</summary>
+      <choices>
+        <choice value="24h"/>
+        <choice value="12h"/>
+      </choices>
+    </key>
+    <key name="dashboard-clock-seconds" type="b">
+      <default>false</default>
+      <summary>Show seconds on the dashboard clock</summary>
+    </key>
+    <key name="preferences-bar" type="i"><default>-1</default><range min="-1" max="3"/><summary>Selected bar in the preferences window</summary></key>
   </schema>
 </schemalist>

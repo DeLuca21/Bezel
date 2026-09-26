@@ -1,6 +1,6 @@
 import GLib from 'gi://GLib';
 
-const EXCLUDED = new Set(['saved-layouts', 'previous-layout', 'shortcut-overrides', 'known-indicators']);
+const EXCLUDED = new Set(['saved-layouts', 'previous-layout', 'shortcut-overrides', 'known-indicators', 'show-settings', 'preferences-bar', 'edit-mode']);
 export function savedLayouts(settings) {
     try {
         const list = JSON.parse(settings.get_string('saved-layouts'));
@@ -8,18 +8,30 @@ export function savedLayouts(settings) {
     } catch { return []; }
 }
 
+export function layoutValues(settings) {
+    return Object.fromEntries(settings.settings_schema.list_keys().filter(key => !EXCLUDED.has(key)).sort().map(key => {
+        const value = settings.get_value(key);
+        return [key, {type: value.get_type_string(), value: value.deepUnpack()}];
+    }));
+}
+
+export function matchingLayout(settings) {
+    const current = layoutValues(settings);
+    return savedLayouts(settings).find(profile => Object.entries(current).every(([key, item]) =>
+        JSON.stringify(profile.values[key]) === JSON.stringify(item))) ?? null;
+}
+
 export function saveLayout(settings, name) {
     name = name.trim().slice(0, 80);
     if (!name) return;
-    const values = {};
-    for (const key of settings.settings_schema.list_keys()) {
-        if (EXCLUDED.has(key)) continue;
-        const variant = settings.get_value(key);
-        values[key] = {type: variant.get_type_string(), value: variant.deepUnpack()};
-    }
+    const values = layoutValues(settings);
     const list = savedLayouts(settings).filter(item => item.name !== name);
     list.push({name, values});
     settings.set_string('saved-layouts', JSON.stringify(list));
+}
+
+export function deleteLayout(settings, name) {
+    settings.set_string('saved-layouts', JSON.stringify(savedLayouts(settings).filter(item => item.name !== name)));
 }
 
 export function restoreLayout(settings, profile) {
