@@ -35,7 +35,7 @@ Bezel draws panels, docks, and popouts over GNOME Shell. Workspaces, apps, audio
 ## 📸 Screenshots
 
 <p align="center">
-  <img src="./assets/screenshots/bezel.gif" alt="Bezel in motion">
+  <img src="./assets/screenshots/bezel.gif?v=2" alt="Bezel in motion">
 </p>
 
 <p align="center">
