@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/icon/bezel.png" alt="Bezel" width="140">
+  <img src="./assets/icon/bezel.png" alt="Bezel" width="140">
 </p>
 
-<h1 align="center">Bezel</h1>
+# Bezel
 
 <p align="center">
   <img alt="GNOME Shell" src="https://img.shields.io/badge/GNOME%20Shell-48%E2%80%9351-4c4f69?style=flat-square">
@@ -34,28 +34,59 @@ Bezel draws panels, docks, and popouts over GNOME Shell. Workspaces, apps, audio
 
 ## 📸 Screenshots
 
-| Bezel | Panel | Top bar + dock |
-| --- | --- | --- |
-| <img src="assets/screenshots/bezel.png" alt="Bezel mode" width="280"> | <img src="assets/screenshots/panel.png" alt="Panel mode" width="280"> | <img src="assets/screenshots/top-dock.png" alt="Top bar and dock" width="280"> |
+<p align="center">
+  <img src="./assets/screenshots/bezel.gif" alt="Bezel in motion">
+</p>
 
-| Quick controls | Notification |
-| --- | --- |
-| <img src="assets/screenshots/quick-controls.png" alt="Quick controls" width="280"> | <img src="assets/screenshots/notification.png" alt="Notification" width="280"> |
+<p align="center">
+  <img src="./assets/screenshots/bezel.png" alt="Bezel mode"><br>
+  <sub>Bezel</sub>
+</p>
+
+<p align="center">
+  <img src="./assets/screenshots/panel.png" alt="Panel mode"><br>
+  <sub>Panel</sub>
+</p>
+
+<p align="center">
+  <img src="./assets/screenshots/top-dock.png" alt="Top bar and dock"><br>
+  <sub>Top bar and dock</sub>
+</p>
+
+<p align="center">
+  <img src="./assets/screenshots/quick-controls.png" alt="Quick controls"><br>
+  <sub>Quick controls</sub>
+</p>
+
+<p align="center">
+  <img src="./assets/screenshots/notification.png" alt="Notification"><br>
+  <sub>Notification</sub>
+</p>
+
+<p align="center">
+  <img src="./assets/screenshots/dashboard.png" alt="Dashboard"><br>
+  <sub>Dashboard</sub>
+</p>
 
 ---
 
 ## 📥 Installation
 
-1. Copy or symlink `bezel@deluca21` into `~/.local/share/gnome-shell/extensions/`.
-2. Compile the schema:
+Clone the repository, move the extension into GNOME’s extensions folder, compile the settings schema, then delete the clone:
 
 ```sh
-glib-compile-schemas --strict bezel@deluca21/schemas
+git clone https://github.com/DeLuca21/Bezel.git
+cd Bezel
+mkdir -p ~/.local/share/gnome-shell/extensions
+mv bezel@deluca21 ~/.local/share/gnome-shell/extensions/
+glib-compile-schemas --strict ~/.local/share/gnome-shell/extensions/bezel@deluca21/schemas
+cd ..
+rm -rf Bezel
 ```
 
-3. Log out and back in.
-4. Enable **Bezel** in Extensions.
-5. Open preferences with Extensions, or:
+Log out and back in, then enable **Bezel** in Extensions.
+
+Open preferences from Extensions, or:
 
 ```sh
 gnome-extensions prefs bezel@deluca21
