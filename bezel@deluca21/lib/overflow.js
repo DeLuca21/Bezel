@@ -39,16 +39,27 @@ export function decorateScroll(scroll, theme, showThumb = true) {
     stack.add_child(scroll);
     stack.add_child(overlay);
     const adj = scroll.vadjustment;
+    let dead = false;
+    scroll.connect('destroy', () => { dead = true; });
     const sync = () => {
-        const overflow = adj.upper > adj.page_size + 2;
+        if (dead)
+            return;
+        const upper = adj.upper;
+        const page = adj.page_size;
+        const value = adj.value;
+        if (!Number.isFinite(upper) || !Number.isFinite(page) || !Number.isFinite(value))
+            return;
+        const overflow = upper > page + 2;
         overlay.visible = overflow;
         if (!overflow)
             return;
-        const range = Math.max(1, adj.upper - adj.page_size);
-        fadeTop.opacity = adj.value > 4 ? 255 : 0;
-        fadeBottom.opacity = adj.value < range - 4 ? 255 : 0;
+        const range = Math.max(1, upper - page);
+        fadeTop.opacity = value > 4 ? 255 : 0;
+        fadeBottom.opacity = value < range - 4 ? 255 : 0;
         const track = Math.max(0, (overlay.height || scroll.height) - thumb.height - 20);
-        thumb.translation_y = 10 + (adj.value / range) * track;
+        const shift = 10 + (value / range) * track;
+        if (Number.isFinite(shift))
+            thumb.translation_y = shift;
     };
     for (const signal of ['notify::value', 'notify::upper', 'notify::page-size'])
         adj.connect(signal, sync);

@@ -82,6 +82,9 @@
     <key name="custom-accent" type="s">
       <default>"#cba6f7"</default>
     </key>
+    <key name="custom-group" type="s">
+      <default>"#94e2d5"</default>
+    </key>
     <key name="custom-border" type="s">
       <default>"#45475a"</default>
     </key>

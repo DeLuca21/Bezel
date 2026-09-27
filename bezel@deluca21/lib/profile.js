@@ -6,6 +6,8 @@ import St from 'gi://St';
 
 export function profileAvatar(theme, size = 88) {
     const user = AccountsService.UserManager.get_default().get_user(GLib.get_user_name());
+    let current = size;
+    let photo = '';
     const wrap = new St.Widget({
         width: size, height: size, clip_to_allocation: true,
         x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER,
@@ -18,17 +20,24 @@ export function profileAvatar(theme, size = 88) {
         style: `color: ${theme.accent};`,
     });
     wrap.add_child(avatar);
+    wrap._bezelAvatarSize = next => {
+        current = Math.max(24, Math.round(next));
+        wrap.set_size(current, current);
+        avatar.icon_size = current;
+        avatar.set_size(current, current);
+        wrap.style = `${circleStyle(theme, current)}${photo ? ` background-image: url("${photo}"); background-size: cover;` : ''}`;
+    };
     const update = () => {
         const path = [user.get_icon_file(), `${GLib.get_home_dir()}/.face`]
             .find(candidate => candidate && GLib.file_test(candidate, GLib.FileTest.IS_REGULAR));
-        if (path) {
-            wrap.style = `${circleStyle(theme, size)} background-image: url("${Gio.File.new_for_path(path).get_uri()}"); background-size: cover;`;
+        photo = path ? Gio.File.new_for_path(path).get_uri() : '';
+        if (path)
             avatar.hide();
-        } else {
-            wrap.style = circleStyle(theme, size);
+        else {
             avatar.gicon = new Gio.ThemedIcon({name: 'avatar-default-symbolic'});
             avatar.show();
         }
+        wrap._bezelAvatarSize(current);
     };
     user.connectObject('changed', update, 'notify::is-loaded', update, wrap);
     update();

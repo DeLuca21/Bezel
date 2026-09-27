@@ -64,6 +64,9 @@ export class DesktopFrame {
     }
 
     setReveal(id, edge, thickness, progress) {
+        const previous = this.reveals.get(id);
+        if (previous && previous.edge === edge && previous.thickness === thickness && previous.progress === progress)
+            return;
         this.reveals.set(id, {edge, thickness, progress});
         Object.assign(this.sides, this.baseSides);
         for (const item of this.reveals.values()) {

@@ -24,6 +24,12 @@ export const MODULES = [
     ['performance', 'Performance'],
     ['vpn', 'VPN'],
     ['settings', 'Settings'],
+    ['media', 'Now playing'],
+    ['microphone', 'Microphone'],
+    ['clipboard', 'Clipboard'],
+    ['keyboard', 'Keyboard'],
+    ['awake', 'Keep awake'],
+    ['indicators', 'Extensions'],
 ];
 
 export const DRAWER_SPOTS = [
@@ -85,7 +91,7 @@ export function addModule(settings, index, id, place) {
     } else {
         const previous = bar.modules.find(item => item.id === id);
         bar.modules = bar.modules.filter(item => item.id !== id);
-        bar.modules.push({id, place: spot, group: previous?.group ?? ''});
+        bar.modules.push({...(previous ?? {}), id, place: spot, group: previous?.group ?? ''});
     }
     saveBars(settings, bars);
     return true;
@@ -276,6 +282,24 @@ export function assignGroup(settings, index, moduleId, groupId) {
     saveBars(settings, bars);
 }
 
+export function patchModule(settings, index, id, values) {
+    const bars = readBars(settings);
+    const bar = bars[index];
+    if (!bar?.modules.some(item => item.id === id))
+        return;
+    bar.modules = bar.modules.map(item => item.id === id ? {...item, ...values} : item);
+    saveBars(settings, bars);
+}
+
+export function patchGroup(settings, index, id, values) {
+    const bars = readBars(settings);
+    const bar = bars[index];
+    if (!bar || !barGroups(bar).some(group => group.id === id))
+        return;
+    bar.groups = barGroups(bar).map(group => group.id === id ? {...group, ...values} : group);
+    saveBars(settings, bars);
+}
+
 export function resizeSpacer(settings, index, id, size) {
     const bars = readBars(settings);
     const bar = bars[index];
@@ -399,10 +423,6 @@ export function setIndicatorShown(settings, name, shown) {
     if (!shown)
         hidden.push(name);
     settings.set_strv('hidden-indicators', hidden);
-}
-
-export function hostsIndicators(settings, index) {
-    return settings.get_boolean('panel-indicators') && settings.get_int('indicator-bar') === index + 1;
 }
 
 function shortcutConflict(accelerator) {
