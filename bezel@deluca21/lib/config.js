@@ -1,3 +1,4 @@
+import {normalizeGroupLayout} from './groupLayout.js';
 import {packRows, spanOf} from './dashboardGeometry.js';
 
 // Shared by the shell and preferences. Never let a hand-edited config break enable().
@@ -7,9 +8,9 @@ export const PLACES = {
     network: 'end', battery: 'end', power: 'end', spacer: 'center',
     screenshot: 'end', dnd: 'end', performance: 'end', vpn: 'end', settings: 'end',
     nightlight: 'end', dark: 'end', media: 'end', microphone: 'end', clipboard: 'end',
-    keyboard: 'end', awake: 'end', indicators: 'end',
+    keyboard: 'end', awake: 'end', indicators: 'end', output: 'end', bluetooth: 'end', brightness: 'end', notifications: 'end',
 };
-const OPTIONAL_MODULES = ['screenshot', 'dnd', 'performance', 'vpn', 'settings', 'nightlight', 'dark', 'media', 'microphone', 'clipboard', 'keyboard', 'awake', 'indicators'];
+const OPTIONAL_MODULES = ['screenshot', 'dnd', 'performance', 'vpn', 'settings', 'nightlight', 'dark', 'media', 'microphone', 'clipboard', 'keyboard', 'awake', 'indicators', 'output', 'bluetooth', 'brightness', 'notifications'];
 export const DEFAULT_GROUPS = {
     clock: 'clock', date: 'clock', volume: 'status', network: 'status', battery: 'status',
 };
@@ -45,7 +46,7 @@ const HEX = /^#[0-9a-f]{6}$/i;
 export const hexColor = value => HEX.test(String(value ?? '')) ? String(value).toLowerCase() : '';
 
 export const PANEL_MODULES = new Set([
-    'clock', 'date', 'weather', 'volume', 'network', 'battery', 'power', 'dashboard',
+    'notifications', 'clock', 'date', 'weather', 'volume', 'network', 'battery', 'power', 'dashboard',
     'performance', 'vpn', 'settings', 'window', 'apps', 'media', 'microphone', 'clipboard', 'keyboard',
 ]);
 const HOVER_SETTING = {
@@ -251,7 +252,7 @@ function moduleExtras(item) {
     const extra = {};
     if (typeof item.hover === 'boolean')
         extra.hover = item.hover;
-    for (const key of ['showIcon', 'showValue', 'showArt', 'brightIcon', 'brightValue', 'popIcon', 'popValue', 'sessionDim'])
+    for (const key of ['showIcon', 'showValue', 'showArt', 'brightIcon', 'brightValue', 'popIcon', 'popValue', 'sessionDim', 'showMute', 'showToggle'])
         if (typeof item[key] === 'boolean')
             extra[key] = item[key];
     if (['edge', 'stack', 'drawer'].includes(item.sliderStyle))
@@ -302,6 +303,12 @@ function groupRecord(group) {
         record.color = group.color;
     for (const [key, max] of [['padding', 32], ['inset', 12], ['rounding', 48], ['opacity', 100]])
         if (group[key] != null) record[key] = number(group[key], 0, 0, max);
+    const popout = normalizeGroupLayout(group.popout);
+    if (popout) record.popout = popout;
+    if (group.face === 'single') record.face = 'single';
+    if (typeof group.icon === 'string') record.icon = group.icon.slice(0, 100);
+    if (group.clicks && typeof group.clicks === 'object')
+        record.clicks = Object.fromEntries(Object.entries(group.clicks).filter(([id, mode]) => Object.hasOwn(PLACES, id) && ['group', 'direct', 'tab'].includes(mode)));
     const custom = hexColor(group.custom);
     if (custom)
         record.custom = custom;

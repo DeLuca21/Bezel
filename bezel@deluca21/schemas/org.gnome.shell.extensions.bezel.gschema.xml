@@ -231,6 +231,8 @@
       <default>false</default>
       <summary>Show seconds on the dashboard clock</summary>
     </key>
+    <key name="preferences-group" type="s"><default>''</default><summary>Group selected in the popout editor</summary></key>
+    <key name="group-preview" type="s"><default>''</default><summary>Live group preview request</summary></key>
     <key name="preferences-bar" type="i"><default>-1</default><range min="-1" max="3"/><summary>Selected bar in the preferences window</summary></key>
   </schema>
 </schemalist>

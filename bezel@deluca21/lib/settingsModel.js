@@ -5,6 +5,7 @@ import Gtk from 'gi://Gtk';
 import {DATE_FORMATS, barGroups, EDGES, clamp, isSpacer, nextSpacerId, readBars, saveBars} from './config.js';
 
 export const MODULES = [
+    ['notifications', 'Notifications'],
     ['logo', 'Logo'],
     ['workspaces', 'Workspaces'],
     ['window', 'Focused app'],
@@ -14,7 +15,10 @@ export const MODULES = [
     ['weather', 'Weather'],
     ['dashboard', 'Dashboard'],
     ['volume', 'Volume'],
-    ['network', 'Network'],
+    ['network', 'Wi-Fi'],
+    ['output', 'Sound output'],
+    ['bluetooth', 'Bluetooth'],
+    ['brightness', 'Brightness'],
     ['battery', 'Battery'],
     ['power', 'Power'],
     ['screenshot', 'Screenshot'],

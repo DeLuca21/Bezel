@@ -16,7 +16,7 @@ export function buildOsd(bar) {
         value => services.setVolume(value * services.maxVolume),
         () => services.volumeIcon, 8, switchOn(volume, bar._state, 'popIcon'), switchOn(volume, bar._state, 'popValue'),
         () => services.stream?.is_muted ? 'Muted' : `${Math.round(services.volume * 100)}%`,
-        () => services.toggleMute()));
+        switchOn(volume, bar._state, 'showMute') ? () => services.toggleMute() : null));
     if (services.hasBrightness)
         box.add_child(edgeLevel(bar, 'display-brightness-symbolic',
             () => services.brightnessLevel, value => services.setBrightness(value),
@@ -27,24 +27,40 @@ export function buildOsd(bar) {
 }
 
 export function buildStacked(bar) {
-    const services = bar._overlay.services;
-    const volume = bar._state.modules.find(item => item.id === 'volume');
     const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 12px;'});
-    box.add_child(flatLevel(bar, 'audio-volume-high-symbolic', 'Volume',
-        () => services.stream?.is_muted ? 0 : Math.min(services.maxVolume, services.volume),
-        value => services.setVolume(value), () => services.maxVolume,
-        switchOn(volume, bar._state, 'popIcon'), switchOn(volume, bar._state, 'popValue'), () => services.volumeIcon,
-        () => services.stream?.is_muted ? 'Muted' : `${Math.round(services.volume * 100)}%`));
-    if (services.hasBrightness)
+    box.add_child(buildLevelControl(bar, 'volume', false));
+    if (bar._overlay.services.hasBrightness)
+        box.add_child(buildLevelControl(bar, 'brightness', false));
+    if (switchOn(bar._state.modules.find(item => item.id === 'volume'), bar._state, 'showMute'))
+        box.add_child(buildMuteButton(bar));
+    return box;
+}
+
+export function buildMuteButton(bar) {
+    const mute = new St.Button({can_focus: true, label: 'Mute / unmute', style_class: 'bezel-action',
+        style: `background-color: ${bar._theme.surface}; color: ${bar._theme.fg}; border-radius: 14px; padding: 10px;`});
+    mute.connect('clicked', () => bar._overlay.services.toggleMute());
+    return mute;
+}
+
+// The same controls are used by automatic groups and editable rows.
+export function buildLevelControl(bar, id, withMute = true, options = null) {
+    const services = bar._overlay.services;
+    const volume = bar._state.modules.find(item => item.id === 'volume') || {id: 'volume', ...options};
+    const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, x_expand: true, style: 'spacing: 12px;'});
+    if (id === 'volume') {
+        box.add_child(flatLevel(bar, 'audio-volume-high-symbolic', 'Volume',
+            () => services.stream?.is_muted ? 0 : Math.min(services.maxVolume, services.volume),
+            value => services.setVolume(value), () => services.maxVolume,
+            switchOn(volume, bar._state, 'popIcon'), switchOn(volume, bar._state, 'popValue'), () => services.volumeIcon,
+            () => services.stream?.is_muted ? 'Muted' : `${Math.round(services.volume * 100)}%`));
+        if (withMute && switchOn(volume, bar._state, 'showMute')) box.add_child(buildMuteButton(bar));
+    } else if (services.hasBrightness) {
         box.add_child(flatLevel(bar, 'display-brightness-symbolic', 'Brightness',
             () => services.brightnessLevel, value => services.setBrightness(value), () => 1,
             switchOn(volume, bar._state, 'brightIcon'), switchOn(volume, bar._state, 'brightValue'),
-            () => 'display-brightness-symbolic',
-            () => `${Math.round(services.brightnessLevel * 100)}%`));
-    const mute = new St.Button({can_focus: true, label: 'Mute / unmute', style_class: 'bezel-action',
-        style: `background-color: ${bar._theme.surface}; color: ${bar._theme.fg}; border-radius: 14px; padding: 10px;`});
-    mute.connect('clicked', () => services.toggleMute());
-    box.add_child(mute);
+            () => 'display-brightness-symbolic', () => `${Math.round(services.brightnessLevel * 100)}%`));
+    }
     return box;
 }
 
@@ -147,7 +163,7 @@ function flatLevel(bar, fallbackIcon, name, getValue, setValue, getMax, showIcon
     const slider = new Slider.Slider(0);
     slider.accessible_name = name;
     slider.x_expand = true;
-    slider.style = `height: 28px; min-width: 160px; -barlevel-height: 24px; color: ${theme.accent}; -barlevel-active-background-color: ${theme.accent}; -barlevel-background-color: ${theme.border};`;
+    slider.style = `height: 28px; min-width: 40px; -barlevel-height: 24px; color: ${theme.accent}; -barlevel-active-background-color: ${theme.accent}; -barlevel-background-color: ${theme.border};`;
     let updating = false;
     slider.connect('notify::value', () => {
         if (!updating)

@@ -1,3 +1,5 @@
+import {buildGroupPopout} from './groupPopout.js';
+import {GROUP_ITEMS, groupLayoutPreset} from './groupLayout.js';
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
@@ -19,12 +21,12 @@ import {paintCorner} from './drawing.js';
 import {Services} from './services.js';
 import {DesktopFrame} from './frame.js';
 import {monthGrid, openCalendarDate} from './calendar.js';
-import {Weather, weatherWidget, forecastCard, railTemp} from './weather.js';
+import {Weather, weatherWidget, railTemp} from './weather.js';
 import {buildMediaFace, buildMicFace, buildMicPanel, buildClipboardPanel, buildKeyboardFace, buildKeyboardPanel, buildAwakeFace, buildValueButton} from './extraModules.js';
 import {buildDashboard} from './dashboard.js';
-import {buildOsd, buildStacked, buildSessionRail} from './sidebar.js';
+import {buildOsd, buildStacked, buildLevelControl, buildSessionRail} from './sidebar.js';
 import {buildLauncher} from './launcher.js';
-import {buildDeviceControls} from './quickControls.js';
+import {buildDeviceControls, buildDevicePanel, deviceAvailable} from './quickControls.js';
 import {IndicatorBridge} from './indicators.js';
 import {logoFile} from './logos.js';
 import * as Config from 'resource:///org/gnome/shell/misc/config.js';
@@ -52,6 +54,13 @@ export class BezelOverlay {
             if (key === 'preferences-bar') {
                 this.settingsBar = this._settings.get_int(key);
                 for (const bar of this._bars) bar.syncEditOutline();
+                return;
+            }
+            if (key === 'preferences-group') return;
+            if (key === 'group-preview') {
+                try { this._groupPreview = JSON.parse(settings.get_string(key)); } catch { this._groupPreview = null; }
+                if (this._groupPreview?.action === 'open') this._showGroupPreview();
+                else { this._groupPreview = null; this._bars.forEach(bar => { if (bar._popoutId?.startsWith('group:')) bar._close(); }); }
                 return;
             }
             if (key === 'show-settings') {
@@ -167,10 +176,20 @@ export class BezelOverlay {
                 }
             }
             this._syncEditEscape();
+            if (this._groupPreview?.action === 'open') this._showGroupPreview();
         } catch (error) {
             this._clear();
             throw error;
         }
+    }
+
+    _showGroupPreview() {
+        const request = this._groupPreview;
+        const bar = this._bars.find(bar => bar._index === request?.bar && bar._monitor.index === Main.layoutManager.primaryIndex);
+        const group = bar && barGroups(bar._state).find(group => group.id === request.group);
+        if (!group?.popout) return;
+        const anchor = bar._order.find(item => item.id === group.id)?.actor ?? bar._actor;
+        bar._open(`group:${group.id}`, anchor, () => buildGroupPopout(bar, group), 'right');
     }
 
     openPreferences() {
@@ -180,6 +199,7 @@ export class BezelOverlay {
     openSettings(options = {}) {
         try {
             this._settings.set_int('preferences-bar', Number.isInteger(options.barIndex) ? options.barIndex : -1);
+            this._settings.set_string('preferences-group', options.groupId || '');
             this._openPreferences?.()?.catch?.(error => console.error('Bezel preferences failed', error));
         } catch (error) {
             console.error('Bezel settings failed to open', error);
@@ -712,7 +732,7 @@ class Bar {
                 return Clutter.EVENT_PROPAGATE;
             module = null;
         }
-        if (this._state.editMode && module)
+        if (module && (this._state.editMode || barGroups(this._state).some(group => group.id === module.id)))
             this._toggle(`module-${module.id}`, module.actor, () => this._moduleSettingsMenu(module.id));
         else
             this._toggle('bar-menu', this._actor, () => this._barMenu());
@@ -788,6 +808,8 @@ class Bar {
         }
         const group = barGroups(readBars(settings)[this._index]).find(item => item.id === id);
         if (group) {
+            box.add_child(this._action('Edit group popout…', 'document-edit-symbolic', () =>
+                this._overlay.openSettings({barIndex: this._index, groupId: group.id})));
             box.add_child(this._action('Ungroup · keep contents', 'edit-clear-symbolic', () => deleteGroup(settings, this._index, id)));
             for (const member of members) {
                 box.add_child(this._action(`Remove ${isSpacer(member.id) ? 'empty space' : member.id} from group`, 'list-remove-symbolic', () => assignGroup(settings, this._index, member.id, '')));
@@ -2324,6 +2346,7 @@ class Bar {
     }
 
     _module(id, icon) {
+        if (id === 'notifications') return this._panelModule(id, this._button('preferences-system-notifications-symbolic', icon), () => buildNotificationCenter(this));
         switch (id) {
         case 'logo': {
             const mark = new St.Icon({
@@ -2366,6 +2389,10 @@ class Bar {
             return this._date();
         case 'clock':
             return this._clock();
+        case 'output':
+        case 'bluetooth':
+        case 'brightness':
+            return this._panelModule(id, this._button(GROUP_ITEMS[id].icon, icon), () => this._groupItem({module: id, view: 'full'}));
         case 'volume':
         case 'network':
         case 'battery':
@@ -2587,6 +2614,10 @@ class Bar {
 
     _cluster(members, icon) {
         const ids = members.map(item => item.id);
+        const group = barGroups(this._state).find(group => group.id === members[0]?.group);
+        if (group?.popout) return this._customGroupFace(members, group, icon);
+        if (group && ids.some(id => ['output', 'bluetooth', 'brightness'].includes(id)))
+            return this._customGroupFace(members, {...group, popout: groupLayoutPreset('stacked', ids)}, icon);
         if (ids.length === 1) {
             const face = this._module(ids[0], icon);
             if (face)
@@ -2618,6 +2649,91 @@ class Bar {
             box.add_child(face);
         }
         return box;
+    }
+
+    _customGroupFace(members, group, icon) {
+        const box = new St.BoxLayout({orientation: this._actor.orientation, style: 'spacing: 6px;',
+            x_align: Clutter.ActorAlign.CENTER});
+        const ids = group.face === 'single' ? [null] : members.map(item => item.id);
+        for (const id of ids) {
+            const direct = id && (group.clicks?.[id] === 'direct' || ['apps', 'workspaces'].includes(id));
+            const face = direct ? this._module(id, icon) : id && ['clock', 'date', 'weather', 'volume', 'network', 'battery'].includes(id)
+                ? this._groupFace(id, [id], icon) : id ? this._groupFace(id, [id], icon) : this._button(group.icon || 'view-grid-symbolic', icon);
+            if (!face) continue;
+            if (!direct) {
+                const panel = () => buildGroupPopout(this, group, group.clicks?.[id] === 'tab' ? id : null);
+                face._activate = () => this._toggle(`group:${group.id}`, face, panel);
+                face.accessible_name = id ? GROUP_ITEMS[id]?.title || id : group.name;
+                this._hoverDrawer(`group:${group.id}`, face, panel, typeof group.hover === 'boolean' ? group.hover : members.some(member => this._hoverFor(member.id)));
+            }
+            this._wire(face); box.add_child(face);
+        }
+        return box;
+    }
+
+    _groupItemAvailable(id) {
+        if (['output', 'network', 'bluetooth'].includes(id)) return deviceAvailable(id);
+        if (id === 'brightness') return this._overlay.services.hasBrightness;
+        if (id === 'battery') return this._overlay.services.batteryInfo.present;
+        return true;
+    }
+
+    _notificationsAction() {
+        return this._action('Notifications', 'preferences-system-notifications-symbolic', () => this._open('notifications', this._actor, () => buildNotificationCenter(this)));
+    }
+
+    _groupItem(item) {
+        const id = item.module;
+        if (id === 'notifications') return this._notificationsAction();
+        const services = this._overlay.services;
+        const box = () => new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 8px;', x_expand: true});
+        if (['output', 'network', 'bluetooth'].includes(id)) {
+            const root = box();
+            if (id === 'network' && !item.groupHeader) {
+                const line = this._networkPopoutLine(item.options);
+                if (line) root.add_child(line);
+            }
+            root.add_child(buildDevicePanel(this, id, item.options));
+            return root;
+        }
+        if (id === 'logo' || id === 'apps') return this._action('Applications', GROUP_ITEMS.logo.icon, () => this._overlay.toggleLauncher(this));
+        if (id === 'dashboard') return this._action('Dashboard', GROUP_ITEMS.dashboard.icon, () => this._open('dashboard', this._actor, () => this._dashboard()));
+        if (item.view === 'action' && id === 'power') return this._action('Power menu', GROUP_ITEMS.power.icon, () => this._open('power', this._actor, () => this._session()));
+        if (item.view === 'action' && id === 'settings') return this._action('Settings', GROUP_ITEMS.settings.icon, () => this._overlay.openSettings());
+        if (id === 'volume' || id === 'brightness') return buildLevelControl(this, id, true, item.options);
+        if (id === 'clock' || id === 'date') {
+            const root = box();
+            const value = label(this._theme.fg, id === 'clock' ? 26 : 16);
+            root.add_child(value);
+            const update = () => { value.text = GLib.DateTime.new_now_local().format(id === 'date' ? '%A, %e %B' : timePattern(this._state.timeFormat === '12h', this._state.clockSeconds)) || ''; return GLib.SOURCE_CONTINUE; };
+            update();
+            const timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, update);
+            this._popupCleanups.push(() => GLib.source_remove(timer));
+            return root;
+        }
+        if (id === 'calendar') return this._monthGrid();
+        if (id === 'weather') return weatherWidget(this);
+        if (id === 'power') return this._session();
+        if (id === 'media') return this._mediaCard(true, 72);
+        if (id === 'microphone') return buildMicPanel(this, item.options);
+        if (id === 'clipboard') return buildClipboardPanel(this);
+        if (id === 'keyboard') return buildKeyboardPanel(this);
+        if (id === 'awake') {
+            const toggle = new St.Button({can_focus: true, style_class: 'bezel-action'});
+            this._popupCleanups.push(services.subscribe(() => { toggle.label = `Keep awake · ${services.awake ? 'On' : 'Off'}`; }));
+            toggle.connect('clicked', () => services.setAwake(!services.awake)); return toggle;
+        }
+        if (id === 'battery') {
+            const value = label(this._theme.fg, 14, services.batteryInfo.text);
+            this._popupCleanups.push(services.subscribe(() => { value.text = services.batteryInfo.text; })); return value;
+        }
+        if (id === 'window') return label(this._theme.fg, 14, global.display.focus_window?.get_title() || 'No focused window');
+        if (id === 'workspaces') {
+            const root = box(); const manager = global.workspace_manager;
+            for (let i = 0; i < manager.n_workspaces; i++) root.add_child(this._action(`Workspace ${i + 1}`, GROUP_ITEMS.workspaces.icon, () => manager.get_workspace_by_index(i)?.activate(global.get_current_time())));
+            return root;
+        }
+        return moduleSection(this, id);
     }
 
     _groupFace(id, ids, icon) {
@@ -2687,6 +2803,7 @@ class Bar {
             box.add_child(this._session());
         if (ids.includes('weather') && !ids.some(id => id === 'clock' || id === 'date'))
             box.add_child(weatherWidget(this));
+        if (ids.includes('notifications') && !ids.some(id => id === 'clock' || id === 'date')) box.add_child(this._notificationsAction());
         if (ids.includes('media'))
             box.add_child(this._mediaCard(true, 72));
         if (ids.includes('microphone'))
@@ -3107,6 +3224,8 @@ class Bar {
         const layout = sliderLayout(this._state.modules.find(item => item.id === 'volume'), this._overlay._settings);
         const openId = layout === 'edge' ? 'osd' : 'status';
         const build = () => {
+            if (wanted.length === 1 && (wanted[0] !== 'volume' || layout === 'drawer'))
+                return this._groupItem({module: wanted[0], view: 'full'});
             const body = layout === 'edge' ? buildOsd(this) : layout === 'stack' ? buildStacked(this) : this._statusPanel();
             if (layout === 'drawer' || !wanted.includes('network'))
                 return body;
@@ -3143,8 +3262,8 @@ class Bar {
             this._place();
     }
 
-    _networkPopoutLine() {
-        const module = this._state.modules.find(item => item.id === 'network');
+    _networkPopoutLine(options = null) {
+        const module = this._state.modules.find(item => item.id === 'network') || {id: 'network', ...options};
         if (!switchOn(module, this._state, 'popValue'))
             return null;
         const name = label(this._theme.fg, 14, '');
@@ -3266,7 +3385,7 @@ class Bar {
         const scroll = new St.ScrollView({
             style_class: 'bezel-popout-scroll', overlay_scrollbars: true,
             hscrollbar_policy: St.PolicyType.NEVER,
-            vscrollbar_policy: id === 'dashboard' ? St.PolicyType.AUTOMATIC : St.PolicyType.NEVER,
+            vscrollbar_policy: id === 'dashboard' || String(id).startsWith('group:') ? St.PolicyType.AUTOMATIC : St.PolicyType.NEVER,
             x_expand: true, y_expand: true,
         });
         const menu = this._menuPopup(id);
@@ -3454,7 +3573,7 @@ class Bar {
         const scrolling = this._popupScrolls();
         if (scrolling && this._popupScroll) {
             const chrome = this._popupChrome?.height ?? 0;
-            const room = Math.max(48, height - chrome - (this._popoutId === 'dashboard' ? 36 : 24));
+            const room = Math.max(48, height - chrome - (this._popoutId === 'dashboard' || String(this._popoutId).startsWith('group:') ? 36 : 24));
             this._popupScroll.height = room;
             this._popupScroll.get_parent().height = room;
         }
@@ -3470,7 +3589,7 @@ class Bar {
 
     _popupScrolls() {
         return ['dashboard', 'notifications', 'launcher', 'settings', 'vpn', 'performance'].includes(this._popoutId)
-            || this._menuPopup();
+            || String(this._popoutId).startsWith('group:') || this._menuPopup();
     }
 
     _fitPopup() {
@@ -3480,7 +3599,7 @@ class Bar {
         const width = Math.max(1, this._popout.width - pad);
         const app = String(this._popoutId).startsWith('app:');
         const scrolling = this._popupScrolls();
-        const cap = this._popoutId === 'dashboard' ? 900 : app ? 420 : scrolling ? 480
+        const cap = this._popoutId === 'dashboard' || String(this._popoutId).startsWith('group:') ? 900 : app ? 420 : scrolling ? 480
             : ['dashboard', 'status', 'clock', 'osd', 'power'].includes(this._popoutId) ? 900 : 400;
         const extent = this._stackHeight(this._popupContent, width, scrolling ? 8000 : cap);
         let chrome = 0;
@@ -3689,6 +3808,7 @@ class Bar {
         this._cancel('_closeTimer');
         for (const id of ['status', 'clock', 'power', 'dashboard'])
             this._cancel(`_drawerHover_${id}`);
+        if (this._popoutId) this._cancel(`_drawerHover_${this._popoutId}`);
         this._cancel('_dashboardTimer');
         this._cancel('_fitPopupId');
         this._cancel('_deviceListFitId');
@@ -3788,14 +3908,13 @@ class Bar {
 
     _calendar(ids = null) {
         const members = ids ?? this._state.modules.filter(item => item.group === 'clock' || item.id === 'clock' || item.id === 'date').map(item => item.id);
-        const nowDate = GLib.DateTime.new_now_local();
         const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 8px;'});
-        box.add_child(label(this._theme.fg, 28, now('%H:%M')));
-        box.add_child(label(this._theme.muted, 13, nowDate.format('%A, %B %e') ?? ''));
+        box.add_child(this._groupItem({module: 'clock'}));
+        box.add_child(this._groupItem({module: 'date'}));
         box.add_child(this._monthGrid());
         if (members.includes('weather'))
-            box.add_child(forecastCard(this));
-        box.add_child(this._action('Notifications', 'preferences-system-notifications-symbolic', () => this._open('notifications', this._order.find(item => item.id === 'clock')?.actor ?? this._actor, () => buildNotificationCenter(this))));
+            box.add_child(weatherWidget(this));
+        box.add_child(this._notificationsAction());
         return box;
     }
 
@@ -3850,35 +3969,7 @@ class Bar {
         const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 14px;'});
         const title = label(this._theme.fg, 18, 'Quick controls');
         box.add_child(title);
-        const volume = label(this._theme.muted, 13);
-        box.add_child(volume);
-        const volumeModule = this._state.modules.find(item => item.id === 'volume');
-        this._levelSlider(box, volume, 'Output volume',
-            () => services.stream?.is_muted ? 0 : Math.min(services.maxVolume, services.volume),
-            value => services.setVolume(value),
-            () => {
-                const reading = services.stream ? (services.stream.is_muted ? 'Muted' : `${Math.round(services.volume * 100)}%`) : 'No audio output';
-                if (switchOn(volumeModule, this._state, 'popValue'))
-                    return `Volume · ${reading}`;
-                return switchOn(volumeModule, this._state, 'popIcon') ? 'Volume' : '';
-            },
-            () => services.maxVolume);
-        if (services.hasBrightness) {
-            const bright = label(this._theme.muted, 13);
-            box.add_child(bright);
-            this._levelSlider(box, bright, 'Brightness',
-                () => services.brightnessLevel, value => services.setBrightness(value),
-                () => {
-                    if (switchOn(volumeModule, this._state, 'brightValue'))
-                        return `Brightness · ${Math.round(services.brightnessLevel * 100)}%`;
-                    return switchOn(volumeModule, this._state, 'brightIcon') ? 'Brightness' : '';
-                },
-                () => 1);
-        }
-        const mute = new St.Button({can_focus: true, style_class: 'bezel-action', label: 'Mute / unmute',
-            style: `background-color: ${this._theme.surface}; color: ${this._theme.fg}; border-radius: 14px; padding: 12px 10px;`});
-        mute.connect('clicked', () => services.toggleMute());
-        box.add_child(mute);
+        box.add_child(buildStacked(this));
         const networkModule = this._state.modules.find(item => item.id === 'network');
         const showName = switchOn(networkModule, this._state, 'popValue');
         const network = label(this._theme.fg, 13);

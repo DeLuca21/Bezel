@@ -1,3 +1,4 @@
+import {buildGroupEditor} from './groupEditor.js';
 import Adw from 'gi://Adw';
 import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
@@ -80,6 +81,8 @@ export class SettingsWindow {
         this._build();
         this.changed = settings.connect('changed', (_settings, key) => {
             if (this.writing) return;
+            if (key === 'group-preview') return;
+            if (key === 'preferences-group') { this.groupId = settings.get_string(key) || null; this.mode = 'bar'; }
             if (key === 'preferences-bar') {
                 const index = settings.get_int(key);
                 if (index >= 0) { this.barIndex = index; this.mode = 'bar'; this.moduleId = null; }
@@ -89,6 +92,8 @@ export class SettingsWindow {
         this.window.connect('close-request', () => {
             settings.disconnect(this.changed);
             settings.set_int('preferences-bar', -1);
+            settings.set_string('preferences-group', '');
+            settings.set_string('group-preview', '');
             if (this.refreshId) GLib.source_remove(this.refreshId);
             if (this.cardId) GLib.source_remove(this.cardId);
             if (this.laneId) GLib.source_remove(this.laneId);
@@ -101,6 +106,7 @@ export class SettingsWindow {
 
     open(index = -1) {
         if (index >= 0) { this.barIndex = index; this.mode = 'bar'; }
+        this.groupId = this.settings.get_string('preferences-group') || null;
         this._refresh();
         this.window.present();
     }
@@ -168,6 +174,7 @@ export class SettingsWindow {
         saved.append(savedScroll);
         this.undo = button('Undo', () => this._confirmLayout(() => this._write(() => undoPreset(this.settings))));
         saved.append(this.undo);
+        this.savedRow = saved;
         content.append(saved);
         const body = horizontal(16, {vexpand: true});
         const sidebar = vertical(12, {width_request: 260});
@@ -182,8 +189,9 @@ export class SettingsWindow {
         sidebar.append(this.nav);
         this.status = label('', 'muted');
         sidebar.append(this.status);
-        body.append(new Gtk.ScrolledWindow({child: sidebar, width_request: 260,
-            hscrollbar_policy: Gtk.PolicyType.NEVER, vscrollbar_policy: Gtk.PolicyType.AUTOMATIC}));
+        this.sidebarScroll = new Gtk.ScrolledWindow({child: sidebar, width_request: 260,
+            hscrollbar_policy: Gtk.PolicyType.NEVER, vscrollbar_policy: Gtk.PolicyType.AUTOMATIC});
+        body.append(this.sidebarScroll);
         this.card = vertical(14, {hexpand: true, valign: Gtk.Align.START});
         this.card.add_css_class('editor-card');
         this.editorScroll = scroller(this.card);
@@ -194,6 +202,7 @@ export class SettingsWindow {
     }
 
     choose(mode, index = this.barIndex) {
+        if (this.groupId) { this.groupId = null; this.groupPreviewOpen = false; this.settings.set_string('group-preview', ''); this.settings.set_string('preferences-group', ''); }
         this.mode = mode;
         this.barIndex = index;
         this.moduleId = null;
@@ -259,6 +268,7 @@ export class SettingsWindow {
     }
 
     _refresh() {
+        this._syncGroupEditorChrome();
         this._loadCss();
         const bars = readBars(this.settings);
         this.barIndex = Math.max(0, Math.min(this.barIndex, bars.length - 1));
@@ -291,7 +301,7 @@ export class SettingsWindow {
         const position = token === this.scrollToken && !reveal ? this.editorScroll.vadjustment.value : 0;
         this.scrollToken = token;
         clear(this.card);
-        ({bar: () => this._barCard(bars[this.barIndex]), look: () => this._paletteCard(), frame: () => this._frameCard(),
+        ({bar: () => this.groupId ? buildGroupEditor(this, bars[this.barIndex]) : this._barCard(bars[this.barIndex]), look: () => this._paletteCard(), frame: () => this._frameCard(),
             shortcuts: () => this._shortcutCard(), opening: () => this._openingCard(), desktop: () => this._desktopCard()})[this.mode]?.();
         this._holdScroll(position, false);
     }
@@ -321,13 +331,20 @@ export class SettingsWindow {
         });
     }
 
+    _syncGroupEditorChrome() {
+        const editing = Boolean(this.groupId && this.mode === 'bar');
+        for (const widget of [this.presets, this.savedRow, this.sidebarScroll, this.editButton])
+            if (widget) widget.visible = !editing;
+    }
+
     _refreshCard() {
+        this._syncGroupEditorChrome();
         this._closeItemPopover();
         const bars = readBars(this.settings);
         const position = this.editorScroll.vadjustment.value;
         clear(this.card);
         this.lanes = null;
-        ({bar: () => this._barCard(bars[this.barIndex]), look: () => this._paletteCard(), frame: () => this._frameCard(),
+        ({bar: () => this.groupId ? buildGroupEditor(this, bars[this.barIndex]) : this._barCard(bars[this.barIndex]), look: () => this._paletteCard(), frame: () => this._frameCard(),
             shortcuts: () => this._shortcutCard(), opening: () => this._openingCard(), desktop: () => this._desktopCard()})[this.mode]?.();
         this._holdScroll(position, false);
         this.monitor.queue_draw();
@@ -861,11 +878,20 @@ export class SettingsWindow {
         GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => { groupReady = true; return GLib.SOURCE_REMOVE; });
     }
 
-    _moduleOptions(box, current, bar) {
+    _moduleOptions(box, current, bar, writeOverride = null) {
+        const write = values => {
+            Object.assign(current, values);
+            if (writeOverride) writeOverride(values);
+            else this._write(() => patchModule(this.settings, this.barIndex, current.id, values), false);
+        };
         const id = current.id;
+        if (['volume', 'microphone'].includes(id))
+            box.append(this._toggle('Show mute button', switchOn(current, bar, 'showMute'), value => write({showMute: value})));
+        if (['network', 'bluetooth'].includes(id))
+            box.append(this._toggle('Show on/off button', switchOn(current, bar, 'showToggle'), value => write({showToggle: value})));
         const switches = id === 'volume' || id === 'network' ? null : MODULE_SWITCHES[id];
         if (switches) {
-            box.append(label('Show', 'subheading'));
+            box.append(label(id === 'microphone' ? 'Bar and popout' : 'On the bar', 'subheading'));
             for (const [key, title] of switches)
                 box.append(this._toggle(title, switchOn(current, bar, key), value => {
                     const values = {[key]: value};
@@ -877,13 +903,13 @@ export class SettingsWindow {
                         if (!icon && !reading && !art)
                             values.showIcon = true;
                     }
-                    this._write(() => patchModule(this.settings, this.barIndex, id, values), false);
-                    this._queueLanes(id);
+                    write(values);
+                    if (!writeOverride) this._queueLanes(id);
                 }));
         }
         if (id === 'workspaces')
             box.append(this._segments([['pills', 'Pills'], ['numbers', 'Numbers'], ['icons', 'App icons']], current.workspaceStyle || 'pills', value => {
-                this._write(() => patchModule(this.settings, this.barIndex, id, {workspaceStyle: value}), false);
+                write({workspaceStyle: value});
             }));
         if (id === 'volume') {
             box.width_request = 300;
@@ -896,17 +922,17 @@ export class SettingsWindow {
                     const reading = key === 'showValue' ? value : switchOn(next, bar, 'showValue');
                     if (!icon && !reading)
                         values.showIcon = true;
-                    this._write(() => patchModule(this.settings, this.barIndex, id, values), false);
-                    this._queueLanes(id);
+                    write(values);
+                    if (!writeOverride) this._queueLanes(id);
                 }));
             box.append(label('In the popout', 'subheading'));
             for (const [key, title] of [['popIcon', 'Icon'], ['popValue', 'Percentage'], ['brightIcon', 'Brightness icon'], ['brightValue', 'Brightness percentage']])
                 box.append(this._toggle(title, switchOn(current, bar, key), value => {
-                    this._write(() => patchModule(this.settings, this.barIndex, id, {[key]: value}), false);
+                    write({[key]: value});
                 }));
-            box.append(label('Sliders', 'subheading'));
+            box.append(label('Automatic popout arrangement', 'subheading'));
             box.append(this._segments([['edge', 'Side by side'], ['stack', 'Stacked'], ['drawer', 'In drawer']], sliderLayout(current, this.settings), value => {
-                this._write(() => patchModule(this.settings, this.barIndex, id, {sliderStyle: value}), false);
+                write({sliderStyle: value});
             }));
         }
         if (id === 'network') {
@@ -919,12 +945,12 @@ export class SettingsWindow {
                     const reading = key === 'showValue' ? value : switchOn(next, bar, 'showValue');
                     if (!icon && !reading)
                         values.showIcon = true;
-                    this._write(() => patchModule(this.settings, this.barIndex, id, values), false);
-                    this._queueLanes(id);
+                    write(values);
+                    if (!writeOverride) this._queueLanes(id);
                 }));
             box.append(label('In the popout', 'subheading'));
             box.append(this._toggle('Name', switchOn(current, bar, 'popValue'), value => {
-                this._write(() => patchModule(this.settings, this.barIndex, id, {popValue: value}), false);
+                write({popValue: value});
             }));
         }
         if (id === 'indicators')
@@ -938,17 +964,17 @@ export class SettingsWindow {
         if (id === 'power') {
             box.width_request = 340;
             box.append(this._segments([['list', 'Labels'], ['rail', 'Icons']], powerLayout(current, this.settings), value => {
-                this._write(() => patchModule(this.settings, this.barIndex, id, {powerStyle: value}), false);
+                write({powerStyle: value});
             }));
             box.append(this._toggle('Dim the desktop', powerDim(current, this.settings), value => {
-                this._write(() => patchModule(this.settings, this.barIndex, id, {sessionDim: value}), false);
+                write({sessionDim: value});
             }));
             box.append(label('Where it opens', 'subheading'));
             box.append(this._spotGrid('power-position'));
         }
         if (!current.group && (PANEL_MODULES.has(id) || ['screenshot', 'dnd', 'nightlight', 'dark', 'awake'].includes(id)))
             box.append(this._toggle('Open on hover', hoverEnabled(current, null, this.settings), value => {
-                this._write(() => patchModule(this.settings, this.barIndex, id, {hover: value}), false);
+                write({hover: value});
             }));
     }
 
@@ -961,6 +987,11 @@ export class SettingsWindow {
         const members = bar.modules.filter(item => item.group === live.id);
         const hovering = typeof live.hover === 'boolean' ? live.hover : members.some(item => hoverEnabled(item, null, this.settings)) || !members.length;
         const box = vertical(8, {margin_top: 10, margin_bottom: 10, margin_start: 12, margin_end: 12, width_request: 240});
+        box.append(button('Edit popout layout…', () => {
+            popover.popdown(); this.groupId = live.id;
+            this.writing = true; this.settings.set_string('preferences-group', live.id); this.writing = false;
+            this._queueCard();
+        }));
         box.append(button('Rename', () => {
             popover.popdown();
             this._nameDialog('Rename group', 'This name is only a label.', live.name, name => {

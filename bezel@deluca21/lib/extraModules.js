@@ -109,9 +109,9 @@ export function buildMicFace(bar, size) {
     return button;
 }
 
-export function buildMicPanel(bar) {
+export function buildMicPanel(bar, options = null) {
     const services = bar._overlay.services;
-    const module = bar._state.modules.find(item => item.id === 'microphone');
+    const module = bar._state.modules.find(item => item.id === 'microphone') || {id: 'microphone', ...options};
     const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 10px;'});
     const row = new St.BoxLayout({style: 'spacing: 8px;', y_align: Clutter.ActorAlign.CENTER});
     const icon = new St.Icon({icon_name: 'audio-input-microphone-symbolic', icon_size: 16, style: `color: ${bar._theme.muted};`});
@@ -136,7 +136,8 @@ export function buildMicPanel(bar) {
     row.add_child(slider);
     row.add_child(reading);
     box.add_child(row);
-    box.add_child(mute);
+    if (switchOn(module, bar._state, 'showMute')) box.add_child(mute);
+    else mute.destroy();
     const unsubscribe = services.subscribe(() => {
         updating = true;
         slider.value = services.source?.is_muted ? 0 : services.micVolume;
