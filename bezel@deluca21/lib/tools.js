@@ -1,6 +1,7 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import St from 'gi://St';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 const PANELS = [
     ['Wi-Fi', 'network-wireless-symbolic', 'wifi'],
@@ -33,9 +34,43 @@ export function openSettings(panel) {
     }
 }
 
+const RECORDING_ICON = 'media-record-symbolic';
+const RECORDING_COLOR = '#e01b24';
+
 export async function openScreenshot() {
     const screenshot = await import('resource:///org/gnome/shell/ui/screenshot.js');
     screenshot.showScreenshotUI();
+}
+
+export function screenshotRecording() {
+    return Main.screenshotUI?.screencast_in_progress === true;
+}
+
+export function screenshotFace(idleColor) {
+    const recording = screenshotRecording();
+    return {
+        icon: recording ? RECORDING_ICON : 'camera-photo-symbolic',
+        color: recording ? RECORDING_COLOR : idleColor,
+        name: recording ? 'Stop recording' : 'Screenshot',
+        label: recording ? 'Stop recording' : 'Take a screenshot',
+    };
+}
+
+export function watchScreenshotRecording(actor, sync) {
+    const ui = Main.screenshotUI;
+    if (!ui)
+        return;
+    const id = ui.connect('notify::screencast-in-progress', sync);
+    actor.connect('destroy', () => ui.disconnect(id));
+}
+
+export async function activateScreenshot() {
+    const ui = Main.screenshotUI;
+    if (ui?.screencast_in_progress) {
+        await ui.stopScreencast();
+        return;
+    }
+    await openScreenshot();
 }
 
 function desktopSettings(schema) {
@@ -100,7 +135,7 @@ export function darkStyleControl() {
 
 export function moduleSection(bar, id) {
     if (id === 'screenshot')
-        return actionRow(bar, 'camera-photo-symbolic', 'Take a screenshot', () => openScreenshot().catch(() => {}));
+        return screenshotRow(bar);
     if (id === 'dnd')
         return toggleRow(bar, 'Do Not Disturb', 'notifications-disabled-symbolic', dndControl());
     if (id === 'nightlight')
@@ -134,6 +169,34 @@ function toggleRow(bar, name, iconName, control) {
     button.connect('destroy', () => control.settings.disconnect(signal));
     button.connect('clicked', () => { control.toggle(); sync(); });
     sync();
+    return button;
+}
+
+function screenshotRow(bar) {
+    const theme = bar._theme;
+    const button = new St.Button({
+        can_focus: true, x_expand: true, style_class: 'bezel-action',
+        style: `background-color: ${theme.surface}; color: ${theme.fg}; border-radius: 14px; padding: 12px 10px;`,
+    });
+    const row = new St.BoxLayout({style: 'spacing: 10px;'});
+    const icon = new St.Icon({icon_name: 'camera-photo-symbolic', icon_size: 18, style: `color: ${theme.fg};`});
+    const title = new St.Label({text: 'Take a screenshot', x_expand: true, style: `color: ${theme.fg}; font-size: 14px; font-weight: 600;`});
+    row.add_child(icon);
+    row.add_child(title);
+    button.child = row;
+    const sync = () => {
+        const face = screenshotFace(theme.fg);
+        icon.icon_name = face.icon;
+        icon.style = `color: ${face.color};`;
+        title.text = face.label;
+        button.accessible_name = face.label;
+    };
+    watchScreenshotRecording(button, sync);
+    sync();
+    button.connect('clicked', () => {
+        bar._close();
+        activateScreenshot().catch(error => console.warn(`Bezel: screenshot UI unavailable: ${error.message}`));
+    });
     return button;
 }
 

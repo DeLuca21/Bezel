@@ -40,7 +40,7 @@ import {allowsMotion, chromeOptions} from './compat.js';
 import {NotificationBridge, buildNotificationCenter} from './notifications.js';
 import {decorateScroll} from './overflow.js';
 import {MODULES, createGroup, deleteGroup, assignGroup, resizeSpacer, addBar, addModule, patchBar, patchModule, removeBar, removeModule, setFloating, setKind, nudgeUnit} from './settingsModel.js';
-import {bindToggle, darkStyleControl, dndControl, moduleSection, nightLightControl, openScreenshot, performanceMenu, settingsMenu, vpnMenu} from './tools.js';
+import {activateScreenshot, bindToggle, darkStyleControl, dndControl, moduleSection, nightLightControl, performanceMenu, screenshotFace, screenshotRecording, settingsMenu, vpnMenu, watchScreenshotRecording} from './tools.js';
 
 export class BezelOverlay {
     constructor(settings, openPreferences) {
@@ -1333,7 +1333,13 @@ class Bar {
         if (actor instanceof St.Button) {
             actor.can_focus = true;
             actor.add_style_class_name('bezel-button');
-            actor.connect('clicked', () => actor._activate?.());
+            actor.connect('clicked', () => {
+                if (actor._recordingStop && screenshotRecording()) {
+                    actor._recordingStop();
+                    return;
+                }
+                actor._activate?.();
+            });
         }
     }
 
@@ -2418,11 +2424,20 @@ class Bar {
             return this._panelModule('dashboard', this._button('view-paged-symbolic', icon), () => this._dashboard());
         case 'screenshot': {
             const button = this._button('camera-photo-symbolic', icon);
-            button.accessible_name = 'Screenshot';
-            button._activate = () => {
-                this._close();
-                openScreenshot().catch(error => console.warn(`Bezel: screenshot UI unavailable: ${error.message}`));
+            const sync = () => {
+                const face = screenshotFace(this._theme.fg);
+                button.child.icon_name = face.icon;
+                button.child.style = `color: ${face.color};`;
+                button.accessible_name = face.name;
             };
+            watchScreenshotRecording(button, sync);
+            sync();
+            const run = () => {
+                this._close();
+                activateScreenshot().catch(error => console.warn(`Bezel: screenshot UI unavailable: ${error.message}`));
+            };
+            button._activate = run;
+            button._recordingStop = run;
             this._hoverDrawer('screenshot', button, () => moduleSection(this, 'screenshot'), this._hoverFor('screenshot'));
             return button;
         }

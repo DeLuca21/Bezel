@@ -8,7 +8,7 @@ import {FILE_LIST_GAP, FILE_LIST_ICON, FILE_TILE_GAP, FILE_TILE_ICON, FILE_TILE_
 import {menuFromEvent} from './fileMenu.js';
 import {loadFileView, saveFileView} from './shelfStore.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-import {openScreenshot, openSettings} from './tools.js';
+import {activateScreenshot, openSettings} from './tools.js';
 const column = () => new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, x_expand: true, style: 'spacing: 8px;'});
 const text = (bar, value) => new St.Label({text: value, x_expand: true, style: `color: ${bar._theme.fg}; font-size: 13px;`});
 function action(bar, name, run) {
@@ -382,7 +382,7 @@ export function shortcutsPanel(bar, options) {
                 if (item.type === 'app') { const app = Shell.AppSystem.get_default().lookup_app(item.target); if (!app) throw new Error('Application is not installed'); app.activate(); }
                 else if (['file', 'folder'].includes(item.type)) launch(fileFor(item.target));
                 else {
-                    const actions = {screenshot: () => openScreenshot().catch(error => Main.notify('Screenshot', error.message)), settings: () => openSettings(), notifications: () => { const a = bar._notificationsAction(); a.emit('clicked', 1); a.destroy(); }, power: () => bar._open('power', bar._actor, () => bar._session())};
+                    const actions = {screenshot: () => activateScreenshot().catch(error => Main.notify('Screenshot', error.message)), settings: () => openSettings(), notifications: () => { const a = bar._notificationsAction(); a.emit('clicked', 1); a.destroy(); }, power: () => bar._open('power', bar._actor, () => bar._session())};
                     if (!Object.hasOwn(actions, item.target)) throw new Error('Unknown action'); bar._close(); actions[item.target](); return;
                 }
                 bar._close();
