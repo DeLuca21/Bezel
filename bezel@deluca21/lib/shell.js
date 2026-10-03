@@ -1006,8 +1006,10 @@ class Bar {
             reactive: true,
             x_expand: true,
             y_expand: true,
-            hscrollbar_policy: this._vertical ? St.PolicyType.NEVER : St.PolicyType.AUTOMATIC,
-            vscrollbar_policy: this._vertical ? St.PolicyType.AUTOMATIC : St.PolicyType.NEVER,
+            // EXTERNAL keeps the overflow adjustment but never paints a bar.
+            // The internal scrollbar actors must remain owned by ScrollView.
+            hscrollbar_policy: this._vertical ? St.PolicyType.NEVER : St.PolicyType.EXTERNAL,
+            vscrollbar_policy: this._vertical ? St.PolicyType.EXTERNAL : St.PolicyType.NEVER,
         });
         try {
             scroll.set_mouse_scrolling(false);
