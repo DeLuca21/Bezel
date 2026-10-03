@@ -7,6 +7,18 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 // Core GNOME controls already have Bezel equivalents. Only adopt extension roles.
 const CORE = new Set(['activities', 'appMenu', 'dateMenu', 'quickSettings', 'a11y', 'a11yMenu', 'keyboard', 'dwellClick', 'screenRecording', 'screenSharing', 'remoteAccess']);
 
+function saveWidth(actor) {
+    return {minimum: actor.min_width, natural: actor.natural_width,
+        minimumSet: actor.min_width_set, naturalSet: actor.natural_width_set};
+}
+
+function restoreWidth(actor, saved) {
+    actor.min_width = saved.minimum;
+    actor.natural_width = saved.natural;
+    actor.min_width_set = saved.minimumSet;
+    actor.natural_width_set = saved.naturalSet;
+}
+
 function stripColor(style) {
     return `${style ?? ''}`.replace(/(?:^|;)\s*color\s*:[^;]*/gi, '').replace(/^;+/, '').trim();
 }
@@ -28,7 +40,13 @@ export class IndicatorBridge {
             this.destroyed = true;
             if (this.pending) GLib.source_remove(this.pending);
             this.pending = 0;
+            if (this.layoutPending) GLib.source_remove(this.layoutPending);
+            this.layoutPending = 0;
         });
+        // Descendant labels and icons can change their natural size without
+        // adding an indicator. Allocation notifications are too late: the bar
+        // may still constrain the host to its previous size.
+        this.signals.push([this.host, this.host.connect('queue-relayout', () => this.queueLayout())]);
         if (this._ownsHost) {
             const parent = bar._zones.end;
             if (bar._state.kind === 'dock')
@@ -71,6 +89,24 @@ export class IndicatorBridge {
         });
     }
 
+    queueLayout() {
+        if (this.layoutPending || this.destroyed) return;
+        this.layoutPending = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            this.layoutPending = 0;
+            if (this.destroyed || !this.bar._actor) return GLib.SOURCE_REMOVE;
+            const width = this.host.visible ? this.host.get_preferred_width(-1)[1] : 0;
+            const height = this.host.visible ? this.host.get_preferred_height(-1)[1] : 0;
+            // Placement itself queues relayout; only changed content should
+            // trigger another pass, including when content shrinks.
+            if (width !== this.layoutWidth || height !== this.layoutHeight) {
+                this.layoutWidth = width;
+                this.layoutHeight = height;
+                this.bar._place();
+            }
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
     sync() {
         if (this.destroyed || this._syncing) return;
         this._syncing = true;
@@ -89,6 +125,7 @@ export class IndicatorBridge {
                 record.visibilitySignal = actor.connect('notify::visible', () => {
                     if (!this.destroyed && this.bar._overlay._settings.get_strv('hidden-indicators').includes(role) && actor.visible)
                         actor.hide();
+                    this.queueSync();
                 });
                 record.menuSetSignal = indicator.connect('menu-set', () => this.configureMenu(indicator, record));
                 this.records.set(indicator, record);
@@ -123,6 +160,7 @@ export class IndicatorBridge {
             this.bar._indicatorMenuOpen = [...this.records.values()].some(record => record.menu?.isOpen);
             if (changed)
                 this.bar._place();
+            this.queueLayout();
         } finally {
             this._syncing = false;
         }
@@ -151,7 +189,7 @@ export class IndicatorBridge {
             (actor instanceof St.Label || (actor instanceof St.BoxLayout &&
                 actor.get_children().some(child => child instanceof St.Label || child.clutter_text)))) {
             const saved = {x: actor.x_align, orientation: actor.orientation,
-                width: actor.width_set ? actor.width : -1};
+                width: saveWidth(actor)};
             if (actor instanceof St.BoxLayout) {
                 actor.orientation = Clutter.Orientation.VERTICAL;
                 actor.x_align = Clutter.ActorAlign.CENTER;
@@ -209,7 +247,7 @@ export class IndicatorBridge {
             this.host.x_expand = false;
             for (const record of this.records.values()) {
                 if (record.actor.width > cap) {
-                    record.railWidth ??= record.actor.width_set ? record.actor.width : -1;
+                    record.railWidth ??= saveWidth(record.actor);
                     record.actor.width = cap;
                 }
             }
@@ -248,6 +286,8 @@ export class IndicatorBridge {
         this.destroyed = true;
         if (this.pending) GLib.source_remove(this.pending);
         this.pending = 0;
+        if (this.layoutPending) GLib.source_remove(this.layoutPending);
+        this.layoutPending = 0;
         for (const [object, id] of this.signals) object.disconnect(id);
         for (const [actor, ids] of this.containers)
             for (const id of ids) actor.disconnect(id);
@@ -265,7 +305,7 @@ export class IndicatorBridge {
             if (actor instanceof St.BoxLayout)
                 actor.orientation = saved.orientation;
             else {
-                actor.width = saved.width;
+                restoreWidth(actor, saved.width);
                 actor.clutter_text.ellipsize = saved.ellipsize;
                 actor.clutter_text.line_alignment = saved.alignment;
             }
@@ -280,10 +320,8 @@ export class IndicatorBridge {
                 item.actor.x_expand = item.expand;
             }
             record.actor.margin_top = record.actor.margin_bottom = record.actor.margin_left = record.actor.margin_right = 0;
-            if (record.railWidth >= 0)
-                record.actor.width = record.railWidth;
-            else if (record.railWidth === -1)
-                record.actor.width_set = false;
+            if (record.railWidth)
+                restoreWidth(record.actor, record.railWidth);
             this.restoreMenu(record);
             record.actor.disconnect(record.visibilitySignal);
             record.actor.visible = record.visible;
