@@ -9,5 +9,7 @@
     "51"
   ],
   "settings-schema": "org.gnome.shell.extensions.bezel",
-  "version": 1
+  "url": "https://github.com/DeLuca21/Bezel",
+  "version": 1,
+  "version-name": "1.0.0"
 }

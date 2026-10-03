@@ -9,6 +9,7 @@ import GioUnix from 'gi://GioUnix';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Gtk from 'gi://Gtk';
+import Soup from 'gi://Soup?version=3.0';
 
 import {readBars, saveBars, barGroups, groupAppearance, barAppearancePreset, isSpacer, spacerLabel, applyPreset, presetBars, EDGES, DATE_FORMATS, barDateFormat, barTimeFormat, settingChoice, settingFlag, MODULE_SWITCHES, switchOn, hoverEnabled, sliderLayout, powerLayout, powerDim, PANEL_MODULES, hexColor} from './config.js';
 import {PRESETS, resolveTheme} from './theme.js';
@@ -65,6 +66,23 @@ const stringValue = text => {
 };
 const scroller = child => new Gtk.ScrolledWindow({child, hscrollbar_policy: Gtk.PolicyType.NEVER,
     vscrollbar_policy: Gtk.PolicyType.AUTOMATIC, hexpand: true, vexpand: true});
+const REMOTE_METADATA = 'https://raw.githubusercontent.com/DeLuca21/Bezel/master/bezel@deluca21/metadata.json';
+const textOf = contents => new TextDecoder().decode(contents instanceof Uint8Array ? contents
+    : typeof contents.toArray === 'function' ? contents.toArray() : contents.get_data());
+const versionParts = value => String(value || '').split('.').map(part => {
+    const number = parseInt(part, 10);
+    return Number.isFinite(number) ? number : 0;
+});
+const versionDelta = (local, remote) => {
+    const left = versionParts(local);
+    const right = versionParts(remote);
+    const count = Math.max(left.length, right.length);
+    for (let i = 0; i < count; i++) {
+        const diff = (right[i] || 0) - (left[i] || 0);
+        if (diff) return diff;
+    }
+    return 0;
+};
 
 export class SettingsWindow {
     constructor(application, settings, directory) {
@@ -98,6 +116,7 @@ export class SettingsWindow {
             settings.set_int('preferences-bar', -1);
             settings.set_string('preferences-group', '');
             settings.set_string('group-preview', '');
+            this.versionCancel?.cancel();
             if (this.refreshId) GLib.source_remove(this.refreshId);
             if (this.cardId) GLib.source_remove(this.cardId);
             if (this.laneId) GLib.source_remove(this.laneId);
@@ -112,6 +131,7 @@ export class SettingsWindow {
         if (index >= 0) { this.barIndex = index; this.mode = 'bar'; }
         this.groupId = this.settings.get_string('preferences-group') || null;
         this._refresh();
+        this._checkVersion();
         this.window.present();
     }
 
@@ -194,9 +214,15 @@ export class SettingsWindow {
         sidebar.append(this.nav);
         this.status = label('', 'muted');
         sidebar.append(this.status);
-        this.sidebarScroll = new Gtk.ScrolledWindow({child: sidebar, width_request: 260,
+        this.sidebarScroll = new Gtk.ScrolledWindow({child: sidebar, hexpand: true, vexpand: true,
             hscrollbar_policy: Gtk.PolicyType.NEVER, vscrollbar_policy: Gtk.PolicyType.AUTOMATIC});
-        body.append(this.sidebarScroll);
+        const meta = this._metadata();
+        this.versionButton = button(meta['version-name'] || 'About', () => this._about(), 'version-tag',
+            {halign: Gtk.Align.START, tooltip_text: 'About Bezel'});
+        this.side = vertical(8, {width_request: 260, vexpand: true});
+        this.side.append(this.sidebarScroll);
+        this.side.append(this.versionButton);
+        body.append(this.side);
         this.card = vertical(14, {hexpand: true, valign: Gtk.Align.START});
         this.card.add_css_class('editor-card');
         this.editorScroll = scroller(this.card);
@@ -228,6 +254,16 @@ export class SettingsWindow {
             .bezel-settings .brand { color: ${theme.accent}; font-weight: 800; font-size: 23px; }
             .bezel-settings label { color: inherit; }
             .bezel-settings .muted { color: ${theme.muted}; font-size: 12px; }
+            .bezel-settings button.version-tag,
+            .bezel-settings button.version-tag:hover {
+                background: transparent; background-image: none; border-color: transparent; box-shadow: none;
+                padding: 2px 0; min-height: 0;
+            }
+            .bezel-settings button.version-tag label { color: ${theme.muted}; font-size: 12px; }
+            .bezel-settings button.version-tag:hover label,
+            .bezel-settings button.version-tag.has-update label { color: ${theme.accent}; }
+            .bezel-settings linkbutton { background: transparent; border: none; box-shadow: none; padding: 0; min-height: 0; }
+            .bezel-settings linkbutton label { color: ${theme.accent}; }
             .bezel-settings .heading { font-size: 21px; font-weight: 750; }
             .bezel-settings .subheading { font-size: 14px; font-weight: 700; }
             .bezel-settings button { background-color: ${theme.bg}; color: ${theme.fg}; background-image: none; border-radius: 14px; border: 1px solid transparent; box-shadow: none; padding: 9px 12px; min-height: 18px; }
@@ -338,7 +374,7 @@ export class SettingsWindow {
 
     _syncGroupEditorChrome() {
         const editing = Boolean(this.groupId && this.mode === 'bar');
-        for (const widget of [this.presets, this.savedRow, this.sidebarScroll, this.editButton])
+        for (const widget of [this.presets, this.savedRow, this.side, this.editButton])
             if (widget) widget.visible = !editing;
     }
 
@@ -1468,6 +1504,107 @@ export class SettingsWindow {
         entry.connect('changed', () => dialog.set_response_enabled('create', Boolean(entry.text.trim())));
         dialog.connect('response', (_dialog, response) => { if (response === 'create') action(entry.text.trim()); });
         dialog.present(this.window);
+    }
+
+    _metadata() {
+        if (this.metadata) return this.metadata;
+        try {
+            const file = Gio.File.new_for_path(`${this.directory}/metadata.json`);
+            const [, contents] = file.load_contents(null);
+            this.metadata = JSON.parse(textOf(contents));
+        } catch {
+            this.metadata = {};
+        }
+        return this.metadata;
+    }
+
+    _about() {
+        if (this.about) { this.about.present(); return; }
+        const meta = this._metadata();
+        const dialog = new Gtk.Window({title: 'About Bezel', transient_for: this.window, modal: true, resizable: false, destroy_with_parent: true});
+        dialog.add_css_class('bezel-settings');
+        dialog.set_titlebar(new Adw.HeaderBar({show_title: false}));
+        const body = vertical(10, {margin_top: 6, margin_bottom: 22, margin_start: 28, margin_end: 28, width_request: 320});
+        const icon = Gtk.Image.new_from_file(`${this.directory}/icons/bezel.png`);
+        icon.pixel_size = 72;
+        icon.halign = Gtk.Align.CENTER;
+        body.append(icon);
+        body.append(label(meta.name || 'Bezel', 'brand', {halign: Gtk.Align.CENTER}));
+        body.append(label(meta['version-name'] || 'Version unknown', 'muted', {halign: Gtk.Align.CENTER}));
+        if (meta.description) body.append(label(meta.description, '', {justify: Gtk.Justification.CENTER, hexpand: true, xalign: .5}));
+        const shells = meta['shell-version'] || [];
+        if (shells.length) body.append(label(`GNOME Shell ${shells[0]}–${shells[shells.length - 1]}`, 'muted', {halign: Gtk.Align.CENTER}));
+        const update = label(this._updateText(), 'muted', {halign: Gtk.Align.CENTER});
+        this.aboutUpdate = update;
+        body.append(update);
+        if (meta.url) {
+            const link = new Gtk.LinkButton({label: 'GitHub', uri: meta.url, halign: Gtk.Align.CENTER});
+            body.append(link);
+        }
+        dialog.set_child(body);
+        this.about = dialog;
+        dialog.connect('close-request', () => { this.aboutUpdate = null; this.about = null; return false; });
+        dialog.present();
+    }
+
+    _updateText() {
+        const local = this._metadata()['version-name'];
+        if (!local) return 'No version is set';
+        if (this.updateError) return this.updateError;
+        if (!this.updateChecked) return 'Checking for updates…';
+        if (!this.updateRemote) return 'GitHub has no version yet';
+        const delta = versionDelta(local, this.updateRemote);
+        if (delta > 0) return `${this.updateRemote} is available`;
+        if (delta < 0) return 'Newer than GitHub';
+        return 'Up to date';
+    }
+
+    _applyVersion() {
+        const local = this._metadata()['version-name'];
+        const available = Boolean(local && this.updateRemote && versionDelta(local, this.updateRemote) > 0);
+        if (this.versionButton) {
+            this.versionButton.label = available ? `${local} · Update available` : (local || 'About');
+            if (available) this.versionButton.add_css_class('has-update');
+            else this.versionButton.remove_css_class('has-update');
+        }
+        if (this.aboutUpdate) this.aboutUpdate.label = this._updateText();
+    }
+
+    _checkVersion() {
+        const local = this._metadata()['version-name'];
+        if (!local) {
+            this.updateChecked = true;
+            this.updateRemote = null;
+            this.updateError = 'No version is set';
+            this._applyVersion();
+            return;
+        }
+        if (this.updateRunning) return;
+        this.versionCancel?.cancel();
+        const cancellable = new Gio.Cancellable();
+        this.versionCancel = cancellable;
+        this.updateRunning = true;
+        this.updateChecked = false;
+        this.updateError = null;
+        this._applyVersion();
+        const session = new Soup.Session({timeout: 8});
+        const message = Soup.Message.new('GET', REMOTE_METADATA);
+        session.send_and_read_async(message, GLib.PRIORITY_DEFAULT, cancellable, (source, result) => {
+            try {
+                const bytes = source.send_and_read_finish(result);
+                if (cancellable.is_cancelled()) return;
+                if (message.get_status() !== Soup.Status.OK) throw new Error('status');
+                this.updateRemote = JSON.parse(textOf(bytes))['version-name'] || null;
+                this.updateError = null;
+            } catch (error) {
+                if (cancellable.is_cancelled() || error?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
+                this.updateRemote = null;
+                this.updateError = 'Could not check for updates';
+            }
+            this.updateChecked = true;
+            this.updateRunning = false;
+            this._applyVersion();
+        });
     }
 
     _message(title, body, action = null) {
