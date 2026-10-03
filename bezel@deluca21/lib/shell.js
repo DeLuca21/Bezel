@@ -21,7 +21,7 @@ import * as SystemActions from 'resource:///org/gnome/shell/misc/systemActions.j
 
 import {hexToRgba, resolveTheme} from './theme.js';
 
-import {PLACES, DATE_FORMATS, timePattern, barDateFormat, barTimeFormat, readState, readBars, saveBars, clamp, settingFlag, settingChoice, isSpacer, barGroups, barTheme, groupFillColor, groupAppearance, hoverEnabled, moduleLook, sliderLayout, powerLayout, powerDim, switchOn, adoptIndicators} from './config.js';
+import {PLACES, DATE_FORMATS, timePattern, barDateFormat, barTimeFormat, readState, readBars, saveBars, clamp, settingFlag, settingChoice, isSpacer, barGroups, barTheme, groupFillColor, groupAppearance, hoverEnabled, moduleLook, sliderLayout, powerLayout, powerDim, switchOn, adoptIndicators, recordingStopHost} from './config.js';
 import {sideWidths, reservedWidths, cornerRadius, zonePlacement} from './geometry.js';
 import {paintCorner} from './drawing.js';
 import {Services} from './services.js';
@@ -76,6 +76,7 @@ export class BezelOverlay {
             if (!['known-indicators', 'saved-layouts', 'previous-layout', 'shortcut-overrides', 'show-settings', 'preferences-bar'].includes(key)) this.queueRebuild();
         });
         this._monitors = Main.layoutManager.connect('monitors-changed', () => this.queueRebuild());
+        this._recordingWatch = Main.screenshotUI?.connect('notify::screencast-in-progress', () => this._syncRecordingStop());
         this._overview = Main.overview.connect('showing', () => this._bars.forEach(bar => bar._close()));
         this._fullscreen = global.display.connect('in-fullscreen-changed', () => {
             for (const [index, frame] of this._frames)
@@ -182,11 +183,20 @@ export class BezelOverlay {
                 }
             }
             this._syncEditEscape();
+            this._syncRecordingStop();
             if (this._groupPreview?.action === 'open') this._showGroupPreview();
         } catch (error) {
             this._clear();
             throw error;
         }
+    }
+
+    _syncRecordingStop() {
+        const primary = Main.layoutManager.primaryIndex ?? 0;
+        const sample = this._bars.filter(bar => bar._monitor.index === primary).sort((a, b) => a._index - b._index);
+        const host = screenshotRecording() ? recordingStopHost(sample.map(bar => bar._state)) : null;
+        for (const bar of this._bars)
+            bar.syncRecordingStop(Boolean(host) && bar._index === host.index && bar._monitor.index === primary, host?.place);
     }
 
     _showGroupPreview() {
@@ -354,6 +364,9 @@ export class BezelOverlay {
             global.stage.disconnect(this._editEscape);
             this._editEscape = 0;
         }
+        if (this._recordingWatch)
+            Main.screenshotUI?.disconnect(this._recordingWatch);
+        this._recordingWatch = 0;
         this._clear();
         stopShelfHelper();
         this.services.destroy();
@@ -2869,6 +2882,50 @@ class Bar {
             }
         }
         return box;
+    }
+
+    syncRecordingStop(show, place = 'end') {
+        if (!show || !this._actor) {
+            this._removeRecordingStop();
+            return;
+        }
+        if (this._recordingStopButton)
+            return;
+        const zone = this._zones?.[place];
+        const button = zone && this._module('screenshot', this._state.iconSize);
+        if (!button)
+            return;
+        this._wire(button);
+        zone.add_child(button);
+        zone.visible = true;
+        zone._bezelEdge = place;
+        if (this._state.kind === 'dock' && this._dockContent && zone.get_parent() !== this._dockContent)
+            this._dockContent.add_child(zone);
+        const cell = zone.get_parent();
+        if (cell)
+            cell.visible = true;
+        this._recordingStopButton = button;
+        this._place();
+    }
+
+    _removeRecordingStop() {
+        const button = this._recordingStopButton;
+        if (!button)
+            return;
+        const zone = button.get_parent();
+        if (this._anchor === button)
+            this._close();
+        this._recordingStopButton = null;
+        button.destroy();
+        if (!zone || !this._actor)
+            return;
+        if (zone.get_n_children() === 0) {
+            if (this._state.kind === 'dock' && zone.get_parent() === this._dockContent)
+                this._dockContent.remove_child(zone);
+            if (this._emptyPills?.has('end'))
+                zone.visible = false;
+        }
+        this._place();
     }
 
     _button(iconName, size) {

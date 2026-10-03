@@ -199,6 +199,30 @@ export function adoptIndicators(settings) {
     return true;
 }
 
+// One stop control for a running recording. An existing screenshot module wins.
+// Otherwise prefer a top panel, then any other panel, then the first dock.
+// The button is temporary and always sits in that bar's trailing zone.
+export function recordingStopHost(bars) {
+    const list = Array.isArray(bars) ? bars : [];
+    if (!list.length || list.some(bar => (bar.modules ?? []).some(item => moduleType(item.id) === 'screenshot')))
+        return null;
+    const rank = bar => {
+        if (bar.kind !== 'dock' && bar.edge === 'top')
+            return 0;
+        if (bar.kind !== 'dock' && bar.edge === 'bottom')
+            return 1;
+        if (bar.kind !== 'dock')
+            return 2;
+        return 3;
+    };
+    let index = 0;
+    for (let i = 1; i < list.length; i++)
+        if (rank(list[i]) < rank(list[index]))
+            index = i;
+    const bar = list[index];
+    return {index, place: 'end', edge: bar.edge, kind: bar.kind === 'dock' ? 'dock' : 'panel'};
+}
+
 export function readConfig(settings) {
     try {
         const value = JSON.parse(settings.get_string('config') || '{}');
