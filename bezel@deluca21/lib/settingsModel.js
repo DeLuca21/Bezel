@@ -1,3 +1,4 @@
+import {nextModuleId} from './moduleIdentity.js';
 import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
 import Gtk from 'gi://Gtk';
@@ -5,6 +6,7 @@ import Gtk from 'gi://Gtk';
 import {DATE_FORMATS, barGroups, EDGES, clamp, isSpacer, nextSpacerId, readBars, saveBars} from './config.js';
 
 export const MODULES = [
+    ['shelf', 'File shelf'], ['shortcuts', 'Shortcuts'], ['timer', 'Timer / stopwatch'], ['devices', 'Device batteries'], ['input', 'Sound input'],
     ['notifications', 'Notifications'],
     ['logo', 'Logo'],
     ['workspaces', 'Workspaces'],
@@ -93,9 +95,7 @@ export function addModule(settings, index, id, place) {
     } else if (!MODULES.some(([key]) => key === id)) {
         return false;
     } else {
-        const previous = bar.modules.find(item => item.id === id);
-        bar.modules = bar.modules.filter(item => item.id !== id);
-        bar.modules.push({...(previous ?? {}), id, place: spot, group: previous?.group ?? ''});
+        bar.modules.push({id: nextModuleId(bar.modules, id), place: spot, group: ''});
     }
     saveBars(settings, bars);
     return true;

@@ -25,7 +25,7 @@ export function openCalendarDate(date) {
     }
 }
 
-export function monthGrid(theme, activate = openCalendarDate) {
+export function monthGrid(theme, activate = openCalendarDate, options = {}) {
     const today = GLib.DateTime.new_now_local();
     let month = GLib.DateTime.new_local(today.get_year(), today.get_month(), 1, 12, 0, 0);
     const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL,
@@ -50,9 +50,13 @@ export function monthGrid(theme, activate = openCalendarDate) {
         const layout = grid.layout_manager;
         ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'].forEach((day, column) => {
             const heading = new St.Label({text: day, width: cellW, x_align: Clutter.ActorAlign.CENTER, style: `color: ${theme.muted}; font-size: ${font}px;`});
-            layout.attach(heading, column, 0, 1, 1);
+            layout.attach(heading, column + (options.weekNumbers ? 1 : 0), 0, 1, 1);
         });
         const start = month.get_day_of_week() - 1;
+        if (options.weekNumbers) for (let week = 0; week < Math.ceil((start + month.add_months(1).add_days(-1).get_day_of_month()) / 7); week++) {
+            const date = month.add_days(-start + week * 7);
+            layout.attach(new St.Label({text: date.format('%V'), width: cellW, style: `color: ${theme.muted}; font-size: ${font}px;`}), 0, week + 1, 1, 1);
+        }
         const days = month.add_months(1).add_days(-1).get_day_of_month();
         for (let day = 1; day <= days; day++) {
             const date = month.add_days(day - 1);
@@ -63,7 +67,7 @@ export function monthGrid(theme, activate = openCalendarDate) {
             button._bezelDate = date.format('%F');
             button.connect('clicked', () => activate(date));
             const index = start + day - 1;
-            layout.attach(button, index % 7, Math.floor(index / 7) + 1, 1, 1);
+            layout.attach(button, index % 7 + (options.weekNumbers ? 1 : 0), Math.floor(index / 7) + 1, 1, 1);
         }
     };
     previous.connect('clicked', () => { month = month.add_months(-1); render(); previous.grab_key_focus(); });

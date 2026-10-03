@@ -64,7 +64,7 @@ export function buildLevelControl(bar, id, withMute = true, options = null) {
     return box;
 }
 
-export function buildSessionRail(bar) {
+export function buildSessionRail(bar, options = {}) {
     const actions = SystemActions.getDefault();
     const box = new St.BoxLayout({
         orientation: Clutter.Orientation.VERTICAL, x_align: Clutter.ActorAlign.CENTER,
@@ -77,7 +77,8 @@ export function buildSessionRail(bar) {
         ['Restart', 'system-reboot-symbolic', actions.can_restart, () => actions.activateRestart()],
         ['Suspend', 'media-playback-pause-symbolic', actions.can_suspend, () => actions.activateSuspend()],
     ]) {
-        if (!allowed)
+        const key = {'Lock': 'powerLock', 'Suspend': 'powerSuspend', 'Log out': 'powerLogout', 'Restart': 'powerRestart', 'Power off': 'powerOff'}[title];
+        if (!allowed || options[key] === false)
             continue;
         const button = new St.Button({
             can_focus: true, reactive: true, accessible_name: title,

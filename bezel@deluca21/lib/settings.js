@@ -1,3 +1,6 @@
+import {shortcutEditor} from './shortcutEditor.js';
+import {moduleType} from './moduleIdentity.js';
+import {FEATURE_OPTIONS, NUMBER_OPTIONS} from './moduleFeatures.js';
 import {buildGroupEditor} from './groupEditor.js';
 import Adw from 'gi://Adw';
 import Gdk from 'gi://Gdk';
@@ -29,7 +32,7 @@ const label = (text, css = '', props = {}) => {
     return widget;
 };
 const clear = box => { while (box.get_first_child()) box.remove(box.get_first_child()); };
-const nameOf = id => isSpacer(id) ? spacerLabel(id) : MODULES.find(([key]) => key === id)?.[1] ?? id;
+const nameOf = id => isSpacer(id) ? spacerLabel(id) : (MODULES.find(([key]) => key === moduleType(id))?.[1] ?? id) + (id.includes('@') ? ` ${id.split('@')[1]}` : '');
 const titleCase = value => value[0].toUpperCase() + value.slice(1);
 const button = (text, callback, css = '', props = {}) => {
     const widget = new Gtk.Button({label: text, ...props});
@@ -90,6 +93,7 @@ export class SettingsWindow {
             this._queueRefresh();
         });
         this.window.connect('close-request', () => {
+            this._closeItemPopover();
             settings.disconnect(this.changed);
             settings.set_int('preferences-bar', -1);
             settings.set_string('preferences-group', '');
@@ -112,8 +116,9 @@ export class SettingsWindow {
     }
 
     _write(action, rebuild = true) {
+        const wasWriting = this.writing;
         this.writing = true;
-        try { action(); } finally { this.writing = false; }
+        try { action(); } finally { this.writing = wasWriting; }
         this.monitor.queue_draw();
         this._status();
         if (rebuild) this._queueRefresh();
@@ -404,8 +409,8 @@ export class SettingsWindow {
         this.itemPopover = null;
         this.itemAnchor = null;
         if (!popover) return;
-        popover.popdown();
-        if (popover.get_parent()) popover.unparent();
+        if (popover instanceof Gtk.Window) popover.close();
+        else { popover.popdown(); if (popover.get_parent()) popover.unparent(); }
     }
 
     _monitor() {
@@ -489,6 +494,9 @@ export class SettingsWindow {
             else widget.remove_css_class('is-on');
             this._write(() => callback(next), false);
         }, value ? 'is-on' : '');
+        widget._setActive = active => {
+            if (active) widget.add_css_class('is-on'); else widget.remove_css_class('is-on');
+        };
         return widget;
     }
 
@@ -777,13 +785,13 @@ export class SettingsWindow {
             this._write(() => {
                 const before = new Set(readBars(this.settings)[this.barIndex].modules.map(item => item.id));
                 addModule(this.settings, this.barIndex, id, place);
-                target = id === 'spacer' ? readBars(this.settings)[this.barIndex].modules.find(item => !before.has(item.id))?.id : id;
+                target = readBars(this.settings)[this.barIndex].modules.find(item => !before.has(item.id))?.id;
                 if (group && target) assignGroup(this.settings, this.barIndex, target, group);
             }, false);
             finish(target);
         }));
         add('spacer', '↔ Empty space');
-        for (const [id, title] of MODULES) if (!bar.modules.some(item => item.id === id) || (group && !bar.modules.some(item => item.id === id && item.group === group))) add(id, title);
+        for (const [id, title] of MODULES) add(id, title);
         if (group) for (const item of bar.modules.filter(item => isSpacer(item.id) && item.group !== group))
             box.append(button(`Move ${spacerLabel(item.id)} · ${item.size} px`, () => {
                 this._write(() => assignGroup(this.settings, this.barIndex, item.id, group), false);
@@ -806,21 +814,23 @@ export class SettingsWindow {
         const live = bar.modules.find(module => module.id === item.id) ?? item;
         const placeOf = module => module.group ? bar.modules.find(member => member.group === module.group)?.place ?? module.place : module.place;
         const current = {...live, place: placeOf(live)};
-        const popover = new Gtk.Popover({position: Gtk.PositionType.BOTTOM, has_arrow: true});
-        popover.add_css_class('item-options');
+        const popover = new Gtk.Popover({autohide: false});
         popover.set_parent(anchor);
+        popover.add_css_class('item-options');
+
         anchor.add_css_class('is-on');
         this.itemPopover = popover;
         this.itemAnchor = anchor;
         const box = vertical(10, {margin_top: 10, margin_bottom: 10, margin_start: 12, margin_end: 12, width_request: 260});
         const header = horizontal(8);
         header.append(label(nameOf(current.id), 'subheading', {hexpand: true}));
+        header.append(button('×', () => this._closeItemPopover()));
         header.append(button('Remove', () => {
             this._write(() => removeModule(this.settings, this.barIndex, current.id), false);
             this._queueLanes();
         }));
         box.append(header);
-        const note = MODULE_NOTES[current.id] ?? (isSpacer(current.id) ? 'A gap. Set its width, then where it sits on the bar.' : '');
+        const note = MODULE_NOTES[moduleType(current.id)] ?? (isSpacer(current.id) ? 'A gap. Set its width, then where it sits on the bar.' : '');
         if (note) box.append(label(note, 'muted'));
         box.append(label('On the bar', 'subheading'));
         box.append(this._segments(['start', 'center', 'end'].map(id => [id, titleCase(id)]), current.place, place => {
@@ -867,33 +877,67 @@ export class SettingsWindow {
         }
         box.append(reorder);
         this._moduleOptions(box, current, bar);
-        popover.set_child(box);
-        this._trackPopover(anchor, popover);
+        popover.set_child(new Gtk.ScrolledWindow({child: box, max_content_height: 560, propagate_natural_height: true, hscrollbar_policy: Gtk.PolicyType.NEVER}));
+
         popover.connect('closed', () => {
+            anchor._popoverClosedAt = GLib.get_monotonic_time();
             if (anchor.get_parent()) anchor.remove_css_class('is-on');
             if (this.itemPopover === popover) { this.itemPopover = null; this.itemAnchor = null; }
-            GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => { if (popover.get_parent()) popover.unparent(); return GLib.SOURCE_REMOVE; });
+            if (popover.get_parent()) popover.unparent();
         });
+        const escape = new Gtk.EventControllerKey();
+        escape.connect('key-pressed', (_controller, key) => { if (key !== Gdk.KEY_Escape) return false; this._closeItemPopover(); return true; });
+        popover.add_controller(escape);
         popover.popup();
         GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => { groupReady = true; return GLib.SOURCE_REMOVE; });
     }
 
+    _featureOptions(box, current, write) {
+        const id = moduleType(current.id);
+        const bar = readBars(this.settings)[this.barIndex];
+        const effective = key => key === 'powerIcons' ? current.powerIcons ?? (powerLayout(current, this.settings) === 'rail')
+            : key === 'showSeconds' ? current.showSeconds ?? bar?.clockSeconds === true : current[key];
+        for (const [key, [title, fallback]] of Object.entries(FEATURE_OPTIONS[id] || {})) {
+            // Custom layouts contain separate time, date and calendar items.
+            // Automatic-popout composition settings do not apply there.
+            if (this.groupId && id === 'clock' && key !== 'showSeconds') continue;
+            if (id === 'clock' && key === 'calendarTime') box.append(label('Automatic calendar popout', 'subheading'));
+            box.append(this._toggle(title, key === 'powerIcons' && current.powerStyle ? current.powerStyle === 'rail' : effective(key) ?? fallback, value => write(key === 'powerIcons' ? {powerIcons: value, powerStyle: value ? 'rail' : 'list'} : {[key]: value})));
+        }
+        for (const [key, [title, fallback, min, max]] of Object.entries(NUMBER_OPTIONS[id] || {}))
+            box.append(this._step(title, current[key] ?? fallback, min, max, 1, value => write({[key]: value})));
+        if (id === 'shelf') {
+            box.append(label('Dragging files out', 'subheading'));
+            box.append(this._segments([['copy', 'Copy'], ['move', 'Move'], ['ask', 'Destination decides']], current.shelfDragAction || 'copy', value => write({shelfDragAction: value})));
+            box.append(label('Moving is handled by the destination app. Removing an entry from the shelf never deletes the original file.', 'muted'));
+        }
+        if (id !== 'shortcuts') return;
+        box.append(shortcutEditor(this, current, write));
+    }
+
     _moduleOptions(box, current, bar, writeOverride = null) {
+        const bindings = [];
+        const toggleFor = (key, title, apply) => {
+            const widget = this._toggle(title, switchOn(current, bar, key), apply);
+            bindings.push([widget, key]); return widget;
+        };
         const write = values => {
             Object.assign(current, values);
+            for (const [widget, key] of bindings) widget._setActive(switchOn(current, bar, key));
             if (writeOverride) writeOverride(values);
             else this._write(() => patchModule(this.settings, this.barIndex, current.id, values), false);
         };
-        const id = current.id;
+        this._featureOptions(box, current, write);
+        const id = moduleType(current.id);
         if (['volume', 'microphone'].includes(id))
-            box.append(this._toggle('Show mute button', switchOn(current, bar, 'showMute'), value => write({showMute: value})));
+            box.append(toggleFor('showMute', 'Show mute button', value => write({showMute: value})));
         if (['network', 'bluetooth'].includes(id))
-            box.append(this._toggle('Show on/off button', switchOn(current, bar, 'showToggle'), value => write({showToggle: value})));
+            box.append(toggleFor('showToggle', 'Show on/off button', value => write({showToggle: value})));
         const switches = id === 'volume' || id === 'network' ? null : MODULE_SWITCHES[id];
         if (switches) {
             box.append(label(id === 'microphone' ? 'Bar and popout' : 'On the bar', 'subheading'));
             for (const [key, title] of switches)
-                box.append(this._toggle(title, switchOn(current, bar, key), value => {
+                box.append(toggleFor(key, title, value => {
                     const values = {[key]: value};
                     if (['showIcon', 'showValue', 'showArt'].includes(key)) {
                         const next = {...current, ...values};
@@ -904,7 +948,7 @@ export class SettingsWindow {
                             values.showIcon = true;
                     }
                     write(values);
-                    if (!writeOverride) this._queueLanes(id);
+                    if (!writeOverride) this._queueLanes(current.id);
                 }));
         }
         if (id === 'workspaces')
@@ -915,7 +959,7 @@ export class SettingsWindow {
             box.width_request = 300;
             box.append(label('On the bar', 'subheading'));
             for (const [key, title] of [['showIcon', 'Icon'], ['showValue', 'Percentage']])
-                box.append(this._toggle(title, switchOn(current, bar, key), value => {
+                box.append(toggleFor(key, title, value => {
                     const values = {[key]: value};
                     const next = {...current, ...values};
                     const icon = key === 'showIcon' ? value : switchOn(next, bar, 'showIcon');
@@ -923,22 +967,24 @@ export class SettingsWindow {
                     if (!icon && !reading)
                         values.showIcon = true;
                     write(values);
-                    if (!writeOverride) this._queueLanes(id);
+                    if (!writeOverride) this._queueLanes(current.id);
                 }));
             box.append(label('In the popout', 'subheading'));
             for (const [key, title] of [['popIcon', 'Icon'], ['popValue', 'Percentage'], ['brightIcon', 'Brightness icon'], ['brightValue', 'Brightness percentage']])
-                box.append(this._toggle(title, switchOn(current, bar, key), value => {
+                box.append(toggleFor(key, title, value => {
                     write({[key]: value});
                 }));
+            if (!this.groupId) {
             box.append(label('Automatic popout arrangement', 'subheading'));
             box.append(this._segments([['edge', 'Side by side'], ['stack', 'Stacked'], ['drawer', 'In drawer']], sliderLayout(current, this.settings), value => {
                 write({sliderStyle: value});
             }));
+            }
         }
         if (id === 'network') {
             box.append(label('On the bar', 'subheading'));
             for (const [key, title] of [['showIcon', 'Icon'], ['showValue', 'Name']])
-                box.append(this._toggle(title, switchOn(current, bar, key), value => {
+                box.append(toggleFor(key, title, value => {
                     const values = {[key]: value};
                     const next = {...current, ...values};
                     const icon = key === 'showIcon' ? value : switchOn(next, bar, 'showIcon');
@@ -946,7 +992,7 @@ export class SettingsWindow {
                     if (!icon && !reading)
                         values.showIcon = true;
                     write(values);
-                    if (!writeOverride) this._queueLanes(id);
+                    if (!writeOverride) this._queueLanes(current.id);
                 }));
             box.append(label('In the popout', 'subheading'));
             box.append(this._toggle('Name', switchOn(current, bar, 'popValue'), value => {
@@ -956,16 +1002,13 @@ export class SettingsWindow {
         if (id === 'indicators')
             this._indicatorOptions(box);
         if (id === 'clock')
-            this._formatChoices(bar, box, 'time');
+            this._formatChoices(bar, box, 'time', false);
         if (id === 'date')
             this._formatChoices(bar, box, 'date');
         if (id === 'logo')
             this._logoOptions(box, bar);
-        if (id === 'power') {
+        if (id === 'power' && !this.groupId) {
             box.width_request = 340;
-            box.append(this._segments([['list', 'Labels'], ['rail', 'Icons']], powerLayout(current, this.settings), value => {
-                write({powerStyle: value});
-            }));
             box.append(this._toggle('Dim the desktop', powerDim(current, this.settings), value => {
                 write({sessionDim: value});
             }));
@@ -1197,7 +1240,7 @@ export class SettingsWindow {
         pins.insert(add, -1); this.card.append(pins);
     }
 
-    _formatChoices(bar = null, parent = null, part = 'both') {
+    _formatChoices(bar = null, parent = null, part = 'both', secondsControl = true) {
         const gnome = new Gio.Settings({schema_id: 'org.gnome.desktop.interface'}).get_string('clock-format');
         const time = bar ? barTimeFormat(bar, gnome) : settingChoice(this.settings, 'dashboard-time-format', '24h', ['24h', '12h']);
         const seconds = bar ? bar.clockSeconds === true : settingFlag(this.settings, 'dashboard-clock-seconds');
@@ -1209,7 +1252,7 @@ export class SettingsWindow {
                 if (bar) patchBar(this.settings, this.barIndex, {timeFormat: value});
                 else this.settings.set_string('dashboard-time-format', value);
             }));
-            host.append(this._toggle('Show seconds', seconds, value => {
+            if (secondsControl) host.append(this._toggle('Show seconds', seconds, value => {
                 if (bar) patchBar(this.settings, this.barIndex, {clockSeconds: value});
                 else this.settings.set_boolean('dashboard-clock-seconds', value);
             }));

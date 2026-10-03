@@ -1,5 +1,12 @@
+import {moduleType} from './moduleIdentity.js';
+import {normalizeFeatures} from './moduleFeatures.js';
 // Pure layout data shared by the shell and settings. No dashboard dependencies.
 export const GROUP_ITEMS = {
+    shelf: {title: 'File shelf', icon: 'folder-download-symbolic'},
+    shortcuts: {title: 'Shortcuts', icon: 'emblem-favorite-symbolic'},
+    timer: {title: 'Timer / stopwatch', icon: 'alarm-symbolic'},
+    devices: {title: 'Device batteries', icon: 'battery-symbolic'},
+    input: {title: 'Sound input', icon: 'audio-input-microphone-symbolic'},
     notifications: {title: 'Notifications', icon: 'preferences-system-notifications-symbolic', action: true},
     volume: {title: 'Volume', icon: 'audio-volume-high-symbolic'},
     output: {title: 'Sound output', icon: 'audio-speakers-symbolic'},
@@ -49,9 +56,9 @@ export function normalizeGroupLayout(value) {
             if (devices.has(cell.module)) return [];
             devices.add(cell.module);
         }
-        return [{id: key(cell.id), module: cell.module, title: cell.title === true,
+        return [{id: key(cell.id), module: cell.module, ...(typeof cell.instance === 'string' && moduleType(cell.instance) === cell.module ? {instance: cell.instance} : {}), title: cell.title === true,
             view: cell.view === 'action' && GROUP_ITEMS[cell.module].action ? 'action' : 'full',
-            options: Object.fromEntries(['showIcon', 'showValue', 'showArt', 'popIcon', 'popValue', 'brightIcon', 'brightValue', 'showMute', 'showToggle'].filter(key => typeof cell.options?.[key] === 'boolean').map(key => [key, cell.options[key]])),
+            options: {...normalizeFeatures(cell.options), ...Object.fromEntries(['showIcon', 'showValue', 'showArt', 'popIcon', 'popValue', 'brightIcon', 'brightValue', 'showMute', 'showToggle'].filter(key => typeof cell.options?.[key] === 'boolean').map(key => [key, cell.options[key]]))},
             span: bounded(cell.span ?? 1, 1, 1, 3)}];
     })});
     return {version: 1, width: bounded(value.width ?? 420, 420, 280, 900),
@@ -85,15 +92,15 @@ export function moveGroupCell(layout, id, rowId, beforeId = null) {
     return next;
 }
 export function groupLayoutPreset(name, members = []) {
-    const row = (...modules) => ({type: 'row', cells: modules.filter(id => Object.hasOwn(GROUP_ITEMS, id)).map(module => ({module}))});
+    const row = (...modules) => ({type: 'row', cells: modules.filter(id => Object.hasOwn(GROUP_ITEMS, moduleType(id))).map(id => ({module: moduleType(id), ...(id !== moduleType(id) ? {instance: id} : {})}))});
     const tab = (title, ...modules) => ({title, rows: [row(...modules)]});
     let blocks;
     if (name === 'quick') blocks = [row('volume'), {type: 'tabs', tabs: [tab('Output', 'output'), tab('Wi-Fi', 'network'), tab('Bluetooth', 'bluetooth')]}, row('brightness')];
     else if (name === 'clock') blocks = [row('clock', 'date'), row('calendar'), row('power', 'screenshot')];
     else if (name === 'blank') blocks = [];
     else {
-        const ids = [...new Set(members.filter(id => Object.hasOwn(GROUP_ITEMS, id)))];
-        blocks = name === 'tabs' ? [{type: 'tabs', tabs: ids.map(id => tab(GROUP_ITEMS[id].title, id))}]
+        const ids = [...new Set(members.filter(id => Object.hasOwn(GROUP_ITEMS, moduleType(id))))];
+        blocks = name === 'tabs' ? [{type: 'tabs', tabs: ids.map(id => tab(GROUP_ITEMS[moduleType(id)].title, id))}]
             : ids.map(id => row(id));
     }
     return normalizeGroupLayout({blocks});

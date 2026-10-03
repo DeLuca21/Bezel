@@ -1,3 +1,9 @@
+import {moduleType, moduleView} from './moduleIdentity.js';
+import {moduleFeatures} from './moduleFeatures.js';
+import {expandedModule, inputDevices, outputDevices} from './expandedModules.js';
+import {shortcutFace} from './shortcutRuntime.js';
+import {shelfFace, shelfPanel, stopShelfHelper} from './shelf.js';
+import {timerFace} from './timers.js';
 import {buildGroupPopout} from './groupPopout.js';
 import {GROUP_ITEMS, groupLayoutPreset} from './groupLayout.js';
 import Clutter from 'gi://Clutter';
@@ -349,6 +355,7 @@ export class BezelOverlay {
             this._editEscape = 0;
         }
         this._clear();
+        stopShelfHelper();
         this.services.destroy();
         this.weather.destroy();
         this._settings = null;
@@ -506,6 +513,10 @@ class Bar {
 
     destroy() {
         this._destroyed = true;
+        this._revealTimeline?.stop();
+        this._revealTimeline = null;
+        const actor = this._actor;
+        this._actor = null;
         this._endGeom(false);
         if (this._appsHandleLater)
             global.compositor.get_laters().remove(this._appsHandleLater);
@@ -526,7 +537,7 @@ class Bar {
         for (const handle of Object.values(this._editHandles ?? {}))
             drop(handle);
         this._editHandles = null;
-        drop(this._actor);
+        drop(actor);
         drop(this._trigger);
     }
 
@@ -674,6 +685,11 @@ class Bar {
         if (this._state.kind === 'dock' && !this._dockViewport.get_parent())
             this._dockContent.add_child(this._dockViewport);
         chrome(this._actor, true);
+        this._actor.connect('destroy', () => {
+            this._revealTimeline?.stop();
+            this._revealTimeline = null;
+            this._actor = null;
+        });
         this._place();
         this._ensureEditHandles();
         this._signals.push([this._actor, this._actor.connect('captured-event', (_actor, event) => this._barClick(event))]);
@@ -868,7 +884,11 @@ class Bar {
         const gnome = new Gio.Settings({schema_id: 'org.gnome.desktop.interface'}).get_string('clock-format');
         const format = barTimeFormat(bar, gnome);
         box.add_child(this._action(format === '12h' ? 'Use 24-hour time' : 'Use 12-hour time', 'preferences-system-time-symbolic', () => patchBar(settings, this._index, {timeFormat: format === '12h' ? '24h' : '12h'})));
-        box.add_child(this._action(bar.clockSeconds ? 'Hide seconds' : 'Show seconds', 'appointment-soon-symbolic', () => patchBar(settings, this._index, {clockSeconds: !bar.clockSeconds})));
+        const clock = bar.modules.find(item => item.id === 'clock');
+        const seconds = clock?.showSeconds ?? bar.clockSeconds === true;
+        box.add_child(this._action(seconds ? 'Hide seconds' : 'Show seconds', 'appointment-soon-symbolic', () => clock
+            ? patchModule(settings, this._index, 'clock', {showSeconds: !seconds})
+            : patchBar(settings, this._index, {clockSeconds: !seconds})));
     }
 
     _dashboardClockActions(box) {
@@ -2288,13 +2308,19 @@ class Bar {
             const target = show ? 1 : 0;
             const frame = this._overlay._frames.get(this._monitor.index);
             const paint = value => {
+                if (this._destroyed || !this._actor?.get_stage())
+                    return;
                 this._revealProgress = value;
                 frame?.setReveal(this._index, this._state.edge, this._vertical ? this._box.width : this._box.height, value);
                 const {width, height} = this._box;
-                this._actor.set_clip(this._state.edge === 'right' ? width * (1 - value) : 0,
-                    this._state.edge === 'bottom' ? height * (1 - value) : 0,
-                    this._vertical ? width * value : width, this._vertical ? height : height * value);
-                this._actor.opacity = Math.round(255 * value);
+                try {
+                    this._actor.set_clip(this._state.edge === 'right' ? width * (1 - value) : 0,
+                        this._state.edge === 'bottom' ? height * (1 - value) : 0,
+                        this._vertical ? width * value : width, this._vertical ? height : height * value);
+                    this._actor.opacity = Math.round(255 * value);
+                } catch {
+                    return;
+                }
                 this._overlay.relayoutPopups(this._monitor.index);
             };
             this._actor.show();
@@ -2340,12 +2366,20 @@ class Bar {
 
     _slideLater() {
         this._later('_hideTimer', 280, () => {
-            if (!this._actor.hover && !this._trigger?.hover && !this._edgeHoverActive && !this._popout && !this._indicatorMenuOpen)
+            if (!this._actor.hover && !this._trigger?.hover && !this._edgeHoverActive && !this._popout && !this._shelfOpen && !this._indicatorMenuOpen)
                 this._slide(false, true);
         });
     }
 
     _module(id, icon) {
+        return moduleView(this, id)._buildModule(moduleType(id), icon);
+    }
+
+    _buildModule(id, icon) {
+        if (id === 'shelf') return shelfFace(this, icon);
+        if (id === 'timer') return this._panelModule(id, timerFace(this, moduleFeatures(this, id), icon), () => expandedModule(this, id));
+        if (id === 'shortcuts') return this._panelModule(id, shortcutFace(this, moduleFeatures(this, id), icon), () => expandedModule(this, id));
+        if (['shortcuts', 'timer', 'devices', 'input'].includes(id)) return this._panelModule(id, this._button(GROUP_ITEMS[id].icon, icon), () => expandedModule(this, id));
         if (id === 'notifications') return this._panelModule(id, this._button('preferences-system-notifications-symbolic', icon), () => buildNotificationCenter(this));
         switch (id) {
         case 'logo': {
@@ -2418,7 +2452,7 @@ class Bar {
         case 'dark':
             return this._switch('dark', icon, 'weather-clear-night-symbolic', 'weather-clear-symbolic', 'Dark style', darkStyleControl());
         case 'performance':
-            return this._panelModule('performance', buildValueButton(this, 'performance', 'power-profile-balanced-symbolic', icon, 'Performance'), () => performanceMenu(this));
+            return this._panelModule('performance', buildValueButton(this, 'performance', 'power-profile-balanced-symbolic', icon, 'Performance'), () => expandedModule(this, 'performance'));
         case 'vpn':
             return this._panelModule('vpn', buildValueButton(this, 'vpn', 'network-vpn-symbolic', icon, 'VPN'), () => vpnMenu(this));
         case 'settings':
@@ -2426,7 +2460,7 @@ class Bar {
         case 'media':
             return this._panelModule('media', buildMediaFace(this, icon), () => this._mediaCard(true, 72));
         case 'microphone':
-            return this._panelModule('microphone', buildMicFace(this, icon), () => buildMicPanel(this));
+            return this._panelModule('microphone', buildMicFace(this, icon), () => this._groupItem({module: 'microphone'}));
         case 'clipboard':
             return this._panelModule('clipboard', this._button('edit-paste-symbolic', icon), () => buildClipboardPanel(this));
         case 'keyboard':
@@ -2616,7 +2650,7 @@ class Bar {
         const ids = members.map(item => item.id);
         const group = barGroups(this._state).find(group => group.id === members[0]?.group);
         if (group?.popout) return this._customGroupFace(members, group, icon);
-        if (group && ids.some(id => ['output', 'bluetooth', 'brightness'].includes(id)))
+        if (group && ids.some(id => id !== moduleType(id) || ['output', 'bluetooth', 'brightness'].includes(id)))
             return this._customGroupFace(members, {...group, popout: groupLayoutPreset('stacked', ids)}, icon);
         if (ids.length === 1) {
             const face = this._module(ids[0], icon);
@@ -2656,14 +2690,14 @@ class Bar {
             x_align: Clutter.ActorAlign.CENTER});
         const ids = group.face === 'single' ? [null] : members.map(item => item.id);
         for (const id of ids) {
-            const direct = id && (group.clicks?.[id] === 'direct' || ['apps', 'workspaces'].includes(id));
+            const direct = id && (group.clicks?.[id] === 'direct' || ['apps', 'workspaces'].includes(moduleType(id)));
             const face = direct ? this._module(id, icon) : id && ['clock', 'date', 'weather', 'volume', 'network', 'battery'].includes(id)
                 ? this._groupFace(id, [id], icon) : id ? this._groupFace(id, [id], icon) : this._button(group.icon || 'view-grid-symbolic', icon);
             if (!face) continue;
             if (!direct) {
                 const panel = () => buildGroupPopout(this, group, group.clicks?.[id] === 'tab' ? id : null);
                 face._activate = () => this._toggle(`group:${group.id}`, face, panel);
-                face.accessible_name = id ? GROUP_ITEMS[id]?.title || id : group.name;
+                face.accessible_name = id ? GROUP_ITEMS[moduleType(id)]?.title || id : group.name;
                 this._hoverDrawer(`group:${group.id}`, face, panel, typeof group.hover === 'boolean' ? group.hover : members.some(member => this._hoverFor(member.id)));
             }
             this._wire(face); box.add_child(face);
@@ -2683,8 +2717,12 @@ class Bar {
     }
 
     _groupItem(item) {
+        if (item.instance && item.instance !== this._moduleInstance) return moduleView(this, item.instance)._groupItem({...item, instance: null});
         const id = item.module;
-        if (id === 'notifications') return this._notificationsAction();
+        const features = moduleFeatures(this, id, item.options);
+        if (id === 'shelf') return shelfPanel(this, features);
+        if (['shortcuts', 'timer', 'devices', 'input', 'performance'].includes(id)) return expandedModule(this, id, item.options);
+        if (id === 'notifications') return features.embedded ? buildNotificationCenter(this, true) : this._notificationsAction();
         const services = this._overlay.services;
         const box = () => new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 8px;', x_expand: true});
         if (['output', 'network', 'bluetooth'].includes(id)) {
@@ -2700,22 +2738,31 @@ class Bar {
         if (id === 'dashboard') return this._action('Dashboard', GROUP_ITEMS.dashboard.icon, () => this._open('dashboard', this._actor, () => this._dashboard()));
         if (item.view === 'action' && id === 'power') return this._action('Power menu', GROUP_ITEMS.power.icon, () => this._open('power', this._actor, () => this._session()));
         if (item.view === 'action' && id === 'settings') return this._action('Settings', GROUP_ITEMS.settings.icon, () => this._overlay.openSettings());
-        if (id === 'volume' || id === 'brightness') return buildLevelControl(this, id, true, item.options);
+        if (id === 'volume' || id === 'brightness') {
+            const root = buildLevelControl(this, id, true, item.options);
+            if (id === 'volume' && features.showOutputDevices) root.add_child(outputDevices(this));
+            return root;
+        }
         if (id === 'clock' || id === 'date') {
             const root = box();
             const value = label(this._theme.fg, id === 'clock' ? 26 : 16);
             root.add_child(value);
-            const update = () => { value.text = GLib.DateTime.new_now_local().format(id === 'date' ? '%A, %e %B' : timePattern(this._state.timeFormat === '12h', this._state.clockSeconds)) || ''; return GLib.SOURCE_CONTINUE; };
+            const clockBar = readBars(this._overlay._settings)[this._index];
+            const desktopClock = new Gio.Settings({schema_id: 'org.gnome.desktop.interface'});
+            const twelve = barTimeFormat(clockBar, desktopClock.get_string('clock-format')) === '12h';
+            const sharedClock = clockBar?.modules.find(module => module.id === (this._moduleInstance || 'clock'));
+            const seconds = (sharedClock ? sharedClock.showSeconds : item.options?.showSeconds) ?? clockBar?.clockSeconds === true;
+            const update = () => { value.text = GLib.DateTime.new_now_local().format(id === 'date' ? DATE_FORMATS[barDateFormat(clockBar, this._overlay._settings)].format : timePattern(twelve, seconds)) || ''; return GLib.SOURCE_CONTINUE; };
             update();
             const timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, update);
             this._popupCleanups.push(() => GLib.source_remove(timer));
             return root;
         }
-        if (id === 'calendar') return this._monthGrid();
-        if (id === 'weather') return weatherWidget(this);
-        if (id === 'power') return this._session();
-        if (id === 'media') return this._mediaCard(true, 72);
-        if (id === 'microphone') return buildMicPanel(this, item.options);
+        if (id === 'calendar') return this._monthGrid(features);
+        if (id === 'weather') return weatherWidget(this, features);
+        if (id === 'power') return this._session(features);
+        if (id === 'media') return this._mediaCard(true, 72, features);
+        if (id === 'microphone') { const root = buildMicPanel(this, item.options); if (features.showInputDevices) root.add_child(inputDevices(this)); return root; }
         if (id === 'clipboard') return buildClipboardPanel(this);
         if (id === 'keyboard') return buildKeyboardPanel(this);
         if (id === 'awake') {
@@ -2737,6 +2784,7 @@ class Bar {
     }
 
     _groupFace(id, ids, icon) {
+        if (id !== moduleType(id)) return this._module(id, icon);
         if (['clock', 'date', 'weather'].includes(id)) {
             if (id !== ids.find(item => ['clock', 'date', 'weather'].includes(item)))
                 return null;
@@ -2803,18 +2851,21 @@ class Bar {
             box.add_child(this._session());
         if (ids.includes('weather') && !ids.some(id => id === 'clock' || id === 'date'))
             box.add_child(weatherWidget(this));
-        if (ids.includes('notifications') && !ids.some(id => id === 'clock' || id === 'date')) box.add_child(this._notificationsAction());
+        if (ids.includes('notifications') && !ids.some(id => id === 'clock' || id === 'date')) box.add_child(this._groupItem({module: 'notifications'}));
         if (ids.includes('media'))
             box.add_child(this._mediaCard(true, 72));
         if (ids.includes('microphone'))
-            box.add_child(buildMicPanel(this));
+            box.add_child(this._groupItem({module: 'microphone'}));
         if (ids.includes('clipboard'))
             box.add_child(buildClipboardPanel(this));
         if (ids.includes('keyboard'))
             box.add_child(buildKeyboardPanel(this));
         if (ids.includes('dashboard'))
             box.add_child(this._dashboard());
-        for (const id of ['screenshot', 'dnd', 'nightlight', 'dark', 'performance', 'vpn', 'settings']) {
+        for (const id of ['shortcuts', 'timer', 'devices', 'input']) if (ids.includes(id)) box.add_child(expandedModule(this, id));
+        if (ids.includes('shelf')) box.add_child(shelfPanel(this));
+        if (ids.includes('performance')) box.add_child(expandedModule(this, 'performance'));
+        for (const id of ['screenshot', 'dnd', 'nightlight', 'dark', 'vpn', 'settings']) {
             if (ids.includes(id)) {
                 const section = moduleSection(this, id);
                 if (section)
@@ -3107,7 +3158,7 @@ class Bar {
         const paint = () => {
             const bar = readBars(this._overlay._settings)[this._index];
             const twelve = barTimeFormat(bar, clockSettings.get_string('clock-format')) === '12h';
-            const seconds = bar?.clockSeconds === true;
+            const seconds = bar?.modules.find(item => item.id === (this._moduleInstance || 'clock'))?.showSeconds ?? bar?.clockSeconds === true;
             if (ids.includes('clock')) {
                 const shown = (GLib.DateTime.new_now_local().format(timePattern(twelve, seconds)) ?? '').replace(/^0/, '');
                 const hour = (GLib.DateTime.new_now_local().format(twelve ? '%I' : '%H') ?? '').replace(/^0/, '');
@@ -3141,7 +3192,7 @@ class Bar {
             this._signals.push([clockSettings, clockSettings.connect('changed::clock-format', paint)]);
         if (ids.includes('date') && this._overlay._settings.settings_schema.has_key('date-format'))
             this._signals.push([this._overlay._settings, this._overlay._settings.connect('changed::date-format', paint)]);
-        this._timers.add(GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, readBars(this._overlay._settings)[this._index]?.clockSeconds ? 1 : 10, () => {
+        this._timers.add(GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
             paint();
             return GLib.SOURCE_CONTINUE;
         }));
@@ -3281,7 +3332,7 @@ class Bar {
             this._cancel(timer);
             if (button.hover && enabled && !this._state.editMode && !Main.overview.visible) {
                 this._later(timer, this._state.hoverDelay, () => {
-                    if (button.hover && !Main.overview.visible && this._popoutId !== id)
+                    if (button.hover && !Main.overview.visible && (this._popoutId !== id || this._popoutInstance !== (this._moduleInstance || null)))
                         this._open(id, button, build, null, true);
                 });
             } else {
@@ -3291,7 +3342,7 @@ class Bar {
     }
 
     _toggle(id, anchor, build) {
-        if (this._popoutId === id)
+        if (this._popoutId === id && this._popoutInstance === (this._moduleInstance || null))
             this._close(true);
         else
             this._open(id, anchor, build);
@@ -3307,7 +3358,7 @@ class Bar {
                 this._animatePopup(1);
             return;
         }
-        if (hover && this._overlay._bars.some(bar => bar !== this && bar._containsPointer()))
+        if (hover && this._overlay._bars.some(bar => bar !== (this._moduleOwner || this) && bar._containsPointer()))
             return;
         for (const bar of this._overlay._bars)
             bar._close();
@@ -3315,6 +3366,8 @@ class Bar {
         this._anchor = anchor;
         this._hoverPopup = hover;
         this._popoutId = id;
+        this._popupInputHole = false;
+        this._popoutInstance = this._moduleInstance || null;
         if (id === 'notifications') this._overlay._notifications?.setHistoryOpen(true);
         if (this._state.autohide)
             this._slide(true, false);
@@ -3367,6 +3420,8 @@ class Bar {
             : Math.min(id === 'dashboard' ? 520 : id === 'launcher' ? this._state.launcherWidth : id === 'notifications' ? 420 : id === 'status' ? 400 : id === 'clock' ? 360 : 320, availableWidth - radius * 2);
         this._popupWidth = width;
         this._popupCleanups = [];
+        this._popupAuxActors = new Set();
+        this._popupCloseOutside = true;
         this._popupChromeStyle = {
             bg: this._theme.bg, fg: this._theme.fg, attached, edge, location, radius,
             pad: osd || rail ? '12px 10px' : '18px',
@@ -3385,7 +3440,7 @@ class Bar {
         const scroll = new St.ScrollView({
             style_class: 'bezel-popout-scroll', overlay_scrollbars: true,
             hscrollbar_policy: St.PolicyType.NEVER,
-            vscrollbar_policy: id === 'dashboard' || String(id).startsWith('group:') ? St.PolicyType.AUTOMATIC : St.PolicyType.NEVER,
+            vscrollbar_policy: id === 'dashboard' || id === 'shelf' || String(id).startsWith('group:') ? St.PolicyType.AUTOMATIC : St.PolicyType.NEVER,
             x_expand: true, y_expand: true,
         });
         const menu = this._menuPopup(id);
@@ -3443,7 +3498,7 @@ class Bar {
             this._overlay._showDim(monitor, this._opening());
         chrome(this._popout, true, false);
         const app = String(id).startsWith('app:');
-        const stable = id === 'dashboard' || id === 'osd' || id === 'clock' || rail;
+        const stable = id === 'dashboard' || id === 'osd' || id === 'clock' || id === 'shelf' || rail;
         if (!app && !stable) {
             const requestFit = () => {
                 if ((this._popupProgress ?? 0) < 1)
@@ -3461,6 +3516,8 @@ class Bar {
         this._animatePopup(1);
         this._press = global.stage.connect('captured-event', (_stage, event) => {
             if (event.type() === Clutter.EventType.KEY_PRESS && event.get_key_symbol() === Clutter.KEY_Escape) {
+                const auxiliary = [...(this._popupAuxActors ?? [])].find(actor => actor._bezelCloseOnEscape);
+                if (auxiliary) { auxiliary._bezelCloseOnEscape(); return Clutter.EVENT_STOP; }
                 if (this._dashboardGesture) {
                     this._dashboardGesture();
                     return Clutter.EVENT_STOP;
@@ -3471,13 +3528,14 @@ class Bar {
                     focus.grab_key_focus();
                 return Clutter.EVENT_STOP;
             }
-            if (event.type() === Clutter.EventType.BUTTON_PRESS || event.type() === Clutter.EventType.TOUCH_BEGIN) {
+            if (this._popupCloseOutside !== false && (event.type() === Clutter.EventType.BUTTON_PRESS || event.type() === Clutter.EventType.TOUCH_BEGIN)) {
                 const [px, py] = event.get_coords();
                 const picked = global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, px, py);
                 if (!picked)
                     return Clutter.EVENT_PROPAGATE;
                 if (!this._popout.contains(picked) && picked !== this._popout
-                    && !this._anchor?.contains(picked) && picked !== this._anchor)
+                    && !this._anchor?.contains(picked) && picked !== this._anchor
+                    && ![...(this._popupAuxActors ?? [])].some(actor => actor === picked || actor.contains(picked)))
                     this._close(true);
             }
             return Clutter.EVENT_PROPAGATE;
@@ -3497,28 +3555,88 @@ class Bar {
         this._enableOutsideDismiss();
     }
 
+    _resetOutsideDismiss() {
+        if (this._dismissStrips?.length) {
+            for (const strip of this._dismissStrips)
+                drop(strip);
+        } else {
+            drop(this._dismissLayer);
+        }
+        this._dismissLayer = null;
+        this._dismissStrips = null;
+        this._enableOutsideDismiss();
+    }
+
     _enableOutsideDismiss() {
-        if (!this._popout || this._dismissLayer)
+        if (!this._popout || this._dismissLayer || this._popupCloseOutside === false)
             return;
         // Wayland client clicks never reach stage capture. A Shell chrome
         // layer under the drawer still sits above application windows.
+        const dismiss = () => this._close(true);
+        const wire = actor => {
+            actor.connect('button-press-event', () => {
+                dismiss();
+                return Clutter.EVENT_STOP;
+            });
+            actor.connect('touch-event', (_actor, event) => {
+                if (event.type() === Clutter.EventType.TOUCH_BEGIN) dismiss();
+                return Clutter.EVENT_STOP;
+            });
+        };
+        const placeBelow = actor => {
+            const parent = actor.get_parent();
+            const below = [this._popout, ...this._overlay._bars.map(bar => bar._actor), ...this._overlay._chrome]
+                .find(item => item && item.get_parent() === parent);
+            if (below)
+                parent.set_child_below_sibling(actor, below);
+        };
+        if (this._popupInputHole) {
+            // Separate strips, not one stage-sized parent, so the GTK shelf
+            // keeps a real hole in the chrome input region.
+            this._dismissStrips = [0, 1, 2, 3].map(() => {
+                const strip = new St.Widget({reactive: true});
+                chrome(strip, true, false);
+                placeBelow(strip);
+                wire(strip);
+                return strip;
+            });
+            this._dismissLayer = this._dismissStrips[0];
+            this._layoutDismissStrips();
+            return;
+        }
         const layer = new St.Widget({reactive: true, x: 0, y: 0});
         layer.add_constraint(new Clutter.BindConstraint({source: global.stage, coordinate: Clutter.BindCoordinate.SIZE}));
         chrome(layer, true, false);
-        const parent = layer.get_parent();
-        const below = [this._popout, ...this._overlay._bars.map(bar => bar._actor), ...this._overlay._chrome]
-            .find(actor => actor && actor.get_parent() === parent);
-        if (below)
-            parent.set_child_below_sibling(layer, below);
-        layer.connect('button-press-event', () => {
-            this._close(true);
-            return Clutter.EVENT_STOP;
-        });
-        layer.connect('touch-event', (_actor, event) => {
-            if (event.type() === Clutter.EventType.TOUCH_BEGIN) this._close(true);
-            return Clutter.EVENT_STOP;
-        });
+        placeBelow(layer);
+        wire(layer);
         this._dismissLayer = layer;
+    }
+
+    _layoutDismissStrips() {
+        const strips = this._dismissStrips;
+        if (!strips?.length)
+            return;
+        const sw = global.stage.width, sh = global.stage.height;
+        const g = this._popupGeometry;
+        if (!g) {
+            strips[0].set_position(0, 0);
+            strips[0].set_size(sw, sh);
+            for (let i = 1; i < 4; i++)
+                strips[i].set_size(0, 0);
+            return;
+        }
+        const x = Math.max(0, Math.round(g.x));
+        const y = Math.max(0, Math.round(g.y));
+        const w = Math.max(0, Math.round(g.width));
+        const h = Math.max(0, Math.round(g.height));
+        strips[0].set_position(0, 0);
+        strips[0].set_size(sw, y);
+        strips[1].set_position(0, y);
+        strips[1].set_size(x, h);
+        strips[2].set_position(x + w, y);
+        strips[2].set_size(Math.max(0, sw - x - w), h);
+        strips[3].set_position(0, y + h);
+        strips[3].set_size(sw, Math.max(0, sh - y - h));
     }
 
     _opening() {
@@ -3588,7 +3706,7 @@ class Bar {
     }
 
     _popupScrolls() {
-        return ['dashboard', 'notifications', 'launcher', 'settings', 'vpn', 'performance'].includes(this._popoutId)
+        return ['dashboard', 'notifications', 'launcher', 'settings', 'vpn', 'performance', 'timer', 'shortcuts', 'devices', 'input', 'shelf'].includes(this._popoutId)
             || String(this._popoutId).startsWith('group:') || this._menuPopup();
     }
 
@@ -3599,7 +3717,7 @@ class Bar {
         const width = Math.max(1, this._popout.width - pad);
         const app = String(this._popoutId).startsWith('app:');
         const scrolling = this._popupScrolls();
-        const cap = this._popoutId === 'dashboard' || String(this._popoutId).startsWith('group:') ? 900 : app ? 420 : scrolling ? 480
+        const cap = this._popoutId === 'dashboard' || String(this._popoutId).startsWith('group:') ? 900 : app ? 420 : this._popoutId === 'shelf' ? 560 : scrolling ? 480
             : ['dashboard', 'status', 'clock', 'osd', 'power'].includes(this._popoutId) ? 900 : 400;
         const extent = this._stackHeight(this._popupContent, width, scrolling ? 8000 : cap);
         let chrome = 0;
@@ -3670,6 +3788,7 @@ class Bar {
             return;
         this._popout.set_position(x, y);
         this._popupGeometry = geometry;
+        this._layoutDismissStrips();
         this._clipPopup(this._popupProgress);
     }
 
@@ -3792,7 +3911,7 @@ class Bar {
     }
 
     _close(animate = false) {
-        if (animate && this._popout && this._popupProgress > 0) {
+        if (animate && this._popout && this._popupProgress > 0 && this._popout.visible && !this._popupInputHole) {
             this._animatePopup(0, () => this._close());
             return;
         }
@@ -3826,11 +3945,19 @@ class Bar {
         }
         if (global.stage.key_focus && this._popout?.contains(global.stage.key_focus))
             global.stage.set_key_focus(null);
-        drop(this._dismissLayer);
+        if (this._dismissStrips?.length) {
+            for (const strip of this._dismissStrips)
+                drop(strip);
+        } else {
+            drop(this._dismissLayer);
+        }
         this._dismissLayer = null;
+        this._dismissStrips = null;
+        this._popupInputHole = false;
         drop(this._popout);
         this._popout = null;
         this._popupContent = null;
+        this._popupAuxActors = null;
         this._popupChrome = null;
         this._popupScroll = null;
         this._launcherEntry = null;
@@ -3845,11 +3972,11 @@ class Bar {
         return widget;
     }
 
-    _monthGrid() {
-        return monthGrid(this._theme, date => { if (openCalendarDate(date)) this._close(); });
+    _monthGrid(options = moduleFeatures(this, 'clock')) {
+        return monthGrid(this._theme, date => { if (openCalendarDate(date)) this._close(); }, options);
     }
 
-    _mediaCard(artwork = false, artSize = 84) {
+    _mediaCard(artwork = false, artSize = 84, options = moduleFeatures(this, 'media')) {
         const services = this._overlay.services;
         const box = card(this._theme);
         const art = new St.Icon({icon_name: 'audio-x-generic-symbolic', icon_size: artSize,
@@ -3879,6 +4006,46 @@ class Bar {
             buttons[method] = button;
         }
         box.add_child(controls);
+        if (options.mediaSeek) {
+            const seek = new Slider.Slider(0); seek.x_expand = true; seek.accessible_name = 'Track position';
+            const reading = label(this._theme.muted, 12, '');
+            box.add_child(seek); if (options.mediaTime) box.add_child(reading);
+            else reading.hide();
+            let updating = false, dragging = false, pending = false, disposed = false;
+            const cancel = new Gio.Cancellable();
+            const time = value => { const seconds = Math.floor(value / 1e6); return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`; };
+            const apply = () => {
+                const media = services.media;
+                if (updating || !media?.canSeek || !media.duration || !media.trackId) return;
+                media.proxy.call('SetPosition', new GLib.Variant('(ox)', [media.trackId, Math.round(seek.value * media.duration)]), Gio.DBusCallFlags.NONE, 3000, cancel,
+                    (proxy, result) => { try { proxy.call_finish(result); } catch (error) { if (!cancel.is_cancelled()) console.warn(`Bezel seek: ${error.message}`); } });
+            };
+            seek.connect('drag-begin', () => { dragging = true; });
+            seek.connect('drag-end', () => { dragging = false; apply(); });
+            seek.connect('notify::value', () => { if (!dragging) apply(); });
+            const update = () => {
+                const media = services.media;
+                seek.reactive = Boolean(media?.canSeek && media.duration && media.trackId);
+                seek.visible = Boolean(media?.duration);
+                if (!media?.duration) { reading.text = media ? 'Live / duration unavailable' : ''; return GLib.SOURCE_CONTINUE; }
+                if (pending || dragging || disposed) return GLib.SOURCE_CONTINUE;
+                pending = true;
+                media.proxy.call('org.freedesktop.DBus.Properties.Get', new GLib.Variant('(ss)', ['org.mpris.MediaPlayer2.Player', 'Position']), Gio.DBusCallFlags.NONE, 3000, cancel,
+                    (proxy, result) => {
+                        pending = false;
+                        try {
+                            const [variant] = proxy.call_finish(result).deepUnpack();
+                            const position = Number(variant?.deepUnpack?.() ?? variant);
+                            if (disposed || dragging || services.media?.trackId !== media.trackId || services.media?.proxy !== media.proxy) return;
+                            updating = true; seek.value = Math.max(0, Math.min(1, position / media.duration)); updating = false;
+                            reading.text = `${time(position)} / ${time(media.duration)}`;
+                        } catch { if (!disposed) reading.text = 'Position unavailable'; }
+                    });
+                return GLib.SOURCE_CONTINUE;
+            };
+            update(); const timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, update);
+            box.connect('destroy', () => { disposed = true; cancel.cancel(); GLib.source_remove(timer); if (!options.mediaTime) reading.destroy(); });
+        }
         box._dashLayout = ({height}) => {
             const factor = height ? Math.max(0.6, Math.min(2.1, height / 230)) : 1;
             if (artwork)
@@ -3909,12 +4076,13 @@ class Bar {
     _calendar(ids = null) {
         const members = ids ?? this._state.modules.filter(item => item.group === 'clock' || item.id === 'clock' || item.id === 'date').map(item => item.id);
         const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 8px;'});
-        box.add_child(this._groupItem({module: 'clock'}));
-        box.add_child(this._groupItem({module: 'date'}));
-        box.add_child(this._monthGrid());
+        const options = moduleFeatures(this, 'clock');
+        if (options.calendarTime) box.add_child(this._groupItem({module: 'clock'}));
+        if (options.calendarDate) box.add_child(this._groupItem({module: 'date'}));
+        if (options.calendarGrid) box.add_child(this._monthGrid(options));
         if (members.includes('weather'))
             box.add_child(weatherWidget(this));
-        box.add_child(this._notificationsAction());
+        if (options.calendarNotifications) box.add_child(this._groupItem({module: 'notifications'}));
         return box;
     }
 
@@ -3922,9 +4090,9 @@ class Bar {
         return buildOsd(this);
     }
 
-    _session() {
-        if (powerLayout(this._state.modules.find(item => item.id === 'power'), this._overlay._settings) === 'rail')
-            return buildSessionRail(this);
+    _session(options = moduleFeatures(this, 'power')) {
+        if (options.powerStyle ? options.powerStyle === 'rail' : options.powerIcons || powerLayout(this._state.modules.find(item => item.id === 'power'), this._overlay._settings) === 'rail')
+            return buildSessionRail(this, options);
         const actions = SystemActions.getDefault();
         const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 8px;'});
         const rows = [
@@ -3935,7 +4103,8 @@ class Bar {
             ['Power off', 'system-shutdown-symbolic', actions.can_power_off, () => actions.activatePowerOff()],
         ];
         for (const [title, iconName, allowed, run] of rows) {
-            if (!allowed)
+            const key = {'Lock': 'powerLock', 'Suspend': 'powerSuspend', 'Log out': 'powerLogout', 'Restart': 'powerRestart', 'Power off': 'powerOff'}[title];
+            if (!allowed || options[key] === false)
                 continue;
             const button = new St.Button({
                 reactive: true,

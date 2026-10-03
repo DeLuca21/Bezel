@@ -1,3 +1,4 @@
+import {moduleType} from './moduleIdentity.js';
 import Gtk from 'gi://Gtk';
 import Gdk from 'gi://Gdk';
 import GObject from 'gi://GObject';
@@ -95,13 +96,14 @@ export function buildGroupEditor(owner, bar) {
         box.append(text('Width relative to other items in this row. A lone item fills the row.'));
         box.append(owner._toggle('Extra heading', cell.title === true, value => edit(item => { item.title = value; })));
         const moduleId = cell.module === 'brightness' ? 'volume' : cell.module;
-        const existing = bar.modules.find(item => item.id === moduleId);
+        const existing = bar.modules.find(item => item.id === (cell.instance || moduleId));
         if (existing) {
             box.append(text('Module settings · shared with the bar'));
             owner._moduleOptions(box, {...existing}, bar, values => {
-                owner._write(() => patchModule(owner.settings, owner.barIndex, moduleId, values), false);
+                owner._write(() => patchModule(owner.settings, owner.barIndex, existing.id, values), false);
             });
         } else {
+            owner._featureOptions(box, {id: moduleId, ...cell.options}, values => edit(item => { item.options = {...item.options, ...values}; }));
             const switches = moduleId === 'volume' ? [['showMute', 'Show mute button'], ['popIcon', 'Icon'], ['popValue', 'Percentage'], ['brightIcon', 'Brightness icon'], ['brightValue', 'Brightness percentage']]
                 : moduleId === 'network' ? [['popValue', 'Network name'], ['showToggle', 'Show on/off button']]
                 : moduleId === 'microphone' ? [['showMute', 'Show mute button'], ['showIcon', 'Icon'], ['showValue', 'Level']]
@@ -117,7 +119,15 @@ export function buildGroupEditor(owner, bar) {
             box.append(button(`Row ${index + 1} · ${titles}`, () => { pop.popdown(); save(moveGroupCell(layout, cell.id, target.id)); }));
         }
         box.append(button('Remove item', () => { pop.popdown(); change(next => { for (const row of groupRows(next)) row.cells = row.cells.filter(item => item.id !== cell.id); }); }));
-        pop = popover(anchor, new Gtk.ScrolledWindow({child: box, min_content_width: 350, max_content_height: 520, propagate_natural_height: true, hscrollbar_policy: Gtk.PolicyType.NEVER}));
+        owner._closeItemPopover();
+        const dialog = new Gtk.Popover({autohide: false}); dialog.set_parent(anchor);
+        box.prepend(button('Close', () => dialog.popdown()));
+        dialog.set_child(new Gtk.ScrolledWindow({child: box, max_content_height: 500, propagate_natural_height: true, hscrollbar_policy: Gtk.PolicyType.NEVER}));
+        pop = dialog; owner.itemPopover = dialog;
+        dialog.connect('closed', () => { if (owner.itemPopover === dialog) owner.itemPopover = null; if (dialog.get_parent()) dialog.unparent(); });
+        const escape = new Gtk.EventControllerKey();
+        escape.connect('key-pressed', (_controller, key) => { if (key !== Gdk.KEY_Escape) return false; dialog.popdown(); return true; });
+        dialog.add_controller(escape); dialog.popup();
     };
     const drawRow = (record, container, siblings) => {
         const line = column(); line.add_css_class('group');
@@ -190,8 +200,8 @@ export function buildGroupEditor(owner, bar) {
     if (group.face === 'single') {
         const icon = new Gtk.Entry({text: group.icon || 'view-grid-symbolic', placeholder_text: 'Group icon name'});
         icon.connect('activate', () => groupChange({icon: icon.text})); root.append(icon);
-    } else for (const member of members.filter(item => GROUP_ITEMS[item.id] && !['workspaces', 'apps'].includes(item.id))) {
-        root.append(text(`${GROUP_ITEMS[member.id].title} click`));
+    } else for (const member of members.filter(item => GROUP_ITEMS[moduleType(item.id)] && !['workspaces', 'apps'].includes(moduleType(item.id)))) {
+        root.append(text(`${GROUP_ITEMS[moduleType(member.id)].title} click`));
         root.append(owner._segments([['group', 'Open group'], ['tab', 'Matching tab'], ['direct', 'Own action']], group.clicks?.[member.id] || 'group',
             value => groupChange({clicks: {...group.clicks, [member.id]: value}}), false));
     }

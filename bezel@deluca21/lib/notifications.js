@@ -209,7 +209,7 @@ export class NotificationBridge {
 
 // Separate views of the same notification objects preserve actions and dismissal.
 // Destroying a view does not dismiss its notification.
-export function buildNotificationCenter(bar) {
+export function buildNotificationCenter(bar, embedded = false) {
     const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL,
         style: 'spacing: 10px;'});
     box.add_child(new St.Label({text: 'Notifications', style: 'font-weight: bold; font-size: 18px;'}));
@@ -219,7 +219,7 @@ export function buildNotificationCenter(bar) {
     const fitHistory = () => {
         bar._popupLockedHeight = false;
         const fit = () => {
-            if (bar._popoutId !== 'notifications' || !bar._popout)
+            if ((!embedded && bar._popoutId !== 'notifications') || !bar._popout)
                 return;
             bar._popupLockedHeight = false;
             bar._fitPopup();
@@ -244,7 +244,7 @@ export function buildNotificationCenter(bar) {
                 return;
             // Closing the drawer destroys these views. The scroll adjustment is
             // already gone by then, so only refit while the shade is open.
-            if (bar._popoutId !== 'notifications' || !bar._popout)
+            if ((!embedded && bar._popoutId !== 'notifications') || !bar._popout)
                 return;
             empty.visible = messages.size === 0;
             bar._popupScroll?.get_parent?.()?._bezelSyncOverflow?.();

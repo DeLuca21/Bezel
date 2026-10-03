@@ -1,3 +1,5 @@
+import {moduleType} from './moduleIdentity.js';
+import {normalizeFeatures} from './moduleFeatures.js';
 import {normalizeGroupLayout} from './groupLayout.js';
 import {packRows, spanOf} from './dashboardGeometry.js';
 
@@ -8,9 +10,9 @@ export const PLACES = {
     network: 'end', battery: 'end', power: 'end', spacer: 'center',
     screenshot: 'end', dnd: 'end', performance: 'end', vpn: 'end', settings: 'end',
     nightlight: 'end', dark: 'end', media: 'end', microphone: 'end', clipboard: 'end',
-    keyboard: 'end', awake: 'end', indicators: 'end', output: 'end', bluetooth: 'end', brightness: 'end', notifications: 'end',
+    keyboard: 'end', awake: 'end', indicators: 'end', output: 'end', bluetooth: 'end', brightness: 'end', notifications: 'end', shelf: 'end', shortcuts: 'end', timer: 'end', devices: 'end', input: 'end',
 };
-const OPTIONAL_MODULES = ['screenshot', 'dnd', 'performance', 'vpn', 'settings', 'nightlight', 'dark', 'media', 'microphone', 'clipboard', 'keyboard', 'awake', 'indicators', 'output', 'bluetooth', 'brightness', 'notifications'];
+const OPTIONAL_MODULES = ['screenshot', 'dnd', 'performance', 'vpn', 'settings', 'nightlight', 'dark', 'media', 'microphone', 'clipboard', 'keyboard', 'awake', 'indicators', 'output', 'bluetooth', 'brightness', 'notifications', 'shelf', 'shortcuts', 'timer', 'devices', 'input'];
 export const DEFAULT_GROUPS = {
     clock: 'clock', date: 'clock', volume: 'status', network: 'status', battery: 'status',
 };
@@ -46,7 +48,7 @@ const HEX = /^#[0-9a-f]{6}$/i;
 export const hexColor = value => HEX.test(String(value ?? '')) ? String(value).toLowerCase() : '';
 
 export const PANEL_MODULES = new Set([
-    'notifications', 'clock', 'date', 'weather', 'volume', 'network', 'battery', 'power', 'dashboard',
+    'shelf', 'timer', 'shortcuts', 'devices', 'input', 'notifications', 'clock', 'date', 'weather', 'volume', 'network', 'battery', 'power', 'dashboard',
     'performance', 'vpn', 'settings', 'window', 'apps', 'media', 'microphone', 'clipboard', 'keyboard',
 ]);
 const HOVER_SETTING = {
@@ -62,14 +64,14 @@ export function hoverEnabled(module, group, settings) {
         return group.hover;
     if (module && typeof module.hover === 'boolean')
         return module.hover;
-    const key = HOVER_SETTING[module?.id];
+    const key = HOVER_SETTING[moduleType(module?.id)];
     if (key)
         return settingFlag(settings, key, true);
     if (module?.id === 'apps')
         return true;
-    if (IN_PLACE.has(module?.id))
+    if (IN_PLACE.has(moduleType(module?.id)))
         return false;
-    return PANEL_MODULES.has(module?.id);
+    return PANEL_MODULES.has(moduleType(module?.id));
 }
 
 export const MODULE_SWITCHES = {
@@ -87,9 +89,9 @@ export const MODULE_SWITCHES = {
 export function switchOn(module, bar, key) {
     if (typeof module?.[key] === 'boolean')
         return module[key];
-    if (key === 'showValue' && module?.id === 'battery' && bar?.batteryPercentage)
+    if (key === 'showValue' && moduleType(module?.id) === 'battery' && bar?.batteryPercentage)
         return true;
-    if (key === 'popValue' && module?.id === 'network')
+    if (key === 'popValue' && moduleType(module?.id) === 'network')
         return true;
     return !VALUE_KEYS.has(key);
 }
@@ -232,13 +234,13 @@ export function normalizeModules(list) {
     const seen = new Set();
     return list.flatMap(item => {
         const id = typeof item === 'string' ? item : item?.id;
-        if ((!Object.hasOwn(PLACES, id) && !isSpacer(id)) || seen.has(id))
+        if ((!Object.hasOwn(PLACES, moduleType(id)) && !isSpacer(id)) || seen.has(id))
             return [];
         seen.add(id);
         const spacer = isSpacer(id);
         return [{
             id,
-            place: ['start', 'center', 'end'].includes(item?.place) ? item.place : PLACES[id] ?? 'center',
+            place: ['start', 'center', 'end'].includes(item?.place) ? item.place : PLACES[moduleType(id)] ?? 'center',
             group: normalizeGroup(id, item),
             ...(spacer ? {size: number(item?.size, 24, 8, 400)} : {}),
             ...moduleExtras(item),
@@ -249,7 +251,7 @@ export function normalizeModules(list) {
 function moduleExtras(item) {
     if (!item || typeof item !== 'object')
         return {};
-    const extra = {};
+    const extra = normalizeFeatures(item);
     if (typeof item.hover === 'boolean')
         extra.hover = item.hover;
     for (const key of ['showIcon', 'showValue', 'showArt', 'brightIcon', 'brightValue', 'popIcon', 'popValue', 'sessionDim', 'showMute', 'showToggle'])
@@ -308,7 +310,7 @@ function groupRecord(group) {
     if (group.face === 'single') record.face = 'single';
     if (typeof group.icon === 'string') record.icon = group.icon.slice(0, 100);
     if (group.clicks && typeof group.clicks === 'object')
-        record.clicks = Object.fromEntries(Object.entries(group.clicks).filter(([id, mode]) => Object.hasOwn(PLACES, id) && ['group', 'direct', 'tab'].includes(mode)));
+        record.clicks = Object.fromEntries(Object.entries(group.clicks).filter(([id, mode]) => Object.hasOwn(PLACES, moduleType(id)) && ['group', 'direct', 'tab'].includes(mode)));
     const custom = hexColor(group.custom);
     if (custom)
         record.custom = custom;

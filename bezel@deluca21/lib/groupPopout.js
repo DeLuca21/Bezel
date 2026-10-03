@@ -81,7 +81,7 @@ export function buildGroupPopout(bar, group, initialModule = null) {
             button.connect('clicked', () => select(index)); strip.add_child(button); buttons.push(button);
         });
         const matches = initialModule === 'volume' ? ['volume', 'output'] : ['clock', 'date'].includes(initialModule) ? [initialModule, 'calendar'] : [initialModule];
-        const wanted = tabs.findIndex(tab => initialModule && tab.rows.some(row => row.cells.some(cell => matches.includes(cell.module))));
+        const wanted = tabs.findIndex(tab => initialModule && tab.rows.some(row => row.cells.some(cell => matches.includes(cell.instance || cell.module))));
         const saved = tabs.findIndex(tab => tab.id === bar._groupTabs?.get(`${group.id}:${block.id}`));
         select(wanted >= 0 ? wanted : saved >= 0 ? saved : 0);
     }

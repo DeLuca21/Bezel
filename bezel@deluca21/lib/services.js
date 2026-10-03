@@ -358,6 +358,9 @@ export class Services {
         const artists = value('xesam:artist');
         return {
             proxy,
+            canSeek: property(proxy, 'CanSeek', false),
+            trackId: value('mpris:trackid'),
+            duration: Math.max(0, Number(value('mpris:length')) || 0),
             title: typeof value('xesam:title') === 'string' ? value('xesam:title') : 'Media player',
             artUrl: typeof value('mpris:artUrl') === 'string' ? value('mpris:artUrl') : '',
             artist: Array.isArray(artists) ? artists.filter(v => typeof v === 'string').join(', ') : '',
@@ -384,6 +387,11 @@ export class Services {
     }
 
     destroy() {
+        if (this._timerBanks) {
+            for (const states of this._timerBanks.values()) for (const state of states) if (state.alarm) { GLib.source_remove(state.alarm); state.alarm = 0; }
+            this._timerBanks.clear();
+        } else if (this._moduleTimer?.alarm) GLib.source_remove(this._moduleTimer.alarm);
+        this._moduleTimer = null;
         if (this._clipTimer)
             GLib.source_remove(this._clipTimer);
         this._clipTimer = 0;

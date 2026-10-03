@@ -1,3 +1,4 @@
+import {moduleFeatures} from './moduleFeatures.js';
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import Pango from 'gi://Pango';
@@ -10,7 +11,7 @@ export class Weather {
     constructor() {
         this.client = Main.panel.statusArea.dateMenu?._weatherItem?._weatherClient;
         this.listeners = new Set();
-        this.signal = this.client?.connect('changed', () => this.listeners.forEach(callback => callback()));
+        this.signal = this.client?.connect('changed', () => { if (!this.client.loading && this.client.info?.is_valid()) this.updatedAt = GLib.DateTime.new_now_local(); this.listeners.forEach(callback => callback()); });
         this.lastRefresh = 0;
         this.timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 900, () => {
             if (this.listeners.size) this.refresh();
@@ -97,7 +98,8 @@ export class Weather {
 
 export function weatherWidget(bar, options = {}) {
     const compact = options === true || options.compact === true;
-    const showForecast = !compact && options.forecast !== false;
+    if (!compact) options = {...moduleFeatures(bar, 'weather'), ...options};
+    const showForecast = !compact && options.forecast !== false && options.weatherForecast !== false;
     const weather = bar._overlay.weather;
     const vertical = compact && bar._vertical;
     const size = compact ? bar._state.iconSize : 28;
@@ -152,15 +154,21 @@ export function weatherWidget(bar, options = {}) {
         style: `background-color: ${bar._theme.surface}; border-radius: 16px; padding: 12px 14px; spacing: 10px;`,
     });
     if (!compact) {
+        button.visible = options.weatherCurrent !== false || options.weatherLocation !== false;
+        icon.visible = options.weatherCurrent !== false;
+        if (detail) detail.visible = options.weatherCurrent !== false;
         card.add_child(button);
         if (forecast)
             card.add_child(forecast);
     }
+    const status = !compact && options.weatherStatus ? new St.Label({style: `color: ${bar._theme.muted}; font-size: 11px;`}) : null;
+    if (status) card.add_child(status);
     const unsubscribe = weather.subscribe(() => {
         const summary = weather.summary;
         icon.icon_name = summary.icon;
+        if (status) status.text = weather.client?.loading ? 'Updating…' : weather.updatedAt ? `Updated ${weather.updatedAt.format('%H:%M')}` : summary.compact === '—' ? summary.text : 'Using available weather data';
         text.text = compact ? railTemp(summary.compact)
-            : [summary.location, summary.compact].filter(Boolean).join(' · ') || summary.text;
+            : [options.weatherLocation === false ? '' : summary.location, options.weatherCurrent === false ? '' : summary.compact].filter(Boolean).join(' · ') || summary.text;
         if (detail)
             detail.text = summary.conditions && summary.conditions !== '-' ? summary.conditions : '';
         button.accessible_name = `${summary.location ?? 'Weather'}: ${summary.text}`;

@@ -168,6 +168,9 @@ const PROFILES = [
 export function performanceMenu(bar) {
     const theme = bar._theme;
     const box = new St.BoxLayout({orientation: 1, style: 'spacing: 8px;'});
+    let disposed = false;
+    const cleanup = [];
+    box.connect('destroy', () => { disposed = true; cleanup.splice(0).forEach(fn => fn()); });
     const status = new St.Label({text: 'Reading power profiles…', style: `color: ${theme.muted}; padding: 8px;`});
     box.add_child(status);
     Gio.DBusProxy.new_for_bus(Gio.BusType.SYSTEM, Gio.DBusProxyFlags.NONE, null,
@@ -190,7 +193,7 @@ export function performanceMenu(bar) {
                                 throw new Error('no owner');
                             showProfiles(proxy, iface);
                         } catch {
-                            status.text = 'Power profiles are not available';
+                            if (!disposed) status.text = 'Power profiles are not available';
                         }
                     });
                 return;
@@ -198,6 +201,7 @@ export function performanceMenu(bar) {
             showProfiles(proxy, iface);
         });
     const showProfiles = (proxy, iface) => {
+        if (disposed) return;
         const paint = () => {
             box.destroy_all_children();
             const active = proxy.get_cached_property('ActiveProfile')?.unpack() ?? '';
@@ -214,7 +218,7 @@ export function performanceMenu(bar) {
             }
         };
         const changed = proxy.connect('g-properties-changed', paint);
-        bar._popupCleanups.push(() => proxy.disconnect(changed));
+        cleanup.push(() => proxy.disconnect(changed));
         paint();
     };
     return box;
