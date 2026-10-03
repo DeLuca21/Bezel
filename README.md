@@ -119,6 +119,7 @@ Right-click a bar for settings, edit mode, panel or dock, floating, autohide, an
 If you enjoy Bezel, consider **supporting development**:
 
 [![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/DeLuca21)
+
 [![BuyMeACoffee](https://cdn.buymeacoffee.com/buttons/default-red.png)](https://www.buymeacoffee.com/DeLuca21)
 
 ---
