@@ -19,20 +19,25 @@ export class IndicatorBridge {
         this.icons = new Map();
         this.containers = new Map();
         this.verticalLayouts = new Map();
-        this.host = new St.BoxLayout({
+        this.host = bar._indicatorSlot ?? new St.BoxLayout({
             orientation: bar._actor.orientation, style_class: 'bezel-indicators',
             style: `color: ${bar._theme.fg};`, x_align: Clutter.ActorAlign.CENTER,
         });
+        this._ownsHost = !bar._indicatorSlot;
         this.host.connect('destroy', () => {
             this.destroyed = true;
             if (this.pending) GLib.source_remove(this.pending);
             this.pending = 0;
         });
-        const parent = bar._zones.end;
-        if (bar._state.kind === 'dock')
-            bar._dockContent.add_child(this.host);
-        else
-            this._placeHost(parent);
+        if (this._ownsHost) {
+            const parent = bar._zones.end;
+            if (bar._state.kind === 'dock')
+                bar._dockContent.add_child(this.host);
+            else
+                this._placeHost(parent);
+        } else if (this.host.get_parent()) {
+            this._placeHost(this.host.get_parent());
+        }
         for (const box of [Main.panel._leftBox, Main.panel._centerBox, Main.panel._rightBox]) {
             for (const signal of ['child-added', 'child-removed'])
                 this.signals.push([box, box.connect(signal, () => this.queueSync())]);
@@ -46,10 +51,15 @@ export class IndicatorBridge {
 
     _placeHost(parent) {
         const before = this.bar._overlay._settings.get_string('indicator-side') === 'before';
+        const present = this.host.get_parent() === parent;
+        const limit = present ? Math.max(0, parent.get_n_children() - 1) : parent.get_n_children();
         const index = this.bar._vertical
-            ? (before ? parent.get_n_children() : 0)
-            : (before ? 0 : parent.get_n_children());
-        parent.insert_child_at_index(this.host, index);
+            ? (before ? limit : 0)
+            : (before ? 0 : limit);
+        if (present)
+            parent.set_child_at_index(this.host, index);
+        else
+            parent.insert_child_at_index(this.host, index);
     }
 
     queueSync() {
@@ -285,6 +295,7 @@ export class IndicatorBridge {
             }
         }
         this.records.clear();
-        this.host.destroy();
+        if (this._ownsHost)
+            this.host.destroy();
     }
 }

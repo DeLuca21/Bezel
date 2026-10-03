@@ -1,5 +1,6 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import St from 'gi://St';
 import * as Volume from 'resource:///org/gnome/shell/ui/status/volume.js';
 import {clamp} from './config.js';
 
@@ -39,8 +40,17 @@ export class Services {
         this._watch(this.soundSettings, 'changed::allow-volume-above-100-percent', () => this._emit());
         this.mixer = Volume.getMixerControl();
         this._watch(this.mixer, 'default-sink-changed', () => this._syncStream());
-        this._watch(this.mixer, 'state-changed', () => this._syncStream());
+        this._watch(this.mixer, 'default-source-changed', () => this._syncSource());
+        this._watch(this.mixer, 'state-changed', () => { this._syncStream(); this._syncSource(); });
         this._syncStream();
+        this._syncSource();
+        this._history = [];
+        this._clipLast = '';
+        this._awakeCookie = 0;
+        this._clipTimer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
+            this._pollClipboard();
+            return GLib.SOURCE_CONTINUE;
+        });
         this._proxy(Gio.BusType.SESSION, 'org.gnome.SettingsDaemon.Power',
             '/org/gnome/SettingsDaemon/Power', 'org.gnome.SettingsDaemon.Power.Screen', proxy => {
                 this.brightness = proxy;
@@ -92,6 +102,43 @@ export class Services {
         this._emit();
     }
 
+    _syncSource() {
+        for (const [obj, id] of this._sourceSignals ?? [])
+            obj.disconnect(id);
+        this._sourceSignals = [];
+        try {
+            this.source = typeof this.mixer.get_default_source === 'function' ? this.mixer.get_default_source() : null;
+        } catch {
+            this.source = null;
+        }
+        if (this.source) {
+            for (const signal of ['notify::volume', 'notify::is-muted'])
+                this._sourceSignals.push([this.source, this.source.connect(signal, () => this._emit())]);
+        }
+        this._emit();
+    }
+
+    _pollClipboard() {
+        try {
+            St.Clipboard.get_default().get_text(St.ClipboardType.CLIPBOARD, (_clip, text) => {
+                if (!this._cancellable.is_cancelled())
+                    this._rememberClip(text);
+            });
+        } catch (error) {
+            if (!this._cancellable.is_cancelled())
+                console.warn(`Bezel: clipboard unavailable: ${error.message}`);
+        }
+    }
+
+    _rememberClip(text) {
+        const value = String(text ?? '').replace(/\s+/g, ' ').trim();
+        if (!value || value === this._clipLast)
+            return;
+        this._clipLast = value;
+        this._history = [value, ...this._history.filter(item => item !== value)].slice(0, 40);
+        this._emit();
+    }
+
     subscribe(callback) {
         this._listeners.add(callback);
         callback();
@@ -123,6 +170,79 @@ export class Services {
     toggleMute() {
         if (this.stream)
             this.stream.change_is_muted(!this.stream.is_muted);
+    }
+
+    get micVolume() {
+        return this.source ? this.source.volume / this.mixer.get_vol_max_norm() : 0;
+    }
+
+    setMicVolume(value) {
+        if (!this.source)
+            return;
+        this.source.volume = Math.round(clamp(value, 0, 1) * this.mixer.get_vol_max_norm());
+        this.source.push_volume();
+        this.source.change_is_muted(value <= 0);
+    }
+
+    toggleMicMute() {
+        if (this.source)
+            this.source.change_is_muted(!this.source.is_muted);
+    }
+
+    get micIcon() {
+        if (!this.source || this.source.is_muted || this.micVolume === 0)
+            return 'microphone-sensitivity-muted-symbolic';
+        return 'audio-input-microphone-symbolic';
+    }
+
+    get clipboard() {
+        return this._history;
+    }
+
+    copyText(text) {
+        const value = String(text ?? '');
+        St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, value);
+        this._clipLast = value.replace(/\s+/g, ' ').trim();
+    }
+
+    get awake() {
+        return this._awakeCookie > 0;
+    }
+
+    setAwake(on) {
+        if (on && !this._awakeCookie) {
+            Gio.DBus.session.call('org.gnome.SessionManager', '/org/gnome/SessionManager',
+                'org.gnome.SessionManager', 'Inhibit',
+                new GLib.Variant('(susu)', ['bezel@deluca21', 0, 'Keep the computer awake', 8]),
+                new GLib.VariantType('(u)'), Gio.DBusCallFlags.NONE, 3000, this._cancellable,
+                (bus, result) => {
+                    try {
+                        const [cookie] = bus.call_finish(result).deepUnpack();
+                        this._awakeCookie = cookie;
+                        if (this._cancellable.is_cancelled())
+                            this._releaseAwake();
+                        else
+                            this._emit();
+                    } catch (error) {
+                        if (!this._cancellable.is_cancelled())
+                            console.warn(`Bezel: could not keep the computer awake: ${error.message}`);
+                    }
+                });
+            return;
+        }
+        if (!on && this._awakeCookie)
+            this._releaseAwake();
+    }
+
+    _releaseAwake() {
+        const cookie = this._awakeCookie;
+        if (!cookie)
+            return;
+        this._awakeCookie = 0;
+        Gio.DBus.session.call('org.gnome.SessionManager', '/org/gnome/SessionManager',
+            'org.gnome.SessionManager', 'Uninhibit',
+            new GLib.Variant('(u)', [cookie]), null, Gio.DBusCallFlags.NONE, 3000, null, () => {});
+        this._emit();
     }
 
     get hasBrightness() {
@@ -182,6 +302,7 @@ export class Services {
         const wifi = property(this.connection, 'Type', '') === '802-11-wireless';
         return {
             icon: online ? (wifi ? 'network-wireless-signal-excellent-symbolic' : 'network-wired-symbolic') : 'network-offline-symbolic',
+            short: online && name ? name : online ? 'Online' : 'Offline',
             text: online && name ? `${wifi ? 'Wi-Fi' : 'Network'} · ${name}${state < 70 ? ' · Local only' : ' · Connected'}`
                 : state >= 70 ? 'Connected to the internet' : online ? 'Local network only' : 'Network offline',
         };
@@ -237,6 +358,9 @@ export class Services {
         const artists = value('xesam:artist');
         return {
             proxy,
+            canSeek: property(proxy, 'CanSeek', false),
+            trackId: value('mpris:trackid'),
+            duration: Math.max(0, Number(value('mpris:length')) || 0),
             title: typeof value('xesam:title') === 'string' ? value('xesam:title') : 'Media player',
             artUrl: typeof value('mpris:artUrl') === 'string' ? value('mpris:artUrl') : '',
             artist: Array.isArray(artists) ? artists.filter(v => typeof v === 'string').join(', ') : '',
@@ -263,6 +387,15 @@ export class Services {
     }
 
     destroy() {
+        if (this._timerBanks) {
+            for (const states of this._timerBanks.values()) for (const state of states) if (state.alarm) { GLib.source_remove(state.alarm); state.alarm = 0; }
+            this._timerBanks.clear();
+        } else if (this._moduleTimer?.alarm) GLib.source_remove(this._moduleTimer.alarm);
+        this._moduleTimer = null;
+        if (this._clipTimer)
+            GLib.source_remove(this._clipTimer);
+        this._clipTimer = 0;
+        this._releaseAwake();
         if (this._connectionSignal) this.connection.disconnect(this._connectionSignal);
         this._connectionSignal = 0;
         this._cancellable.cancel();
@@ -271,7 +404,7 @@ export class Services {
         for (const name of this._players.keys())
             this._removePlayer(name);
         this._pendingPlayers.clear();
-        for (const [object, id] of [...this._signals, ...this._streamSignals])
+        for (const [object, id] of [...this._signals, ...this._streamSignals, ...(this._sourceSignals ?? [])])
             object.disconnect(id);
         this._signals = [];
         this._streamSignals = [];

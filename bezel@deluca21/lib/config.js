@@ -1,12 +1,18 @@
+import {moduleType} from './moduleIdentity.js';
+import {normalizeFeatures} from './moduleFeatures.js';
+import {normalizeGroupLayout} from './groupLayout.js';
+import {packRows, spanOf} from './dashboardGeometry.js';
+
 // Shared by the shell and preferences. Never let a hand-edited config break enable().
 export const PLACES = {
     logo: 'start', workspaces: 'start', window: 'center', dashboard: 'center',
     clock: 'center', date: 'end', weather: 'end', apps: 'start', volume: 'end',
     network: 'end', battery: 'end', power: 'end', spacer: 'center',
     screenshot: 'end', dnd: 'end', performance: 'end', vpn: 'end', settings: 'end',
-    nightlight: 'end', dark: 'end',
+    nightlight: 'end', dark: 'end', media: 'end', microphone: 'end', clipboard: 'end',
+    keyboard: 'end', awake: 'end', indicators: 'end', output: 'end', bluetooth: 'end', brightness: 'end', notifications: 'end', shelf: 'end', shortcuts: 'end', timer: 'end', devices: 'end', input: 'end',
 };
-const OPTIONAL_MODULES = ['screenshot', 'dnd', 'performance', 'vpn', 'settings', 'nightlight', 'dark'];
+const OPTIONAL_MODULES = ['screenshot', 'dnd', 'performance', 'vpn', 'settings', 'nightlight', 'dark', 'media', 'microphone', 'clipboard', 'keyboard', 'awake', 'indicators', 'output', 'bluetooth', 'brightness', 'notifications', 'shelf', 'shortcuts', 'timer', 'devices', 'input'];
 export const DEFAULT_GROUPS = {
     clock: 'clock', date: 'clock', volume: 'status', network: 'status', battery: 'status',
 };
@@ -38,6 +44,160 @@ export const settingChoice = (settings, key, fallback, allowed) => {
 };
 const number = (value, fallback, min, max) =>
     Number.isFinite(Number(value)) ? clamp(Math.round(Number(value)), min, max) : fallback;
+const HEX = /^#[0-9a-f]{6}$/i;
+export const hexColor = value => HEX.test(String(value ?? '')) ? String(value).toLowerCase() : '';
+
+export const PANEL_MODULES = new Set([
+    'shelf', 'timer', 'shortcuts', 'devices', 'input', 'notifications', 'clock', 'date', 'weather', 'volume', 'network', 'battery', 'power', 'dashboard',
+    'performance', 'vpn', 'settings', 'window', 'apps', 'media', 'microphone', 'clipboard', 'keyboard',
+]);
+const HOVER_SETTING = {
+    clock: 'clock-hover', date: 'clock-hover',
+    volume: 'status-hover', network: 'status-hover', battery: 'status-hover',
+    power: 'power-button-hover', dashboard: 'dashboard-hover',
+};
+const IN_PLACE = new Set(['screenshot', 'dnd', 'nightlight', 'dark', 'awake']);
+const VALUE_KEYS = new Set(['showValue', 'brightValue', 'showArt', 'popValue']);
+
+export function hoverEnabled(module, group, settings) {
+    if (group && typeof group.hover === 'boolean')
+        return group.hover;
+    if (module && typeof module.hover === 'boolean')
+        return module.hover;
+    const key = HOVER_SETTING[moduleType(module?.id)];
+    if (key)
+        return settingFlag(settings, key, true);
+    if (module?.id === 'apps')
+        return true;
+    if (IN_PLACE.has(moduleType(module?.id)))
+        return false;
+    return PANEL_MODULES.has(moduleType(module?.id));
+}
+
+export const MODULE_SWITCHES = {
+    battery: [['showIcon', 'Icon'], ['showValue', 'Percentage']],
+    weather: [['showIcon', 'Icon'], ['showValue', 'Temperature']],
+    volume: [['showIcon', 'Icon'], ['showValue', 'Percentage']],
+    network: [['showIcon', 'Icon'], ['showValue', 'Name']],
+    vpn: [['showIcon', 'Icon'], ['showValue', 'Connection']],
+    performance: [['showIcon', 'Icon'], ['showValue', 'Profile']],
+    window: [['showIcon', 'Icon'], ['showValue', 'Window title']],
+    media: [['showIcon', 'Icon'], ['showValue', 'Title'], ['showArt', 'Artwork']],
+    microphone: [['showIcon', 'Icon'], ['showValue', 'Level']],
+};
+
+export function switchOn(module, bar, key) {
+    if (typeof module?.[key] === 'boolean')
+        return module[key];
+    if (key === 'showValue' && moduleType(module?.id) === 'battery' && bar?.batteryPercentage)
+        return true;
+    if (key === 'popValue' && moduleType(module?.id) === 'network')
+        return true;
+    return !VALUE_KEYS.has(key);
+}
+
+export function moduleLook(module, bar) {
+    const icon = switchOn(module, bar, 'showIcon');
+    const value = switchOn(module, bar, 'showValue');
+    const art = switchOn(module, bar, 'showArt');
+    if (!icon && !value && !art)
+        return {icon: true, value: false, art: false};
+    return {icon, value, art};
+}
+
+export function sliderLayout(module, settings) {
+    if (['edge', 'stack', 'drawer'].includes(module?.sliderStyle))
+        return module.sliderStyle;
+    return settingChoice(settings, 'slider-style', 'drawer', ['drawer', 'edge']) === 'edge' ? 'edge' : 'drawer';
+}
+
+export function powerLayout(module, settings) {
+    if (module?.powerStyle === 'list' || module?.powerStyle === 'rail')
+        return module.powerStyle;
+    return settingChoice(settings, 'power-style', 'list', ['list', 'rail']);
+}
+
+export function powerDim(module, settings) {
+    if (typeof module?.sessionDim === 'boolean')
+        return module.sessionDim;
+    return settingFlag(settings, 'session-dim');
+}
+
+export function groupFillColor(group, bar, theme) {
+    const choice = group?.color;
+    if (choice === 'plain')
+        return '';
+    if (choice === 'accent')
+        return theme?.accent || '';
+    if (choice === 'custom')
+        return hexColor(group.custom);
+    if (choice === 'theme' || (!choice && bar?.colourGroups))
+        return theme?.group || theme?.accent || '';
+    return '';
+}
+
+export function groupAppearance(group, bar) {
+    return {
+        padding: number(group?.padding ?? bar?.groupPadding ?? 16, 16, 0, 32),
+        inset: number(group?.inset ?? bar?.groupInset ?? 4, 4, 0, 12),
+        rounding: number(group?.rounding ?? bar?.groupRounding ?? 14, 14, 0, 48),
+        opacity: number(group?.opacity ?? bar?.groupOpacity ?? 55, 55, 0, 100),
+    };
+}
+
+// These presets affect the selected bar; pinned apps and other modules survive.
+export function barAppearancePreset(bar, look) {
+    if (!['frame', 'floating', 'minimal'].includes(look)) return bar;
+    const framed = look === 'frame';
+    const groups = barGroups(bar);
+    const appGroup = bar.modules.find(item => item.id === 'apps')?.group;
+    let groupId = appGroup || 'dock-apps';
+    if (!appGroup) {
+        let n = 2;
+        while (groups.some(group => group.id === groupId)) groupId = `dock-apps-${n++}`;
+        groups.push({id: groupId, name: 'Dock apps', place: 'center'});
+    }
+    return {...bar, kind: framed ? 'panel' : 'dock', margin: framed ? 0 : 16,
+        length: 100, fitContent: true, sections: 'one', colourGroups: framed,
+        barOpacity: look === 'minimal' ? 0 : 100, rounding: look === 'minimal' ? 0 : 20,
+        groupPadding: framed ? 16 : 8, groupInset: 4, groupRounding: 14, groupOpacity: 55,
+        modules: bar.modules.map(item => ['logo', 'apps'].includes(item.id)
+            ? {...item, group: groupId, place: 'center'} : item),
+        groups: groups.map(group => ({...group, color: framed ? (group.color === 'plain' ? 'theme' : group.color) : '',
+            ...(group.id === groupId ? {place: 'center', padding: undefined, inset: undefined, rounding: undefined, opacity: undefined} : {})})),
+    };
+}
+
+export function barTheme(theme, bar, frameOn) {
+    if (frameOn || !bar?.ownColors)
+        return theme;
+    const surface = hexColor(bar.ownSurface);
+    const accent = hexColor(bar.ownAccent);
+    if (!surface && !accent)
+        return theme;
+    return {...theme, ...(surface ? {bg: surface, surface} : {}), ...(accent ? {accent} : {})};
+}
+
+// Extension icons used to follow a desktop switch. Keep them by placing one module, once.
+export function adoptIndicators(settings) {
+    const config = readConfig(settings);
+    if (config.indicatorsPlaced)
+        return false;
+    const bars = readBars(settings);
+    const next = {...config, indicatorsPlaced: true};
+    if (settings.get_boolean('panel-indicators') && bars.length && !bars.some(bar => bar.modules.some(item => item.id === 'indicators'))) {
+        const selected = settings.get_int('indicator-bar');
+        let index = selected > 0 ? selected - 1 : bars.findIndex(bar => bar.edge !== 'left' && bar.edge !== 'right' && bar.kind !== 'dock');
+        if (index < 0 || index >= bars.length)
+            index = 0;
+        next.bars = bars.map((bar, i) => i === index ? {
+            ...bar,
+            modules: [...bar.modules, {id: 'indicators', place: 'end', group: ''}],
+        } : bar);
+    }
+    settings.set_string('config', JSON.stringify(next));
+    return true;
+}
 
 export function readConfig(settings) {
     try {
@@ -74,17 +234,36 @@ export function normalizeModules(list) {
     const seen = new Set();
     return list.flatMap(item => {
         const id = typeof item === 'string' ? item : item?.id;
-        if ((!Object.hasOwn(PLACES, id) && !isSpacer(id)) || seen.has(id))
+        if ((!Object.hasOwn(PLACES, moduleType(id)) && !isSpacer(id)) || seen.has(id))
             return [];
         seen.add(id);
         const spacer = isSpacer(id);
         return [{
             id,
-            place: ['start', 'center', 'end'].includes(item?.place) ? item.place : PLACES[id] ?? 'center',
+            place: ['start', 'center', 'end'].includes(item?.place) ? item.place : PLACES[moduleType(id)] ?? 'center',
             group: normalizeGroup(id, item),
             ...(spacer ? {size: number(item?.size, 24, 8, 400)} : {}),
+            ...moduleExtras(item),
         }];
     });
+}
+
+function moduleExtras(item) {
+    if (!item || typeof item !== 'object')
+        return {};
+    const extra = normalizeFeatures(item);
+    if (typeof item.hover === 'boolean')
+        extra.hover = item.hover;
+    for (const key of ['showIcon', 'showValue', 'showArt', 'brightIcon', 'brightValue', 'popIcon', 'popValue', 'sessionDim', 'showMute', 'showToggle'])
+        if (typeof item[key] === 'boolean')
+            extra[key] = item[key];
+    if (['edge', 'stack', 'drawer'].includes(item.sliderStyle))
+        extra.sliderStyle = item.sliderStyle;
+    if (item.powerStyle === 'list' || item.powerStyle === 'rail')
+        extra.powerStyle = item.powerStyle;
+    if (['pills', 'numbers', 'icons'].includes(item.workspaceStyle))
+        extra.workspaceStyle = item.workspaceStyle;
+    return extra;
 }
 
 function normalizeGroup(id, item) {
@@ -102,11 +281,11 @@ export function barGroups(bar) {
     const groups = new Map();
     for (const group of Array.isArray(bar.groups) ? bar.groups : []) {
         if (typeof group?.id === 'string' && /^[a-z][a-z0-9-]{0,24}$/.test(group.id))
-            groups.set(group.id, {id: group.id, name: String(group.name || group.id).slice(0, 60), place: group.place});
+            groups.set(group.id, groupRecord(group));
     }
     for (const item of bar.modules ?? []) {
         if (item.group && !groups.has(item.group))
-            groups.set(item.group, {id: item.group, name: item.group[0].toUpperCase() + item.group.slice(1), place: item.place});
+            groups.set(item.group, groupRecord({id: item.group, name: item.group[0].toUpperCase() + item.group.slice(1), place: item.place}));
     }
     for (const group of groups.values())
         group.place = ['start', 'center', 'end'].includes(group.place) ? group.place
@@ -114,11 +293,36 @@ export function barGroups(bar) {
     return [...groups.values()];
 }
 
+function groupRecord(group) {
+    const record = {
+        id: group.id,
+        name: String(group.name || group.id).slice(0, 60),
+        place: group.place,
+    };
+    if (typeof group.hover === 'boolean')
+        record.hover = group.hover;
+    if (['plain', 'theme', 'accent', 'custom'].includes(group.color))
+        record.color = group.color;
+    for (const [key, max] of [['padding', 32], ['inset', 12], ['rounding', 48], ['opacity', 100]])
+        if (group[key] != null) record[key] = number(group[key], 0, 0, max);
+    const popout = normalizeGroupLayout(group.popout);
+    if (popout) record.popout = popout;
+    if (group.face === 'single') record.face = 'single';
+    if (typeof group.icon === 'string') record.icon = group.icon.slice(0, 100);
+    if (group.clicks && typeof group.clicks === 'object')
+        record.clicks = Object.fromEntries(Object.entries(group.clicks).filter(([id, mode]) => Object.hasOwn(PLACES, moduleType(id)) && ['group', 'direct', 'tab'].includes(mode)));
+    const custom = hexColor(group.custom);
+    if (custom)
+        record.custom = custom;
+    return record;
+}
+
 export function readBars(settings) {
     const config = readConfig(settings);
     const bars = Array.isArray(config.bars) && config.bars.length ? config.bars : [{}];
     return bars.slice(0, 4).map(value => {
         const bar = value && typeof value === 'object' ? value : {};
+        const modules = normalizeModules(bar.modules);
         return {
             ...bar,
             edge: EDGES.includes(bar.edge) ? bar.edge : 'left',
@@ -141,7 +345,19 @@ export function readBars(settings) {
             reserveSpace: bar.reserveSpace !== false,
             reserveOffset: number(bar.reserveOffset ?? 0, 0, 0, 64),
             autohide: bar.autohide === true,
-            modules: normalizeModules(bar.modules),
+            sections: bar.sections === 'pills' ? 'pills' : 'one',
+            colourGroups: bar.colourGroups === true,
+            barOpacity: number(bar.barOpacity ?? 100, 100, 0, 100),
+            groupPadding: number(bar.groupPadding ?? 16, 16, 0, 32),
+            groupInset: number(bar.groupInset ?? 4, 4, 0, 12),
+            groupRounding: number(bar.groupRounding ?? 14, 14, 0, 48),
+            groupOpacity: number(bar.groupOpacity ?? 55, 55, 0, 100),
+            appIndicator: ['dot', 'none'].includes(bar.appIndicator) ? bar.appIndicator : 'line',
+            ownColors: bar.ownColors === true,
+            ownSurface: hexColor(bar.ownSurface),
+            ownAccent: hexColor(bar.ownAccent),
+            modules,
+            groups: barGroups({...bar, modules}),
             pinned: [...new Set((Array.isArray(bar.pinned) ? bar.pinned : [])
                 .filter(id => typeof id === 'string' && id.startsWith('app:') && id.length > 4))],
         };
@@ -186,43 +402,84 @@ export const DASHBOARD_WIDGETS = {
     memory: {label: 'Memory', tabs: ['performance']},
     temp: {label: 'Temperature', tabs: ['performance']},
     workspaces: {label: 'Workspaces', tabs: ['workspaces']},
+    forecast: {label: 'Forecast', tabs: ['overview']},
+    gpu: {label: 'GPU', tabs: ['performance']},
+    disk: {label: 'Disk', tabs: ['performance']},
+    network: {label: 'Network', tabs: ['performance']},
 };
 
 export function defaultDashboard(weather = true) {
     return {
         overview: [
-            {id: 'identity', size: 1}, {id: 'calendar', size: 1}, {id: 'media', size: 1},
-            {id: 'actions', size: 1}, ...(weather ? [{id: 'weather', size: 1}] : []),
+            [{id: 'identity', span: 1}, {id: 'calendar', span: 1}],
+            [{id: 'media', span: 2}],
+            [{id: 'actions', span: 1}],
+            ...(weather ? [[{id: 'weather', span: 2}]] : []),
         ],
-        media: [{id: 'media', size: 2}],
-        performance: [{id: 'cpu', size: 1}, {id: 'memory', size: 1}, {id: 'temp', size: 1}],
-        workspaces: [{id: 'workspaces', size: 2}],
+        media: [[{id: 'media', span: 2}]],
+        performance: [[{id: 'cpu', span: 1}, {id: 'memory', span: 1}, {id: 'temp', span: 1}]],
+        workspaces: [[{id: 'workspaces', span: 2}]],
     };
+}
+
+export const DASHBOARD_PAGES = [
+    {id: 'overview', title: 'Dashboard'}, {id: 'media', title: 'Media'},
+    {id: 'performance', title: 'Performance'}, {id: 'workspaces', title: 'Workspaces'},
+];
+
+export function dashboardPages(layout) {
+    return layout._pages ?? DASHBOARD_PAGES.map(page => ({...page}));
+}
+
+function normalizeDashboardCell(item, seen) {
+    if (item?.gap === true) {
+        const cell = {gap: true, span: spanOf(item)};
+        if (typeof item.id === 'string' && /^gap-[a-z0-9-]{1,24}$/.test(item.id))
+            cell.id = item.id;
+        return [cell];
+    }
+    const id = item?.id;
+    if (!Object.hasOwn(DASHBOARD_WIDGETS, id) || seen.has(id))
+        return [];
+    seen.add(id);
+    const cell = {id, span: spanOf(item)};
+    if (Number.isFinite(item.height) && item.height > 0)
+        cell.height = Math.round(Math.max(32, Math.min(720, item.height)));
+    return [cell];
 }
 
 export function readDashboard(settings) {
     const saved = readConfig(settings).dashboard;
     const fallback = defaultDashboard(settingFlag(settings, 'weather-dashboard', true));
-    if (!saved || typeof saved !== 'object')
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved))
         return fallback;
-    const page = (key, items) => {
-        if (!Array.isArray(items))
-            return fallback[key];
+    const seenPages = new Set();
+    const pages = (Array.isArray(saved._pages) ? saved._pages : DASHBOARD_PAGES).flatMap(page => {
+        const id = page?.id;
+        if (typeof id !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(id) ||
+            ['constructor', 'prototype'].includes(id) || seenPages.has(id))
+            return [];
+        seenPages.add(id);
+        return [{id, title: String(page.title || 'Page').trim().slice(0, 40) || 'Page'}];
+    });
+    if (!pages.length)
+        pages.push({...DASHBOARD_PAGES[0]});
+    const layout = {_pages: pages};
+    for (const {id: key} of pages) {
+        const items = Array.isArray(saved[key]) ? saved[key]
+            : Array.isArray(saved._pages) ? [] : fallback[key] ?? [];
         const seen = new Set();
-        return items.flatMap(item => {
-            const id = item?.id;
-            if (!DASHBOARD_WIDGETS[id] || seen.has(id) || !DASHBOARD_WIDGETS[id].tabs.includes(key))
+        const source = Array.isArray(items) ? items : [];
+        const rows = source.some(item => Array.isArray(item)) ? source
+            : packRows(source.map(item => item?.ownRow === true ? {...item, ownRow: true} : item));
+        layout[key] = rows.flatMap(row => {
+            if (!Array.isArray(row))
                 return [];
-            seen.add(id);
-            return [{id, size: item.size === 2 ? 2 : 1}];
+            const cells = row.flatMap(item => normalizeDashboardCell(item, seen));
+            return cells.length ? [cells] : [];
         });
-    };
-    return {
-        overview: page('overview', saved.overview),
-        media: page('media', saved.media),
-        performance: page('performance', saved.performance),
-        workspaces: page('workspaces', saved.workspaces),
-    };
+    }
+    return layout;
 }
 
 export function saveDashboard(settings, dashboard) {
@@ -230,32 +487,46 @@ export function saveDashboard(settings, dashboard) {
 }
 
 export function presetBars(id, pinned = []) {
-    const modules = ids => ids.map(key => ({id: key, place: PLACES[key]}));
+    const modules = (ids, places = {}) => ids.map(key => ({id: key, place: places[key] ?? PLACES[key]}));
+    const dockModules = () => modules(['logo', 'apps'], {apps: 'center'});
     const base = {thickness: 56, iconSize: 22, reserveSpace: true, reserveOffset: 8, pinned};
     if (id === 'panel')
         return [{...base, edge: 'bottom', modules: modules(['logo', 'apps', 'workspaces', 'clock', 'volume', 'network', 'battery', 'power'])}];
     if (id === 'dock')
         return [{...base, edge: 'bottom', kind: 'dock', margin: 12, thickness: 64, iconSize: 36,
-            modules: modules(['logo', 'apps']), rounding: 24, runningApps: true}];
+            modules: dockModules(), rounding: 24, runningApps: true}];
     if (id === 'hybrid')
         return [
             {...base, edge: 'top', thickness: 48, pinned: [], modules: modules(['logo', 'workspaces', 'clock', 'dashboard', 'volume', 'network', 'battery', 'power'])},
-            {...base, edge: 'bottom', kind: 'dock', margin: 12, thickness: 64, iconSize: 36, modules: modules(['logo', 'apps']), rounding: 24},
+            {...base, edge: 'bottom', kind: 'dock', margin: 12, thickness: 64, iconSize: 36, modules: dockModules(), rounding: 24},
+        ];
+    if (id === 'islands')
+        return [{...base, edge: 'top', sections: 'pills', colourGroups: true,
+            modules: modules(['logo', 'workspaces', 'clock', 'dashboard', 'volume', 'network', 'battery', 'power'])}];
+    if (id === 'split')
+        return [
+            {...base, edge: 'top', thickness: 48, ownColors: true, ownSurface: '#2a273f', ownAccent: '#ebbcba', pinned: [],
+                modules: modules(['logo', 'workspaces', 'clock', 'dashboard', 'volume', 'network', 'battery', 'power'])},
+            {...base, edge: 'bottom', kind: 'dock', margin: 12, thickness: 64, iconSize: 36, rounding: 24,
+                ownColors: true, ownSurface: '#1f1d2e', ownAccent: '#9ccfd8', modules: dockModules()},
         ];
     return [{...base, edge: 'left', modules: modules(['logo', 'workspaces', 'apps', 'window', 'dashboard', 'clock', 'volume', 'network', 'battery', 'power'])}];
 }
 
 // Built-in layouts replace geometry; named profiles retain complete custom layouts.
 export function applyPreset(settings, id, favorites = []) {
-    if (!['caelestia', 'panel', 'dock', 'hybrid'].includes(id)) return;
+    if (!['caelestia', 'panel', 'dock', 'hybrid', 'islands', 'split'].includes(id)) return;
     const config = readConfig(settings);
     const bars = readBars(settings);
     settings.set_string('previous-layout', JSON.stringify({config: settings.get_string('config'), frame: settings.get_boolean('show-frame'), indicatorBar: settings.get_int('indicator-bar')}));
     const pins = [...new Set(bars.flatMap(bar => bar.pinned))];
     const source = bars.find(bar => bar.modules.some(module => module.id === 'logo')) ?? bars[0];
+    const indicator = bars.flatMap(bar => bar.modules).find(module => module.id === 'indicators');
     const next = presetBars(id, Array.isArray(config.bars) ? pins : favorites.map(app => `app:${app}`)).map(bar => ({...bar,
             logoIcon: source.logoIcon, logoAction: source.logoAction,
-            appClick: source.appClick, runningApps: source.runningApps}));
+            appClick: source.appClick, runningApps: bar.modules.some(module => module.id === 'apps') ? source.runningApps : false}));
+    if (indicator && next[0])
+        next[0].modules = [...next[0].modules, {id: 'indicators', place: indicator.place || 'end', group: ''}];
     settings.set_string('config', JSON.stringify({...config, layoutMode: id, bars: next}));
     settings.set_boolean('show-frame', id === 'caelestia');
     settings.set_int('indicator-bar', 0);

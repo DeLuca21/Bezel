@@ -7,6 +7,7 @@ export const PRESETS = [
         fg: '#4c4f69',
         muted: '#6c6f85',
         accent: '#8839ef',
+        group: '#179299',
         border: '#bcc0cc',
     },
     {
@@ -17,6 +18,7 @@ export const PRESETS = [
         fg: '#c6d0f5',
         muted: '#a5adce',
         accent: '#ca9ee6',
+        group: '#81c8be',
         border: '#51576d',
     },
     {
@@ -27,6 +29,7 @@ export const PRESETS = [
         fg: '#cad3f5',
         muted: '#a5adcb',
         accent: '#c6a0f6',
+        group: '#8bd5ca',
         border: '#494d64',
     },
     {
@@ -37,6 +40,7 @@ export const PRESETS = [
         fg: '#cdd6f4',
         muted: '#a6adc8',
         accent: '#cba6f7',
+        group: '#94e2d5',
         border: '#45475a',
     },
     {
@@ -47,6 +51,7 @@ export const PRESETS = [
         fg: '#eceff4',
         muted: '#d8dee9',
         accent: '#88c0d0',
+        group: '#a3be8c',
         border: '#4c566a',
     },
     {
@@ -57,6 +62,7 @@ export const PRESETS = [
         fg: '#e0def4',
         muted: '#908caa',
         accent: '#c4a7e7',
+        group: '#9ccfd8',
         border: '#403d52',
     },
     {
@@ -67,6 +73,7 @@ export const PRESETS = [
         fg: '#e0def4',
         muted: '#908caa',
         accent: '#c4a7e7',
+        group: '#9ccfd8',
         border: '#44415a',
     },
     {
@@ -77,15 +84,16 @@ export const PRESETS = [
         fg: '#575279',
         muted: '#797593',
         accent: '#907aa9',
+        group: '#56949f',
         border: '#dfdad9',
     },
     // Original Bezel palettes, paired light/dark options where useful.
-    {id: 'bezel-forest', name: 'Bezel Forest', bg: '#202b26', surface: '#2d3c33', fg: '#e3ebdb', muted: '#abbba6', accent: '#abd496', border: '#4c6253'},
-    {id: 'bezel-sage', name: 'Bezel Sage', bg: '#edf1e7', surface: '#f8faf3', fg: '#344b3d', muted: '#62745f', accent: '#527f59', border: '#c8d5c2'},
-    {id: 'bezel-ocean', name: 'Bezel Ocean', bg: '#152535', surface: '#22384d', fg: '#e0eff7', muted: '#9db5c7', accent: '#70cde0', border: '#3d5970'},
-    {id: 'bezel-sand', name: 'Bezel Sand', bg: '#f4ebdc', surface: '#fff8ed', fg: '#594731', muted: '#7a6855', accent: '#976333', border: '#d8c9b2'},
-    {id: 'bezel-ember', name: 'Bezel Ember', bg: '#2d2223', surface: '#413032', fg: '#f4e3d7', muted: '#c7a99e', accent: '#efa07f', border: '#66494b'},
-    {id: 'bezel-monochrome', name: 'Bezel Monochrome', bg: '#1c1d20', surface: '#2c2e33', fg: '#f0f1f3', muted: '#aeb0b7', accent: '#d0d3dc', border: '#484b53'},
+    {id: 'bezel-forest', name: 'Bezel Forest', bg: '#202b26', surface: '#2d3c33', fg: '#e3ebdb', muted: '#abbba6', accent: '#abd496', group: '#e7c27d', border: '#4c6253'},
+    {id: 'bezel-sage', name: 'Bezel Sage', bg: '#edf1e7', surface: '#f8faf3', fg: '#344b3d', muted: '#62745f', accent: '#527f59', group: '#c4a35a', border: '#c8d5c2'},
+    {id: 'bezel-ocean', name: 'Bezel Ocean', bg: '#152535', surface: '#22384d', fg: '#e0eff7', muted: '#9db5c7', accent: '#70cde0', group: '#e0a070', border: '#3d5970'},
+    {id: 'bezel-sand', name: 'Bezel Sand', bg: '#f4ebdc', surface: '#fff8ed', fg: '#594731', muted: '#7a6855', accent: '#976333', group: '#5f8f72', border: '#d8c9b2'},
+    {id: 'bezel-ember', name: 'Bezel Ember', bg: '#2d2223', surface: '#413032', fg: '#f4e3d7', muted: '#c7a99e', accent: '#efa07f', group: '#e7c98a', border: '#66494b'},
+    {id: 'bezel-monochrome', name: 'Bezel Monochrome', bg: '#1c1d20', surface: '#2c2e33', fg: '#f0f1f3', muted: '#aeb0b7', accent: '#d0d3dc', group: '#8b93a7', border: '#484b53'},
 
 ];
 
@@ -97,7 +105,7 @@ export function resolveTheme(settings) {
         return {
             id,
             name: 'Custom',
-            ...Object.fromEntries(['bg', 'surface', 'fg', 'muted', 'accent', 'border'].map(key => {
+            ...Object.fromEntries(['bg', 'surface', 'fg', 'muted', 'accent', 'group', 'border'].map(key => {
                 const value = settings.get_string(`custom-${key}`);
                 const hex = /^#[0-9a-f]{6}$/i.test(value) ? value
                     : /^#[0-9a-f]{3}$/i.test(value) ? `#${value.slice(1).split('').map(c => c + c).join('')}`

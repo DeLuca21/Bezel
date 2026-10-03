@@ -25,7 +25,7 @@ export function openCalendarDate(date) {
     }
 }
 
-export function monthGrid(theme, activate = openCalendarDate) {
+export function monthGrid(theme, activate = openCalendarDate, options = {}) {
     const today = GLib.DateTime.new_now_local();
     let month = GLib.DateTime.new_local(today.get_year(), today.get_month(), 1, 12, 0, 0);
     const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL,
@@ -40,31 +40,51 @@ export function monthGrid(theme, activate = openCalendarDate) {
     box.add_child(header);
     const grid = new St.Widget({layout_manager: new Clutter.GridLayout()});
     box.add_child(grid);
+    let cellW = 32;
+    let cellH = 30;
+    let font = 12;
     const render = () => {
         title.label = month.format('%B %Y');
+        title.style = `font-size: ${font}px;`;
         grid.destroy_all_children();
         const layout = grid.layout_manager;
         ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'].forEach((day, column) => {
-            const heading = new St.Label({text: day, width: 32, x_align: Clutter.ActorAlign.CENTER, style: `color: ${theme.muted}; font-size: 12px;`});
-            layout.attach(heading, column, 0, 1, 1);
+            const heading = new St.Label({text: day, width: cellW, x_align: Clutter.ActorAlign.CENTER, style: `color: ${theme.muted}; font-size: ${font}px;`});
+            layout.attach(heading, column + (options.weekNumbers ? 1 : 0), 0, 1, 1);
         });
         const start = month.get_day_of_week() - 1;
+        if (options.weekNumbers) for (let week = 0; week < Math.ceil((start + month.add_months(1).add_days(-1).get_day_of_month()) / 7); week++) {
+            const date = month.add_days(-start + week * 7);
+            layout.attach(new St.Label({text: date.format('%V'), width: cellW, style: `color: ${theme.muted}; font-size: ${font}px;`}), 0, week + 1, 1, 1);
+        }
         const days = month.add_months(1).add_days(-1).get_day_of_month();
         for (let day = 1; day <= days; day++) {
             const date = month.add_days(day - 1);
             const current = date.format('%F') === today.format('%F');
-            const button = new St.Button({width: 32, height: 30, can_focus: true, label: String(day),
+            const button = new St.Button({width: cellW, height: cellH, can_focus: true, label: String(day),
                 accessible_name: date.format('%A, %e %B %Y'), style_class: 'bezel-calendar-day',
-                style: `color: ${current ? theme.bg : theme.fg}; ${current ? `background-color: ${theme.accent};` : ''} border-radius: 8px;`});
+                style: `color: ${current ? theme.bg : theme.fg}; font-size: ${font}px; ${current ? `background-color: ${theme.accent};` : ''} border-radius: 8px;`});
             button._bezelDate = date.format('%F');
             button.connect('clicked', () => activate(date));
             const index = start + day - 1;
-            layout.attach(button, index % 7, Math.floor(index / 7) + 1, 1, 1);
+            layout.attach(button, index % 7 + (options.weekNumbers ? 1 : 0), Math.floor(index / 7) + 1, 1, 1);
         }
     };
     previous.connect('clicked', () => { month = month.add_months(-1); render(); previous.grab_key_focus(); });
     next.connect('clicked', () => { month = month.add_months(1); render(); next.grab_key_focus(); });
     title.connect('clicked', () => { month = GLib.DateTime.new_local(today.get_year(), today.get_month(), 1, 12, 0, 0); render(); });
+    box._dashLayout = ({width, height}) => {
+        if (!height) {
+            cellW = 32;
+            cellH = 30;
+            font = 12;
+        } else {
+            cellH = Math.max(18, Math.min(64, Math.round((height - 36) / 7)));
+            cellW = Math.max(18, Math.min(64, Math.round(Math.min(cellH * 1.08, Math.max(18, (width - 8) / 7)))));
+            font = Math.max(10, Math.min(18, Math.round(cellH * 0.42)));
+        }
+        render();
+    };
     render();
     return box;
 }

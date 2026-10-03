@@ -1,3 +1,7 @@
+import {shortcutEditor} from './shortcutEditor.js';
+import {moduleType} from './moduleIdentity.js';
+import {FEATURE_OPTIONS, NUMBER_OPTIONS} from './moduleFeatures.js';
+import {buildGroupEditor} from './groupEditor.js';
 import Adw from 'gi://Adw';
 import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
@@ -6,15 +10,15 @@ import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Gtk from 'gi://Gtk';
 
-import {readBars, saveBars, barGroups, isSpacer, spacerLabel, applyPreset, presetBars, EDGES, DATE_FORMATS, barDateFormat, barTimeFormat, settingChoice, settingFlag} from './config.js';
+import {readBars, saveBars, barGroups, groupAppearance, barAppearancePreset, isSpacer, spacerLabel, applyPreset, presetBars, EDGES, DATE_FORMATS, barDateFormat, barTimeFormat, settingChoice, settingFlag, MODULE_SWITCHES, switchOn, hoverEnabled, sliderLayout, powerLayout, powerDim, PANEL_MODULES, hexColor} from './config.js';
 import {PRESETS, resolveTheme} from './theme.js';
 import {layoutPreview} from './layoutPreview.js';
 import {savedLayouts, saveLayout, restoreLayout, deleteLayout, matchingLayout} from './profiles.js';
 import {LOGOS} from './logos.js';
 import {MODULES, addBar, removeBar, addModule, removeModule, patchBar, setFloating, setKind,
-    createGroup, deleteGroup, assignGroup, resizeSpacer, reorderModule, moveModule, undoPreset, setCustomColor,
+    createGroup, deleteGroup, assignGroup, resizeSpacer, reorderModule, moveModule, undoPreset, setCustomColor, patchModule, patchGroup,
     shortcutLabel, acceleratorFromEvent, assignShortcut, useRecommendedShortcuts,
-    hostsIndicators, indicatorNames, setIndicatorShown, moveIndicator} from './settingsModel.js';
+    indicatorNames, setIndicatorShown, moveIndicator} from './settingsModel.js';
 
 const MODULE_NOTES = {
     window: 'The app you are using right now. Clicking it on the bar focuses that window.',
@@ -28,7 +32,7 @@ const label = (text, css = '', props = {}) => {
     return widget;
 };
 const clear = box => { while (box.get_first_child()) box.remove(box.get_first_child()); };
-const nameOf = id => isSpacer(id) ? spacerLabel(id) : MODULES.find(([key]) => key === id)?.[1] ?? id;
+const nameOf = id => isSpacer(id) ? spacerLabel(id) : (MODULES.find(([key]) => key === moduleType(id))?.[1] ?? id) + (id.includes('@') ? ` ${id.split('@')[1]}` : '');
 const titleCase = value => value[0].toUpperCase() + value.slice(1);
 const button = (text, callback, css = '', props = {}) => {
     const widget = new Gtk.Button({label: text, ...props});
@@ -80,6 +84,8 @@ export class SettingsWindow {
         this._build();
         this.changed = settings.connect('changed', (_settings, key) => {
             if (this.writing) return;
+            if (key === 'group-preview') return;
+            if (key === 'preferences-group') { this.groupId = settings.get_string(key) || null; this.mode = 'bar'; }
             if (key === 'preferences-bar') {
                 const index = settings.get_int(key);
                 if (index >= 0) { this.barIndex = index; this.mode = 'bar'; this.moduleId = null; }
@@ -87,8 +93,11 @@ export class SettingsWindow {
             this._queueRefresh();
         });
         this.window.connect('close-request', () => {
+            this._closeItemPopover();
             settings.disconnect(this.changed);
             settings.set_int('preferences-bar', -1);
+            settings.set_string('preferences-group', '');
+            settings.set_string('group-preview', '');
             if (this.refreshId) GLib.source_remove(this.refreshId);
             if (this.cardId) GLib.source_remove(this.cardId);
             if (this.laneId) GLib.source_remove(this.laneId);
@@ -101,13 +110,15 @@ export class SettingsWindow {
 
     open(index = -1) {
         if (index >= 0) { this.barIndex = index; this.mode = 'bar'; }
+        this.groupId = this.settings.get_string('preferences-group') || null;
         this._refresh();
         this.window.present();
     }
 
     _write(action, rebuild = true) {
+        const wasWriting = this.writing;
         this.writing = true;
-        try { action(); } finally { this.writing = false; }
+        try { action(); } finally { this.writing = wasWriting; }
         this.monitor.queue_draw();
         this._status();
         if (rebuild) this._queueRefresh();
@@ -142,9 +153,9 @@ export class SettingsWindow {
         root.append(header);
         const content = vertical(14, {margin_top: 8, margin_bottom: 18, margin_start: 18, margin_end: 18, vexpand: true});
         this.presets = horizontal(10, {homogeneous: true});
-        for (const [id, name] of [['caelestia', 'Bezel'], ['panel', 'Panel'], ['dock', 'Dock'], ['hybrid', 'Top + dock']]) {
+        for (const [id, name] of [['caelestia', 'Bezel'], ['panel', 'Panel'], ['dock', 'Dock'], ['hybrid', 'Top + dock'], ['islands', 'Islands'], ['split', 'Split']]) {
             const body = vertical(6);
-            body.append(layoutPreview(this.settings, presetBars(id), id === 'caelestia', 118));
+            body.append(layoutPreview(this.settings, presetBars(id), id === 'caelestia', 96));
             body.append(label(name, '', {xalign: .5}));
             const card = new Gtk.Button({child: body, hexpand: true});
             card.add_css_class('preset-card');
@@ -168,6 +179,7 @@ export class SettingsWindow {
         saved.append(savedScroll);
         this.undo = button('Undo', () => this._confirmLayout(() => this._write(() => undoPreset(this.settings))));
         saved.append(this.undo);
+        this.savedRow = saved;
         content.append(saved);
         const body = horizontal(16, {vexpand: true});
         const sidebar = vertical(12, {width_request: 260});
@@ -182,8 +194,9 @@ export class SettingsWindow {
         sidebar.append(this.nav);
         this.status = label('', 'muted');
         sidebar.append(this.status);
-        body.append(new Gtk.ScrolledWindow({child: sidebar, width_request: 260,
-            hscrollbar_policy: Gtk.PolicyType.NEVER, vscrollbar_policy: Gtk.PolicyType.AUTOMATIC}));
+        this.sidebarScroll = new Gtk.ScrolledWindow({child: sidebar, width_request: 260,
+            hscrollbar_policy: Gtk.PolicyType.NEVER, vscrollbar_policy: Gtk.PolicyType.AUTOMATIC});
+        body.append(this.sidebarScroll);
         this.card = vertical(14, {hexpand: true, valign: Gtk.Align.START});
         this.card.add_css_class('editor-card');
         this.editorScroll = scroller(this.card);
@@ -194,6 +207,7 @@ export class SettingsWindow {
     }
 
     choose(mode, index = this.barIndex) {
+        if (this.groupId) { this.groupId = null; this.groupPreviewOpen = false; this.settings.set_string('group-preview', ''); this.settings.set_string('preferences-group', ''); }
         this.mode = mode;
         this.barIndex = index;
         this.moduleId = null;
@@ -259,6 +273,7 @@ export class SettingsWindow {
     }
 
     _refresh() {
+        this._syncGroupEditorChrome();
         this._loadCss();
         const bars = readBars(this.settings);
         this.barIndex = Math.max(0, Math.min(this.barIndex, bars.length - 1));
@@ -291,7 +306,7 @@ export class SettingsWindow {
         const position = token === this.scrollToken && !reveal ? this.editorScroll.vadjustment.value : 0;
         this.scrollToken = token;
         clear(this.card);
-        ({bar: () => this._barCard(bars[this.barIndex]), look: () => this._paletteCard(), frame: () => this._frameCard(),
+        ({bar: () => this.groupId ? buildGroupEditor(this, bars[this.barIndex]) : this._barCard(bars[this.barIndex]), look: () => this._paletteCard(), frame: () => this._frameCard(),
             shortcuts: () => this._shortcutCard(), opening: () => this._openingCard(), desktop: () => this._desktopCard()})[this.mode]?.();
         this._holdScroll(position, false);
     }
@@ -321,13 +336,20 @@ export class SettingsWindow {
         });
     }
 
+    _syncGroupEditorChrome() {
+        const editing = Boolean(this.groupId && this.mode === 'bar');
+        for (const widget of [this.presets, this.savedRow, this.sidebarScroll, this.editButton])
+            if (widget) widget.visible = !editing;
+    }
+
     _refreshCard() {
+        this._syncGroupEditorChrome();
         this._closeItemPopover();
         const bars = readBars(this.settings);
         const position = this.editorScroll.vadjustment.value;
         clear(this.card);
         this.lanes = null;
-        ({bar: () => this._barCard(bars[this.barIndex]), look: () => this._paletteCard(), frame: () => this._frameCard(),
+        ({bar: () => this.groupId ? buildGroupEditor(this, bars[this.barIndex]) : this._barCard(bars[this.barIndex]), look: () => this._paletteCard(), frame: () => this._frameCard(),
             shortcuts: () => this._shortcutCard(), opening: () => this._openingCard(), desktop: () => this._desktopCard()})[this.mode]?.();
         this._holdScroll(position, false);
         this.monitor.queue_draw();
@@ -387,8 +409,8 @@ export class SettingsWindow {
         this.itemPopover = null;
         this.itemAnchor = null;
         if (!popover) return;
-        popover.popdown();
-        if (popover.get_parent()) popover.unparent();
+        if (popover instanceof Gtk.Window) popover.close();
+        else { popover.popdown(); if (popover.get_parent()) popover.unparent(); }
     }
 
     _monitor() {
@@ -472,6 +494,9 @@ export class SettingsWindow {
             else widget.remove_css_class('is-on');
             this._write(() => callback(next), false);
         }, value ? 'is-on' : '');
+        widget._setActive = active => {
+            if (active) widget.add_css_class('is-on'); else widget.remove_css_class('is-on');
+        };
         return widget;
     }
 
@@ -497,6 +522,9 @@ export class SettingsWindow {
         remove.sensitive = readBars(this.settings).length > 1;
         top.append(remove);
         this.card.append(top);
+        this.card.append(this._segments([['one', 'One bar'], ['pills', 'Separate pills']], bar.sections === 'pills' ? 'pills' : 'one', value => {
+            patchBar(this.settings, this.barIndex, {sections: value});
+        }));
         this.card.append(this._segments([['panel', 'Panel'], ['dock', 'Dock']], bar.kind, value => {
             setKind(this.settings, this.barIndex, value);
             const edge = titleCase(readBars(this.settings)[this.barIndex].edge);
@@ -509,18 +537,25 @@ export class SettingsWindow {
         toggles.insert(this._toggle('Autohide', bar.autohide, value => patchBar(this.settings, this.barIndex, {autohide: value})), -1);
         toggles.insert(this._toggle('Reserve space', bar.reserveSpace, value => patchBar(this.settings, this.barIndex, {reserveSpace: value})), -1);
         this.card.append(toggles);
-        this.card.append(this._segments([['contents', 'Contents'], ['size', 'Size & space'], ['apps', 'Apps & logo']], this.barTab, value => {
+        if (!this.settings.get_boolean('show-frame')) {
+            this.card.append(this._toggle('Own colours', bar.ownColors === true, value => patchBar(this.settings, this.barIndex, {ownColors: value})));
+            if (bar.ownColors)
+                this._ownColours(bar);
+        }
+        this.card.append(this._segments([['contents', 'Contents'], ['size', 'Size & space'], ['appearance', 'Appearance'], ['apps', 'Apps']], this.barTab, value => {
             this.barTab = value;
             this._refreshCard();
         }, false));
         if (this.barTab === 'contents') this._contents(bar);
         else if (this.barTab === 'size') this._barSize(bar);
+        else if (this.barTab === 'appearance') this._appearance(bar);
         else this._apps(bar);
     }
 
     _contents(bar) {
         this.moduleChips = new Map();
         this.card.append(label('Drag an item to move it. Click it for options.', 'muted'));
+        this.card.append(this._toggle('Colour groups', bar.colourGroups === true, value => patchBar(this.settings, this.barIndex, {colourGroups: value})));
         this.card.append(button('+ Create group', () => this._nameDialog('Create a group', 'Give this group a name. You can add any modules or empty spaces.', '', name => {
             this._write(() => createGroup(this.settings, this.barIndex, name), false);
             this._queueLanes();
@@ -559,7 +594,9 @@ export class SettingsWindow {
                 box.add_css_class('group');
                 box._bezelDropId = `group:${groupId}`;
                 const title = horizontal(8);
-                title.append(label(groups.find(group => group.id === groupId)?.name ?? groupId, 'group-title', {hexpand: true}));
+                const named = groups.find(group => group.id === groupId);
+                const nameButton = button(named?.name ?? groupId, () => this._groupPopover(nameButton, named ?? {id: groupId, name: groupId}), '', {hexpand: true});
+                title.append(nameButton);
                 title.append(button('×', () => {
                     this._write(() => deleteGroup(this.settings, this.barIndex, groupId), false);
                     this._queueLanes();
@@ -748,13 +785,13 @@ export class SettingsWindow {
             this._write(() => {
                 const before = new Set(readBars(this.settings)[this.barIndex].modules.map(item => item.id));
                 addModule(this.settings, this.barIndex, id, place);
-                target = id === 'spacer' ? readBars(this.settings)[this.barIndex].modules.find(item => !before.has(item.id))?.id : id;
+                target = readBars(this.settings)[this.barIndex].modules.find(item => !before.has(item.id))?.id;
                 if (group && target) assignGroup(this.settings, this.barIndex, target, group);
             }, false);
             finish(target);
         }));
         add('spacer', '↔ Empty space');
-        for (const [id, title] of MODULES) if (!bar.modules.some(item => item.id === id) || (group && !bar.modules.some(item => item.id === id && item.group === group))) add(id, title);
+        for (const [id, title] of MODULES) add(id, title);
         if (group) for (const item of bar.modules.filter(item => isSpacer(item.id) && item.group !== group))
             box.append(button(`Move ${spacerLabel(item.id)} · ${item.size} px`, () => {
                 this._write(() => assignGroup(this.settings, this.barIndex, item.id, group), false);
@@ -777,21 +814,23 @@ export class SettingsWindow {
         const live = bar.modules.find(module => module.id === item.id) ?? item;
         const placeOf = module => module.group ? bar.modules.find(member => member.group === module.group)?.place ?? module.place : module.place;
         const current = {...live, place: placeOf(live)};
-        const popover = new Gtk.Popover({position: Gtk.PositionType.BOTTOM, has_arrow: true});
-        popover.add_css_class('item-options');
+        const popover = new Gtk.Popover({autohide: false});
         popover.set_parent(anchor);
+        popover.add_css_class('item-options');
+
         anchor.add_css_class('is-on');
         this.itemPopover = popover;
         this.itemAnchor = anchor;
         const box = vertical(10, {margin_top: 10, margin_bottom: 10, margin_start: 12, margin_end: 12, width_request: 260});
         const header = horizontal(8);
         header.append(label(nameOf(current.id), 'subheading', {hexpand: true}));
+        header.append(button('×', () => this._closeItemPopover()));
         header.append(button('Remove', () => {
             this._write(() => removeModule(this.settings, this.barIndex, current.id), false);
             this._queueLanes();
         }));
         box.append(header);
-        const note = MODULE_NOTES[current.id] ?? (isSpacer(current.id) ? 'A gap. Set its width, then where it sits on the bar.' : '');
+        const note = MODULE_NOTES[moduleType(current.id)] ?? (isSpacer(current.id) ? 'A gap. Set its width, then where it sits on the bar.' : '');
         if (note) box.append(label(note, 'muted'));
         box.append(label('On the bar', 'subheading'));
         box.append(this._segments(['start', 'center', 'end'].map(id => [id, titleCase(id)]), current.place, place => {
@@ -837,15 +876,324 @@ export class SettingsWindow {
             reorder.append(move);
         }
         box.append(reorder);
-        popover.set_child(box);
-        this._trackPopover(anchor, popover);
+        this._moduleOptions(box, current, bar);
+        popover.set_child(new Gtk.ScrolledWindow({child: box, max_content_height: 560, propagate_natural_height: true, hscrollbar_policy: Gtk.PolicyType.NEVER}));
+
         popover.connect('closed', () => {
+            anchor._popoverClosedAt = GLib.get_monotonic_time();
             if (anchor.get_parent()) anchor.remove_css_class('is-on');
             if (this.itemPopover === popover) { this.itemPopover = null; this.itemAnchor = null; }
-            GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => { if (popover.get_parent()) popover.unparent(); return GLib.SOURCE_REMOVE; });
+            if (popover.get_parent()) popover.unparent();
         });
+        const escape = new Gtk.EventControllerKey();
+        escape.connect('key-pressed', (_controller, key) => { if (key !== Gdk.KEY_Escape) return false; this._closeItemPopover(); return true; });
+        popover.add_controller(escape);
         popover.popup();
         GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => { groupReady = true; return GLib.SOURCE_REMOVE; });
+    }
+
+    _featureOptions(box, current, write) {
+        const id = moduleType(current.id);
+        const bar = readBars(this.settings)[this.barIndex];
+        const effective = key => key === 'powerIcons' ? current.powerIcons ?? (powerLayout(current, this.settings) === 'rail')
+            : key === 'showSeconds' ? current.showSeconds ?? bar?.clockSeconds === true : current[key];
+        for (const [key, [title, fallback]] of Object.entries(FEATURE_OPTIONS[id] || {})) {
+            // Custom layouts contain separate time, date and calendar items.
+            // Automatic-popout composition settings do not apply there.
+            if (this.groupId && id === 'clock' && key !== 'showSeconds') continue;
+            if (id === 'clock' && key === 'calendarTime') box.append(label('Automatic calendar popout', 'subheading'));
+            box.append(this._toggle(title, key === 'powerIcons' && current.powerStyle ? current.powerStyle === 'rail' : effective(key) ?? fallback, value => write(key === 'powerIcons' ? {powerIcons: value, powerStyle: value ? 'rail' : 'list'} : {[key]: value})));
+        }
+        for (const [key, [title, fallback, min, max]] of Object.entries(NUMBER_OPTIONS[id] || {}))
+            box.append(this._step(title, current[key] ?? fallback, min, max, 1, value => write({[key]: value})));
+        if (id === 'shelf') {
+            box.append(label('Dragging files out', 'subheading'));
+            box.append(this._segments([['copy', 'Copy'], ['move', 'Move'], ['ask', 'Destination decides']], current.shelfDragAction || 'copy', value => write({shelfDragAction: value})));
+            box.append(label('Moving is handled by the destination app. Removing an entry from the shelf never deletes the original file.', 'muted'));
+        }
+        if (id !== 'shortcuts') return;
+        box.append(shortcutEditor(this, current, write));
+    }
+
+    _moduleOptions(box, current, bar, writeOverride = null) {
+        const bindings = [];
+        const toggleFor = (key, title, apply) => {
+            const widget = this._toggle(title, switchOn(current, bar, key), apply);
+            bindings.push([widget, key]); return widget;
+        };
+        const write = values => {
+            Object.assign(current, values);
+            for (const [widget, key] of bindings) widget._setActive(switchOn(current, bar, key));
+            if (writeOverride) writeOverride(values);
+            else this._write(() => patchModule(this.settings, this.barIndex, current.id, values), false);
+        };
+        this._featureOptions(box, current, write);
+        const id = moduleType(current.id);
+        if (['volume', 'microphone'].includes(id))
+            box.append(toggleFor('showMute', 'Show mute button', value => write({showMute: value})));
+        if (['network', 'bluetooth'].includes(id))
+            box.append(toggleFor('showToggle', 'Show on/off button', value => write({showToggle: value})));
+        const switches = id === 'volume' || id === 'network' ? null : MODULE_SWITCHES[id];
+        if (switches) {
+            box.append(label(id === 'microphone' ? 'Bar and popout' : 'On the bar', 'subheading'));
+            for (const [key, title] of switches)
+                box.append(toggleFor(key, title, value => {
+                    const values = {[key]: value};
+                    if (['showIcon', 'showValue', 'showArt'].includes(key)) {
+                        const next = {...current, ...values};
+                        const icon = key === 'showIcon' ? value : switchOn(next, bar, 'showIcon');
+                        const reading = key === 'showValue' ? value : switchOn(next, bar, 'showValue');
+                        const art = key === 'showArt' ? value : switchOn(next, bar, 'showArt');
+                        if (!icon && !reading && !art)
+                            values.showIcon = true;
+                    }
+                    write(values);
+                    if (!writeOverride) this._queueLanes(current.id);
+                }));
+        }
+        if (id === 'workspaces')
+            box.append(this._segments([['pills', 'Pills'], ['numbers', 'Numbers'], ['icons', 'App icons']], current.workspaceStyle || 'pills', value => {
+                write({workspaceStyle: value});
+            }));
+        if (id === 'volume') {
+            box.width_request = 300;
+            box.append(label('On the bar', 'subheading'));
+            for (const [key, title] of [['showIcon', 'Icon'], ['showValue', 'Percentage']])
+                box.append(toggleFor(key, title, value => {
+                    const values = {[key]: value};
+                    const next = {...current, ...values};
+                    const icon = key === 'showIcon' ? value : switchOn(next, bar, 'showIcon');
+                    const reading = key === 'showValue' ? value : switchOn(next, bar, 'showValue');
+                    if (!icon && !reading)
+                        values.showIcon = true;
+                    write(values);
+                    if (!writeOverride) this._queueLanes(current.id);
+                }));
+            box.append(label('In the popout', 'subheading'));
+            for (const [key, title] of [['popIcon', 'Icon'], ['popValue', 'Percentage'], ['brightIcon', 'Brightness icon'], ['brightValue', 'Brightness percentage']])
+                box.append(toggleFor(key, title, value => {
+                    write({[key]: value});
+                }));
+            if (!this.groupId) {
+            box.append(label('Automatic popout arrangement', 'subheading'));
+            box.append(this._segments([['edge', 'Side by side'], ['stack', 'Stacked'], ['drawer', 'In drawer']], sliderLayout(current, this.settings), value => {
+                write({sliderStyle: value});
+            }));
+            }
+        }
+        if (id === 'network') {
+            box.append(label('On the bar', 'subheading'));
+            for (const [key, title] of [['showIcon', 'Icon'], ['showValue', 'Name']])
+                box.append(toggleFor(key, title, value => {
+                    const values = {[key]: value};
+                    const next = {...current, ...values};
+                    const icon = key === 'showIcon' ? value : switchOn(next, bar, 'showIcon');
+                    const reading = key === 'showValue' ? value : switchOn(next, bar, 'showValue');
+                    if (!icon && !reading)
+                        values.showIcon = true;
+                    write(values);
+                    if (!writeOverride) this._queueLanes(current.id);
+                }));
+            box.append(label('In the popout', 'subheading'));
+            box.append(this._toggle('Name', switchOn(current, bar, 'popValue'), value => {
+                write({popValue: value});
+            }));
+        }
+        if (id === 'indicators')
+            this._indicatorOptions(box);
+        if (id === 'clock')
+            this._formatChoices(bar, box, 'time', false);
+        if (id === 'date')
+            this._formatChoices(bar, box, 'date');
+        if (id === 'logo')
+            this._logoOptions(box, bar);
+        if (id === 'power' && !this.groupId) {
+            box.width_request = 340;
+            box.append(this._toggle('Dim the desktop', powerDim(current, this.settings), value => {
+                write({sessionDim: value});
+            }));
+            box.append(label('Where it opens', 'subheading'));
+            box.append(this._spotGrid('power-position'));
+        }
+        if (!current.group && (PANEL_MODULES.has(id) || ['screenshot', 'dnd', 'nightlight', 'dark', 'awake'].includes(id)))
+            box.append(this._toggle('Open on hover', hoverEnabled(current, null, this.settings), value => {
+                write({hover: value});
+            }));
+    }
+
+    _groupPopover(anchor, group) {
+        if (this._clickClosed(anchor)) return;
+        const popover = new Gtk.Popover();
+        popover.set_parent(anchor);
+        const bar = readBars(this.settings)[this.barIndex];
+        const live = barGroups(bar).find(item => item.id === group.id) ?? group;
+        const members = bar.modules.filter(item => item.group === live.id);
+        const hovering = typeof live.hover === 'boolean' ? live.hover : members.some(item => hoverEnabled(item, null, this.settings)) || !members.length;
+        const box = vertical(8, {margin_top: 10, margin_bottom: 10, margin_start: 12, margin_end: 12, width_request: 240});
+        box.append(button('Edit popout layout…', () => {
+            popover.popdown(); this.groupId = live.id;
+            this.writing = true; this.settings.set_string('preferences-group', live.id); this.writing = false;
+            this._queueCard();
+        }));
+        box.append(button('Rename', () => {
+            popover.popdown();
+            this._nameDialog('Rename group', 'This name is only a label.', live.name, name => {
+                this._write(() => patchGroup(this.settings, this.barIndex, live.id, {name}), false);
+                this._queueLanes();
+            }, 'Rename');
+        }));
+        box.append(this._toggle('Open on hover', hovering, value => {
+            this._write(() => patchGroup(this.settings, this.barIndex, live.id, {hover: value}), false);
+        }));
+        box.append(label('Colour', 'subheading'));
+        const customRow = vertical(6);
+        const showCustom = () => {
+            clear(customRow);
+            const saved = barGroups(readBars(this.settings)[this.barIndex]).find(item => item.id === live.id);
+            if (saved?.color !== 'custom')
+                return;
+            const current = hexColor(saved.custom) || resolveTheme(this.settings).group;
+            customRow.append(this._colorChoice(current, hex => {
+                this._write(() => patchGroup(this.settings, this.barIndex, live.id, {color: 'custom', custom: hex}), false);
+            }));
+        };
+        box.append(this._segments([['', 'Follow bar'], ['plain', 'Plain'], ['theme', 'Theme'], ['accent', 'Accent'], ['custom', 'Custom']], live.color || '', value => {
+            const values = value ? {color: value} : {color: ''};
+            this._write(() => patchGroup(this.settings, this.barIndex, live.id, values), false);
+            showCustom();
+        }));
+        box.append(customRow);
+        showCustom();
+        box.append(label('Group shape', 'subheading'));
+        const appearance = groupAppearance(live, bar);
+        for (const [key, title, max] of [['padding', 'End padding', 32], ['inset', 'Side padding', 12],
+            ['rounding', 'Corner rounding', 48], ['opacity', 'Opacity (%)', 100]])
+            box.append(this._step(title, appearance[key], 0, max, key === 'opacity' ? 5 : 1,
+                value => this._write(() => patchGroup(this.settings, this.barIndex, live.id, {[key]: value}), false)));
+        box.append(button('Use bar shape defaults', () => {
+            this._write(() => patchGroup(this.settings, this.barIndex, live.id,
+                {padding: undefined, inset: undefined, rounding: undefined, opacity: undefined}), false);
+            popover.popdown();
+        }));
+        popover.set_child(box);
+        this._trackPopover(anchor, popover);
+        popover.connect('closed', () => GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => { if (popover.get_parent()) popover.unparent(); return GLib.SOURCE_REMOVE; }));
+        popover.popup();
+    }
+
+    _ownColours(bar) {
+        const theme = resolveTheme(this.settings);
+        for (const [key, title, fallback] of [['ownSurface', 'Surface', theme.surface], ['ownAccent', 'Accent', theme.accent]])
+            this.card.append(this._barColorRow(title, hexColor(bar[key]) || fallback, hex => patchBar(this.settings, this.barIndex, {[key]: hex})));
+    }
+
+    _barColorRow(title, current, apply) {
+        const row = horizontal(8);
+        row.append(label(title, '', {hexpand: true}));
+        row.append(this._barColorButton(current, apply));
+        return row;
+    }
+
+    _colorChoice(current, apply) {
+        const widget = button(current, () => this._pickColor(widget._hex || current, hex => {
+            apply(hex);
+            try {
+                widget._hex = hex;
+                widget.label = hex;
+            } catch {
+                /* The menu may already have closed around the colour dialog. */
+            }
+        }));
+        widget._hex = current;
+        return widget;
+    }
+
+    _pickColor(current, apply) {
+        const color = new Gdk.RGBA();
+        color.parse(current);
+        const dialog = new Gtk.ColorDialog({with_alpha: false, title: 'Choose a colour'});
+        dialog.choose_rgba(this.window, color, null, (_source, result) => {
+            try {
+                const rgba = dialog.choose_rgba_finish(result);
+                const hex = `#${[rgba.red, rgba.green, rgba.blue].map(value => Math.round(value * 255).toString(16).padStart(2, '0')).join('')}`;
+                apply(hex);
+            } catch {
+                /* The colour dialog was cancelled. */
+            }
+        });
+    }
+
+    _barColorButton(current, apply) {
+        return this._colorChoice(current, apply);
+    }
+
+    _spotGrid(key) {
+        const grid = new Gtk.Grid({column_spacing: 6, row_spacing: 6, column_homogeneous: true});
+        const choices = [['top-left', 'top-center', 'top-right'], ['left', 'icon', 'right'], ['bottom-left', 'bottom-center', 'bottom-right']];
+        const buttons = [];
+        choices.forEach((row, y) => row.forEach((id, x) => {
+            const widget = button(id === 'icon' ? 'At icon' : id.split('-').map(titleCase).join(' '), () => {
+                for (const other of buttons) {
+                    if (other === widget) other.add_css_class('is-on');
+                    else other.remove_css_class('is-on');
+                }
+                this._write(() => this.settings.set_string(`${key}`, id), false);
+            }, this.settings.get_string(key) === id ? 'is-on' : '');
+            buttons.push(widget);
+            grid.attach(widget, x, y, 1, 1);
+        }));
+        return grid;
+    }
+
+    _logoOptions(box, bar) {
+        box.width_request = 340;
+        box.append(label('Opens', 'subheading'));
+        box.append(this._segments([['launcher', 'Launcher'], ['overview', 'Overview'], ['apps', 'App grid']], bar.logoAction, value => {
+            this._write(() => patchBar(this.settings, this.barIndex, {logoAction: value}), false);
+        }));
+        box.append(label('Icon', 'subheading'));
+        const logos = flow(3);
+        for (const [id, name] of LOGOS) {
+            const widget = button(name, () => {
+                this._markChoice(widget);
+                this._write(() => patchBar(this.settings, this.barIndex, {logoIcon: `distro:${id}`}), false);
+            }, bar.logoIcon === `distro:${id}` ? 'is-on' : '');
+            logos.insert(widget, -1);
+        }
+        box.append(logos);
+        const entry = new Gtk.Entry({text: bar.logoIcon, placeholder_text: 'Icon name or image path'});
+        entry.connect('activate', () => this._write(() => patchBar(this.settings, this.barIndex, {logoIcon: entry.text}), false));
+        box.append(entry);
+    }
+
+    _appearance(bar) {
+        this.card.append(label('Start with a look, then adjust it below.', 'muted'));
+        const presets = horizontal(8);
+        for (const [id, title] of [['frame', 'In-frame dock'], ['floating', 'Floating dock'], ['minimal', 'Minimal icons']]) {
+            presets.append(button(title, () => {
+                const bars = readBars(this.settings);
+                bars[this.barIndex] = barAppearancePreset(bars[this.barIndex], id);
+                this._write(() => {
+                    saveBars(this.settings, bars);
+                    if (id === 'frame') this.settings.set_boolean('show-frame', true);
+                });
+            }, '', {hexpand: true}));
+        }
+        this.card.append(presets);
+        if (bar.kind === 'dock' || bar.margin || bar.length < 100)
+            this.card.append(this._step('Background opacity (%)', bar.barOpacity, 0, 100, 5,
+                value => patchBar(this.settings, this.barIndex, {barOpacity: value})));
+        else
+            this.card.append(label('Attached bars share the screen frame background.', 'muted'));
+        this.card.append(this._step('Bar corner rounding', bar.rounding, 0, 48, 2,
+            value => patchBar(this.settings, this.barIndex, {rounding: value})));
+        this.card.append(label('Colour groups', 'subheading'));
+        this.card.append(this._toggle('Colour groups', bar.colourGroups, value => patchBar(this.settings, this.barIndex, {colourGroups: value})));
+        for (const [key, title, max] of [['groupPadding', 'End padding', 32], ['groupInset', 'Side padding', 12],
+            ['groupRounding', 'Group corner rounding', 48], ['groupOpacity', 'Group opacity (%)', 100]])
+            this.card.append(this._step(title, bar[key], 0, max, key === 'groupOpacity' ? 5 : 1,
+                value => patchBar(this.settings, this.barIndex, {[key]: value})));
+        this.card.append(label('Individual groups can override these settings in Contents.', 'muted'));
     }
 
     _barSize(bar) {
@@ -857,16 +1205,14 @@ export class SettingsWindow {
             this.card.append(this._toggle('Fit to applications', bar.fitContent, value => patchBar(this.settings, this.barIndex, {fitContent: value})));
             this.card.append(this._step('Minimum dock length', bar.dockMinLength, 64, 10000, 8, value => patchBar(this.settings, this.barIndex, {dockMinLength: value})));
         }
-        this.card.append(this._toggle('Host extension icons here', hostsIndicators(this.settings, this.barIndex), value => {
-            this.settings.set_int('indicator-bar', value ? this.barIndex + 1 : 0);
-            this._queueCard();
-        }));
-        if (hostsIndicators(this.settings, this.barIndex)) this._indicators();
     }
 
     _apps(bar) {
         this.card.append(this._toggle('Show running applications', bar.runningApps, value => patchBar(this.settings, this.barIndex, {runningApps: value})));
         this.card.append(this._segments([['minimize', 'Click to minimize'], ['activate', 'Click to activate']], bar.appClick, value => patchBar(this.settings, this.barIndex, {appClick: value})));
+        this.card.append(label('Running indicator', 'subheading'));
+        this.card.append(this._segments([['line', 'Line'], ['dot', 'Dot'], ['none', 'None']], bar.appIndicator,
+            value => patchBar(this.settings, this.barIndex, {appIndicator: value})));
         this.card.append(label('Pinned applications', 'subheading'));
         const pins = flow(3);
         for (const id of bar.pinned) pins.insert(button(`${GioUnix.DesktopAppInfo.new(id.slice(4))?.get_display_name() ?? id.slice(4)} ×`, () => {
@@ -892,40 +1238,29 @@ export class SettingsWindow {
             popover.set_child(box); popover.connect('closed', () => GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => { popover.unparent(); return GLib.SOURCE_REMOVE; })); popover.popup();
         });
         pins.insert(add, -1); this.card.append(pins);
-        this.card.append(label('Logo', 'subheading'));
-        this.card.append(this._segments([['launcher', 'Launcher'], ['overview', 'Overview'], ['apps', 'App grid']], bar.logoAction, value => patchBar(this.settings, this.barIndex, {logoAction: value})));
-        const logos = flow(3);
-        for (const [id, name] of LOGOS) {
-            const widget = button(name, () => {
-                this._markChoice(widget);
-                this._write(() => patchBar(this.settings, this.barIndex, {logoIcon: `distro:${id}`}), false);
-            }, bar.logoIcon === `distro:${id}` ? 'is-on' : '');
-            logos.insert(widget, -1);
-        }
-        this.card.append(logos);
-        const entry = new Gtk.Entry({text: bar.logoIcon, placeholder_text: 'Icon name or image path'});
-        entry.connect('activate', () => this._write(() => patchBar(this.settings, this.barIndex, {logoIcon: entry.text}), false));
-        this.card.append(entry);
-        this.card.append(this._toggle('Show battery percentage', bar.batteryPercentage, value => patchBar(this.settings, this.barIndex, {batteryPercentage: value})));
-        this._formatChoices(bar);
     }
 
-    _formatChoices(bar = null) {
+    _formatChoices(bar = null, parent = null, part = 'both', secondsControl = true) {
         const gnome = new Gio.Settings({schema_id: 'org.gnome.desktop.interface'}).get_string('clock-format');
         const time = bar ? barTimeFormat(bar, gnome) : settingChoice(this.settings, 'dashboard-time-format', '24h', ['24h', '12h']);
         const seconds = bar ? bar.clockSeconds === true : settingFlag(this.settings, 'dashboard-clock-seconds');
         const date = bar ? barDateFormat(bar, this.settings) : settingChoice(this.settings, 'dashboard-date-format', 'long', Object.keys(DATE_FORMATS));
-        this.card.append(label(bar ? 'Time' : 'Dashboard time', 'subheading'));
-        this.card.append(this._segments([['24h', '24-hour'], ['12h', '12-hour']], time, value => {
-            if (bar) patchBar(this.settings, this.barIndex, {timeFormat: value});
-            else this.settings.set_string('dashboard-time-format', value);
-        }));
-        this.card.append(this._toggle('Show seconds', seconds, value => {
-            if (bar) patchBar(this.settings, this.barIndex, {clockSeconds: value});
-            else this.settings.set_boolean('dashboard-clock-seconds', value);
-        }));
-        this.card.append(label(bar ? 'Date' : 'Dashboard date', 'subheading'));
-        const dates = flow(2);
+        const host = parent ?? this.card;
+        if (part !== 'date') {
+            host.append(label(bar ? 'Time' : 'Dashboard time', 'subheading'));
+            host.append(this._segments([['24h', '24-hour'], ['12h', '12-hour']], time, value => {
+                if (bar) patchBar(this.settings, this.barIndex, {timeFormat: value});
+                else this.settings.set_string('dashboard-time-format', value);
+            }));
+            if (secondsControl) host.append(this._toggle('Show seconds', seconds, value => {
+                if (bar) patchBar(this.settings, this.barIndex, {clockSeconds: value});
+                else this.settings.set_boolean('dashboard-clock-seconds', value);
+            }));
+        }
+        if (part === 'time')
+            return;
+        host.append(label(bar ? 'Date' : 'Dashboard date', 'subheading'));
+        const dates = flow(1);
         for (const [id, format] of Object.entries(DATE_FORMATS)) {
             const widget = button(format.label, () => {
                 this._markChoice(widget);
@@ -936,7 +1271,7 @@ export class SettingsWindow {
             }, date === id ? 'is-on' : '');
             dates.insert(widget, -1);
         }
-        this.card.append(dates);
+        host.append(dates);
     }
 
     _swatches(palette, height = 48) {
@@ -973,7 +1308,7 @@ export class SettingsWindow {
         this.card.append(list);
         if (current !== 'custom') return;
         this.card.append(label('Make it your own', 'subheading'));
-        for (const [key, title] of [['bg', 'Frame'], ['surface', 'Cards'], ['fg', 'Text'], ['muted', 'Secondary text'], ['accent', 'Accent'], ['border', 'Dividers']]) {
+        for (const [key, title] of [['bg', 'Frame'], ['surface', 'Cards'], ['fg', 'Text'], ['muted', 'Secondary text'], ['accent', 'Accent'], ['group', 'Group accent'], ['border', 'Dividers']]) {
             const row = horizontal(8);
             row.append(label(title, '', {hexpand: true}));
             const color = new Gdk.RGBA(); color.parse(this.settings.get_string(`custom-${key}`));
@@ -1002,27 +1337,10 @@ export class SettingsWindow {
         this.card.append(this._toggle('Show screen border', this.settings.get_boolean('show-frame'), value => this.settings.set_boolean('show-frame', value)));
         for (const [key, title, min, max] of [['frame-width', 'Border width', 4, 48], ['frame-radius', 'Corner radius', 0, 80], ['frame-shadow', 'Shadow', 0, 24]])
             this.card.append(this._step(title, this.settings.get_int(key), min, max, 1, value => this.settings.set_int(key, value)));
-        for (const [key, title] of [['power', 'Power drawer'], ['dashboard', 'Dashboard'], ['notifications', 'Notifications']]) {
+        for (const [key, title] of [['dashboard', 'Dashboard'], ['notifications', 'Notifications']]) {
             this.card.append(label(title, 'subheading'));
-            const grid = new Gtk.Grid({column_spacing: 6, row_spacing: 6, column_homogeneous: true});
-            const choices = [['top-left', 'top-center', 'top-right'], ['left', 'icon', 'right'], ['bottom-left', 'bottom-center', 'bottom-right']];
-            const buttons = [];
-            choices.forEach((row, y) => row.forEach((id, x) => {
-                const widget = button(id === 'icon' ? 'At icon' : id.split('-').map(titleCase).join(' '), () => {
-                    for (const other of buttons) {
-                        if (other === widget) other.add_css_class('is-on');
-                        else other.remove_css_class('is-on');
-                    }
-                    this._write(() => this.settings.set_string(`${key}-position`, id), false);
-                }, this.settings.get_string(`${key}-position`) === id ? 'is-on' : '');
-                buttons.push(widget);
-                grid.attach(widget, x, y, 1, 1);
-            }));
-            this.card.append(grid);
+            this.card.append(this._spotGrid(`${key}-position`));
         }
-        this.card.append(this._segments([['list', 'Power labels'], ['rail', 'Power icons']], this.settings.get_string('power-style'), value => this.settings.set_string('power-style', value)));
-        this.card.append(this._segments([['drawer', 'Sliders in drawer'], ['edge', 'Sliders on edge']], this.settings.get_string('slider-style'), value => this.settings.set_string('slider-style', value)));
-        this.card.append(this._toggle('Dim behind power menu', this.settings.get_boolean('session-dim'), value => this.settings.set_boolean('session-dim', value)));
     }
 
     _shortcutCard() {
@@ -1079,8 +1397,8 @@ export class SettingsWindow {
     }
 
     _openingCard() {
-        this._heading('Opening & motion', 'Choose what opens on hover and how it feels.');
-        for (const [key, title] of [['edge-panels', 'Top edge opens dashboard'], ['power-hover', 'Bottom edge opens power'], ['status-hover', 'Hover quick controls'], ['clock-hover', 'Hover clock'], ['power-button-hover', 'Hover power button'], ['dashboard-hover', 'Hover dashboard button']])
+        this._heading('Opening & motion', 'Choose what the screen edges open, and how motion feels.');
+        for (const [key, title] of [['edge-panels', 'Top edge opens dashboard'], ['power-hover', 'Bottom edge opens power']])
             this.card.append(this._toggle(title, this.settings.get_boolean(key), value => this.settings.set_boolean(key, value)));
         this.card.append(this._step('Hover delay (ms)', this.settings.get_int('hover-delay'), 100, 1000, 50, value => this.settings.set_int('hover-delay', value)));
         this.card.append(this._step('Animation (ms)', this.settings.get_int('animation-duration'), 0, 800, 20, value => this.settings.set_int('animation-duration', value)));
@@ -1088,36 +1406,46 @@ export class SettingsWindow {
 
     _desktopCard() {
         this._heading('Desktop');
-        for (const [key, title] of [['weather-dashboard', 'Weather on dashboard'], ['hide-gnome-panel', 'Hide GNOME top bar'], ['hide-overview-dock', 'Hide Overview dock'], ['frame-notifications', 'Notifications on the frame'], ['panel-indicators', 'Extension icons']])
+        for (const [key, title] of [['weather-dashboard', 'Weather on dashboard'], ['hide-gnome-panel', 'Hide GNOME top bar'], ['hide-overview-dock', 'Hide Overview dock'], ['frame-notifications', 'Notifications on the frame']])
             this.card.append(this._toggle(title, this.settings.get_boolean(key), value => this.settings.set_boolean(key, value)));
-        this.card.append(this._step('Dashboard width', this.settings.get_int('dashboard-width'), 480, 1200, 20, value => this.settings.set_int('dashboard-width', value)));
         this._formatChoices(null);
-        this._indicators();
     }
 
-    _indicators() {
-        for (const [key, title, min, max] of [['indicator-icon-size', 'Extension icon size', 12, 40], ['indicator-spacing', 'Extension spacing', 0, 40]])
-            this.card.append(this._step(title, this.settings.get_int(key), min, max, 1, value => this.settings.set_int(key, value)));
-        this.card.append(this._segments([['before', 'Before modules'], ['after', 'After modules']], this.settings.get_string('indicator-side'), value => this.settings.set_string('indicator-side', value)));
-        for (const name of indicatorNames(this.settings)) {
-            const row = horizontal(6); row.append(label(name, '', {hexpand: true}));
-            const shown = !this.settings.get_strv('hidden-indicators').includes(name);
-            let toggle;
-            toggle = this._toggle(shown ? 'Shown' : 'Hidden', shown, value => {
-                setIndicatorShown(this.settings, name, value);
-                toggle.label = value ? 'Shown' : 'Hidden';
-            });
-            row.append(toggle);
-            row.append(button('↑', () => {
-                this._write(() => moveIndicator(this.settings, name, -1), false);
-                this._queueCard();
+    _indicatorOptions(box) {
+        box.width_request = 320;
+        for (const [key, title, min, max] of [['indicator-icon-size', 'Icon size', 12, 40], ['indicator-spacing', 'Spacing', 0, 40]])
+            box.append(this._step(title, this.settings.get_int(key), min, max, 1, value => {
+                this._write(() => this.settings.set_int(key, value), false);
             }));
-            row.append(button('↓', () => {
-                this._write(() => moveIndicator(this.settings, name, 1), false);
-                this._queueCard();
-            }));
-            this.card.append(row);
-        }
+        const list = vertical(6);
+        const fill = () => {
+            clear(list);
+            const names = indicatorNames(this.settings);
+            if (!names.length)
+                list.append(label('Extension icons appear here once they are running.', 'caption'));
+            for (const name of names) {
+                const row = horizontal(6);
+                row.append(label(name, '', {hexpand: true}));
+                const shown = !this.settings.get_strv('hidden-indicators').includes(name);
+                let toggle;
+                toggle = this._toggle(shown ? 'Shown' : 'Hidden', shown, value => {
+                    this._write(() => setIndicatorShown(this.settings, name, value), false);
+                    toggle.label = value ? 'Shown' : 'Hidden';
+                });
+                row.append(toggle);
+                row.append(button('↑', () => {
+                    this._write(() => moveIndicator(this.settings, name, -1), false);
+                    fill();
+                }));
+                row.append(button('↓', () => {
+                    this._write(() => moveIndicator(this.settings, name, 1), false);
+                    fill();
+                }));
+                list.append(row);
+            }
+        };
+        fill();
+        box.append(list);
     }
 
     _save() {
@@ -1129,11 +1457,11 @@ export class SettingsWindow {
         else save();
     }
 
-    _nameDialog(title, body, initial, action) {
+    _nameDialog(title, body, initial, action, confirm = 'Create group') {
         const dialog = new Adw.AlertDialog({heading: title, body});
         const entry = new Gtk.Entry({text: initial, placeholder_text: 'Name', max_length: 60});
         dialog.extra_child = entry;
-        dialog.add_response('cancel', 'Cancel'); dialog.add_response('create', 'Create group');
+        dialog.add_response('cancel', 'Cancel'); dialog.add_response('create', confirm);
         dialog.close_response = 'cancel'; dialog.default_response = 'create';
         dialog.set_response_appearance('create', Adw.ResponseAppearance.SUGGESTED);
         dialog.set_response_enabled('create', Boolean(initial.trim()));

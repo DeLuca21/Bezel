@@ -1,8 +1,17 @@
+import {moduleType, moduleView} from './moduleIdentity.js';
+import {moduleFeatures} from './moduleFeatures.js';
+import {expandedModule, inputDevices, outputDevices} from './expandedModules.js';
+import {shortcutFace} from './shortcutRuntime.js';
+import {shelfFace, shelfPanel, stopShelfHelper} from './shelf.js';
+import {timerFace} from './timers.js';
+import {buildGroupPopout} from './groupPopout.js';
+import {GROUP_ITEMS, groupLayoutPreset} from './groupLayout.js';
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 import Meta from 'gi://Meta';
 import Pango from 'gi://Pango';
+import PangoCairo from 'gi://PangoCairo';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
 
@@ -10,26 +19,27 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as Slider from 'resource:///org/gnome/shell/ui/slider.js';
 import * as SystemActions from 'resource:///org/gnome/shell/misc/systemActions.js';
 
-import {resolveTheme} from './theme.js';
+import {hexToRgba, resolveTheme} from './theme.js';
 
-import {PLACES, DATE_FORMATS, timePattern, barDateFormat, barTimeFormat, readState, readBars, saveBars, clamp, settingFlag, settingChoice, isSpacer, barGroups} from './config.js';
-import {sideWidths, reservedWidths, cornerRadius, horizontalZoneWidths} from './geometry.js';
+import {PLACES, DATE_FORMATS, timePattern, barDateFormat, barTimeFormat, readState, readBars, saveBars, clamp, settingFlag, settingChoice, isSpacer, barGroups, barTheme, groupFillColor, groupAppearance, hoverEnabled, moduleLook, sliderLayout, powerLayout, powerDim, switchOn, adoptIndicators} from './config.js';
+import {sideWidths, reservedWidths, cornerRadius, zonePlacement} from './geometry.js';
 import {paintCorner} from './drawing.js';
 import {Services} from './services.js';
 import {DesktopFrame} from './frame.js';
 import {monthGrid, openCalendarDate} from './calendar.js';
 import {Weather, weatherWidget, railTemp} from './weather.js';
+import {buildMediaFace, buildMicFace, buildMicPanel, buildClipboardPanel, buildKeyboardFace, buildKeyboardPanel, buildAwakeFace, buildValueButton} from './extraModules.js';
 import {buildDashboard} from './dashboard.js';
-import {buildOsd, buildSessionRail} from './sidebar.js';
+import {buildOsd, buildStacked, buildLevelControl, buildSessionRail} from './sidebar.js';
 import {buildLauncher} from './launcher.js';
-import {buildDeviceControls} from './quickControls.js';
+import {buildDeviceControls, buildDevicePanel, deviceAvailable} from './quickControls.js';
 import {IndicatorBridge} from './indicators.js';
 import {logoFile} from './logos.js';
 import * as Config from 'resource:///org/gnome/shell/misc/config.js';
 import {allowsMotion, chromeOptions} from './compat.js';
 import {NotificationBridge, buildNotificationCenter} from './notifications.js';
 import {decorateScroll} from './overflow.js';
-import {MODULES, createGroup, deleteGroup, assignGroup, resizeSpacer, addBar, addModule, patchBar, removeBar, removeModule, setFloating, setKind, nudgeUnit} from './settingsModel.js';
+import {MODULES, createGroup, deleteGroup, assignGroup, resizeSpacer, addBar, addModule, patchBar, patchModule, removeBar, removeModule, setFloating, setKind, nudgeUnit} from './settingsModel.js';
 import {bindToggle, darkStyleControl, dndControl, moduleSection, nightLightControl, openScreenshot, performanceMenu, settingsMenu, vpnMenu} from './tools.js';
 
 export class BezelOverlay {
@@ -52,6 +62,13 @@ export class BezelOverlay {
                 for (const bar of this._bars) bar.syncEditOutline();
                 return;
             }
+            if (key === 'preferences-group') return;
+            if (key === 'group-preview') {
+                try { this._groupPreview = JSON.parse(settings.get_string(key)); } catch { this._groupPreview = null; }
+                if (this._groupPreview?.action === 'open') this._showGroupPreview();
+                else { this._groupPreview = null; this._bars.forEach(bar => { if (bar._popoutId?.startsWith('group:')) bar._close(); }); }
+                return;
+            }
             if (key === 'show-settings') {
                 this.openSettings();
                 return;
@@ -67,6 +84,7 @@ export class BezelOverlay {
                 if (global.display.get_monitor_in_fullscreen(bar._monitor.index))
                     bar._close();
             }
+            this._notifications?.restyle();
         });
         this._rebuildId = 0;
         try {
@@ -117,6 +135,8 @@ export class BezelOverlay {
     rebuild() {
         this._clear();
         try {
+            if (adoptIndicators(this._settings))
+                this.skipRebuild(() => {});
             const theme = resolveTheme(this._settings);
             const state = readState(this._settings);
             for (const physicalMonitor of Main.layoutManager.monitors) {
@@ -137,7 +157,7 @@ export class BezelOverlay {
                 });
                 if (state.edgePanels) this._edgeHotspot(monitor, theme, 'top', side);
                 if (state.powerHover) this._edgeHotspot(monitor, theme, 'bottom', side);
-                if (state.sliderStyle === 'edge')
+                if (state.bars.some(bar => sliderLayout(bar.modules.find(item => item.id === 'volume'), this._settings) === 'edge'))
                     this._osdHotspot(monitor, theme, side);
                 if (this._settings.get_boolean('frame-notifications')) {
                     const at = settingChoice(this._settings, 'notifications-position', 'top-right',
@@ -145,27 +165,37 @@ export class BezelOverlay {
                     const loc = ['top-left', 'top-right', 'bottom-left', 'bottom-right'].includes(at) ? at : 'top-right';
                     this._edgeHotspot(monitor, theme, loc.startsWith('bottom') ? 'bottom' : 'top', side, true, loc);
                 }
-                if (monitor.index === Main.layoutManager.primaryIndex && this._settings.get_boolean('panel-indicators')) {
-                    const bars = this._bars.filter(bar => bar._monitor.index === monitor.index);
-                    const selected = this._settings.get_int('indicator-bar');
-                    const target = (selected ? bars[selected - 1] : bars.find(bar => !bar._vertical && bar._state.kind !== 'dock')) ?? bars[0];
+                if (monitor.index === Main.layoutManager.primaryIndex) {
+                    const target = this._bars.find(bar => bar._monitor.index === monitor.index && bar._indicatorSlot);
                     if (target) this._indicators = new IndicatorBridge(target);
                 }
                 if (monitor.index === Main.layoutManager.primaryIndex && this._settings.get_boolean('frame-notifications'))
                     this._notifications = new NotificationBridge(physicalMonitor, side, theme, state.border, state.radius, this._frames.get(monitor.index), this._settings);
                 if (state.editMode)
                     this._addEdgeHandle(physicalMonitor, theme, state);
-                const reserved = reservedWidths(state);
+                const measuredState = {...state, bars: this._bars.filter(bar => bar._monitor.index === monitor.index)
+                    .map(bar => ({...bar._state, thickness: bar._vertical ? bar._box.width : bar._box.height}))};
+                const reserved = reservedWidths(measuredState);
                 for (const [edge, width] of Object.entries(reserved)) {
                     if (width > 0)
                         this._chrome.push(strut(physicalMonitor, edge, width + (edge === 'top' ? topInset : 0)));
                 }
             }
             this._syncEditEscape();
+            if (this._groupPreview?.action === 'open') this._showGroupPreview();
         } catch (error) {
             this._clear();
             throw error;
         }
+    }
+
+    _showGroupPreview() {
+        const request = this._groupPreview;
+        const bar = this._bars.find(bar => bar._index === request?.bar && bar._monitor.index === Main.layoutManager.primaryIndex);
+        const group = bar && barGroups(bar._state).find(group => group.id === request.group);
+        if (!group?.popout) return;
+        const anchor = bar._order.find(item => item.id === group.id)?.actor ?? bar._actor;
+        bar._open(`group:${group.id}`, anchor, () => buildGroupPopout(bar, group), 'right');
     }
 
     openPreferences() {
@@ -175,6 +205,7 @@ export class BezelOverlay {
     openSettings(options = {}) {
         try {
             this._settings.set_int('preferences-bar', Number.isInteger(options.barIndex) ? options.barIndex : -1);
+            this._settings.set_string('preferences-group', options.groupId || '');
             this._openPreferences?.()?.catch?.(error => console.error('Bezel preferences failed', error));
         } catch (error) {
             console.error('Bezel settings failed to open', error);
@@ -324,6 +355,7 @@ export class BezelOverlay {
             this._editEscape = 0;
         }
         this._clear();
+        stopShelfHelper();
         this.services.destroy();
         this.weather.destroy();
         this._settings = null;
@@ -461,7 +493,7 @@ class Bar {
     constructor(overlay, monitor, theme, state, side, index) {
         this._overlay = overlay;
         this._monitor = monitor;
-        this._theme = theme;
+        this._theme = barTheme(theme, state, state.border);
         this._state = state;
         this._side = side;
         this._index = index;
@@ -481,6 +513,10 @@ class Bar {
 
     destroy() {
         this._destroyed = true;
+        this._revealTimeline?.stop();
+        this._revealTimeline = null;
+        const actor = this._actor;
+        this._actor = null;
         this._endGeom(false);
         if (this._appsHandleLater)
             global.compositor.get_laters().remove(this._appsHandleLater);
@@ -501,23 +537,26 @@ class Bar {
         for (const handle of Object.values(this._editHandles ?? {}))
             drop(handle);
         this._editHandles = null;
-        drop(this._actor);
+        drop(actor);
         drop(this._trigger);
     }
 
     _build() {
         const vertical = this._vertical;
         this._joinedAutohide = this._state.border && this._state.autohide && this._state.kind !== 'dock' && !this._state.margin && this._state.length === 100;
+        const pills = this._state.sections === 'pills';
+        const pad = this._barPadding();
+        const padding = vertical ? `${pad.along}px ${pad.cross}px` : `${pad.cross}px ${pad.along}px`;
         this._actor = new St.BoxLayout({
             orientation: vertical ? Clutter.Orientation.VERTICAL : Clutter.Orientation.HORIZONTAL,
             reactive: true,
             track_hover: true,
             clip_to_allocation: true,
-            style: `background-color: ${this._joinedAutohide ? 'transparent' : this._theme.bg}; spacing: 8px; padding: 6px; border-radius: ${this._state.kind === 'dock' || this._state.margin || this._state.length < 100 ? this._state.rounding : 0}px; ${this._state.kind === 'dock' ? 'box-shadow: 0 3px 10px rgba(0,0,0,0.22);' : ''}`,
+            style: `background-color: ${this._joinedAutohide || pills ? 'transparent' : hexToRgba(this._theme.bg, this._state.barOpacity / 100)}; spacing: ${pills ? 0 : 8}px; padding: ${padding}; border-radius: ${pills ? 0 : this._state.kind === 'dock' || this._state.margin || this._state.length < 100 ? this._state.rounding : 0}px; ${this._state.kind === 'dock' && !pills && this._state.barOpacity > 0 ? 'box-shadow: 0 3px 10px rgba(0,0,0,0.22);' : ''}`,
         });
         this._baseStyle = this._actor.style;
         this.syncEditOutline();
-        const icon = this._state.iconSize;
+        const icon = Math.min(this._state.iconSize, this._state.thickness - 12);
         const zones = {
             start: this._zone(),
             center: this._zone(),
@@ -534,6 +573,35 @@ class Bar {
                 const members = this._state.modules.filter(module => module.group === item.group);
                 actor = this._cluster(members, icon);
                 dragId = item.group;
+                const group = barGroups(this._state).find(entry => entry.id === item.group);
+                const fill = groupFillColor(group, this._state, this._theme);
+                if (actor) {
+                    // The padding is always there, so the colour only fills it.
+                    // Turning the colour on does not change the group's size.
+                    const appearance = groupAppearance(group, this._state);
+                    const along = appearance.padding;
+                    const cross = appearance.inset;
+                    const pad = new St.BoxLayout({
+                        orientation: this._actor.orientation,
+                        x_expand: false, y_expand: false,
+                        style: `padding: ${this._vertical ? `${along}px ${cross}px` : `${cross}px ${along}px`};`,
+                    });
+                    pad._bezelGroupPadding = true;
+                    pad.add_child(actor);
+                    const background = new St.Widget({
+                        x_expand: true, y_expand: true,
+                        style: fill ? `background-color: ${hexToRgba(fill, appearance.opacity / 100)}; border-radius: ${appearance.rounding}px;` : '',
+                    });
+                    const shell = new St.Widget({
+                        layout_manager: new Clutter.BinLayout(),
+                        clip_to_allocation: false,
+                        x_expand: false, y_expand: false,
+                    });
+                    shell.add_child(background);
+                    shell.add_child(pad);
+                    shell._bezelPack = pad;
+                    actor = shell;
+                }
             } else {
                 actor = this._module(item.id, icon);
             }
@@ -546,12 +614,28 @@ class Bar {
             if (this._state.editMode)
                 this._drag(actor, dragId);
         }
+        this._emptyPills = new Set();
+        if (pills) {
+            for (const [place, zone] of Object.entries(zones)) {
+                if (zone.get_n_children() === 0)
+                    this._emptyPills.add(place);
+            }
+        }
         this._zoneAdds = [];
         if (this._state.editMode) {
             for (const place of ['start', 'center', 'end']) {
                 const plus = this._zonePlus(place);
                 zones[place].add_child(plus);
                 this._zoneAdds.push(plus);
+            }
+        }
+        if (pills) {
+            for (const place of ['start', 'center', 'end']) {
+                if (this._emptyPills.has(place) && !this._state.editMode) {
+                    zones[place].visible = false;
+                    continue;
+                }
+                zones[place]._bezelAlongPad = 20;
             }
         }
         this._zones = zones;
@@ -576,11 +660,36 @@ class Bar {
                 continue;
             }
             this._cells.push(this._attachZone(zone, place));
-            this._actor.add_child(this._cells[this._cells.length - 1]);
+        }
+        if (this._state.kind !== 'dock') {
+            for (const cell of this._cells)
+                if (cell)
+                    this._actor.add_child(cell);
+            if (this._cells.filter(Boolean).length === 3) {
+                const gap = () => {
+                    const widget = new St.Widget({x_expand: false, y_expand: false, visible: false});
+                    widget._bezelBalance = true;
+                    return widget;
+                };
+                const before = gap();
+                const after = gap();
+                const centerAt = this._actor.get_children().indexOf(this._cells[1]);
+                this._actor.insert_child_at_index(before, Math.max(0, centerAt));
+                this._actor.insert_child_at_index(after, Math.max(0, centerAt) + 2);
+                this._zoneGaps = [before, after];
+                this._actor.spacing = 0;
+                this._baseStyle = this._baseStyle.replace(/spacing:\s*\d+(?:\.\d+)?px/, 'spacing: 0px');
+                this._actor.style = this._baseStyle;
+            }
         }
         if (this._state.kind === 'dock' && !this._dockViewport.get_parent())
             this._dockContent.add_child(this._dockViewport);
         chrome(this._actor, true);
+        this._actor.connect('destroy', () => {
+            this._revealTimeline?.stop();
+            this._revealTimeline = null;
+            this._actor = null;
+        });
         this._place();
         this._ensureEditHandles();
         this._signals.push([this._actor, this._actor.connect('captured-event', (_actor, event) => this._barClick(event))]);
@@ -639,7 +748,7 @@ class Bar {
                 return Clutter.EVENT_PROPAGATE;
             module = null;
         }
-        if (this._state.editMode && module)
+        if (module && (this._state.editMode || barGroups(this._state).some(group => group.id === module.id)))
             this._toggle(`module-${module.id}`, module.actor, () => this._moduleSettingsMenu(module.id));
         else
             this._toggle('bar-menu', this._actor, () => this._barMenu());
@@ -706,13 +815,17 @@ class Bar {
         if (id === 'dashboard' || members.some(item => item.id === 'dashboard'))
             this._dashboardClockActions(box);
         if (members.some(item => item.id === 'battery') || id === 'battery') {
-            const shown = readBars(settings)[this._index].batteryPercentage === true;
+            const current = readBars(settings)[this._index];
+            const module = current.modules.find(item => item.id === 'battery');
+            const shown = switchOn(module, current, 'showValue');
             box.add_child(this._action(shown ? 'Hide battery percentage' : 'Show battery percentage', 'battery-symbolic', () => {
-                patchBar(settings, this._index, {batteryPercentage: !shown});
+                patchModule(settings, this._index, 'battery', {showValue: !shown});
             }));
         }
         const group = barGroups(readBars(settings)[this._index]).find(item => item.id === id);
         if (group) {
+            box.add_child(this._action('Edit group popout…', 'document-edit-symbolic', () =>
+                this._overlay.openSettings({barIndex: this._index, groupId: group.id})));
             box.add_child(this._action('Ungroup · keep contents', 'edit-clear-symbolic', () => deleteGroup(settings, this._index, id)));
             for (const member of members) {
                 box.add_child(this._action(`Remove ${isSpacer(member.id) ? 'empty space' : member.id} from group`, 'list-remove-symbolic', () => assignGroup(settings, this._index, member.id, '')));
@@ -771,7 +884,11 @@ class Bar {
         const gnome = new Gio.Settings({schema_id: 'org.gnome.desktop.interface'}).get_string('clock-format');
         const format = barTimeFormat(bar, gnome);
         box.add_child(this._action(format === '12h' ? 'Use 24-hour time' : 'Use 12-hour time', 'preferences-system-time-symbolic', () => patchBar(settings, this._index, {timeFormat: format === '12h' ? '24h' : '12h'})));
-        box.add_child(this._action(bar.clockSeconds ? 'Hide seconds' : 'Show seconds', 'appointment-soon-symbolic', () => patchBar(settings, this._index, {clockSeconds: !bar.clockSeconds})));
+        const clock = bar.modules.find(item => item.id === 'clock');
+        const seconds = clock?.showSeconds ?? bar.clockSeconds === true;
+        box.add_child(this._action(seconds ? 'Hide seconds' : 'Show seconds', 'appointment-soon-symbolic', () => clock
+            ? patchModule(settings, this._index, 'clock', {showSeconds: !seconds})
+            : patchBar(settings, this._index, {clockSeconds: !seconds})));
     }
 
     _dashboardClockActions(box) {
@@ -813,11 +930,12 @@ class Bar {
     }
 
     _attachZone(zone, place, pinParent = null) {
-        this._alignZone(zone, place);
+        const content = zone._bezelZone ?? zone;
+        this._alignZone(content, place);
         const apps = this._appsRow;
-        const holdsApps = apps && zone.contains(apps);
+        const holdsApps = apps && content.contains(apps);
         if (holdsApps) {
-            this._appsZone = zone;
+            this._appsZone = content;
             this._appsPlace = place;
             this._centerApps = place === 'center';
             const parent = apps.get_parent();
@@ -837,8 +955,8 @@ class Bar {
         }
         // Each zone is one packed row. Extra apps space is balanced around
         // the visible contents while the viewport owns the trailing edge.
-        zone.x_expand = this._vertical;
-        zone.y_expand = !this._vertical;
+        content.x_expand = this._vertical;
+        content.y_expand = !this._vertical;
         if (pinParent) {
             zone._bezelEdge = place;
             if (zone.get_n_children())
@@ -849,10 +967,19 @@ class Bar {
             this._alignZone(zone, place);
             const cell = this._scrollView();
             cell.set_child(zone);
-            return cell;
+            if (this._state.sections !== 'pills' || pinParent || zone.visible === false)
+                return cell;
+            return this._sectionPill(cell, zone, place);
         }
         const cell = new St.Widget({layout_manager: new Clutter.BinLayout(),
-            x_expand: false, y_expand: false, clip_to_allocation: true});
+            x_expand: false, y_expand: false, clip_to_allocation: false});
+        if (this._state.sections === 'pills') {
+            const plate = new St.DrawingArea({reactive: false, x_expand: true, y_expand: true});
+            plate.connect('repaint', () => this._paintSectionPill(plate, zone, place));
+            zone.connectObject('notify::allocation', () => plate.queue_repaint(), plate);
+            cell.add_child(plate);
+            cell._bezelPlate = plate;
+        }
         cell.add_child(zone);
         cell._bezelPack = zone;
         return cell;
@@ -922,13 +1049,60 @@ class Bar {
         return view;
     }
 
+    _contentCross() {
+        if (this._vertical)
+            return 0;
+        let max = 0;
+        for (const zone of Object.values(this._zones ?? {})) {
+            if (!zone || zone.visible === false)
+                continue;
+            for (const child of zone.get_children()) {
+                if (child.visible === false)
+                    continue;
+                const locked = child.height_set;
+                const previous = child.height;
+                if (locked)
+                    child.height = -1;
+                try {
+                    const [, natural] = child.get_preferred_height(-1);
+                    max = Math.max(max, natural || 0);
+                } catch {
+                    /* Actor can be mid-destroy while the bar is placed. */
+                }
+                if (locked)
+                    child.height = previous;
+            }
+        }
+        return max;
+    }
+
+    // Horizontal bars pack modules from the top of the clip, which slices the
+    // first pixels of the clock. Stretch the row and center each module in it.
+    _centerBarZone(cell) {
+        const scroll = cell instanceof St.ScrollView ? cell
+            : cell?._bezelPack instanceof St.ScrollView ? cell._bezelPack : null;
+        const zone = scroll?.child ?? scroll?.get_child?.();
+        if (!zone)
+            return;
+        const room = Math.max(1, cell.height || scroll.height || 0);
+        if (room < 2)
+            return;
+        zone.y_expand = true;
+        zone.y_align = Clutter.ActorAlign.CENTER;
+        zone.height = room;
+        for (const child of zone.get_children()) {
+            child.y_expand = false;
+            child.y_align = Clutter.ActorAlign.CENTER;
+        }
+    }
+
     _alignZone(zone, place) {
         const align = {start: Clutter.ActorAlign.START, center: Clutter.ActorAlign.CENTER,
             end: Clutter.ActorAlign.END}[place];
         zone.x_align = this._vertical ? Clutter.ActorAlign.CENTER : align;
         zone.y_align = this._vertical ? align : Clutter.ActorAlign.CENTER;
-        zone.x_expand = true;
-        zone.y_expand = true;
+        zone.x_expand = this._vertical;
+        zone.y_expand = !this._vertical;
     }
 
     _wireHorizontalScroll(view) {
@@ -949,12 +1123,110 @@ class Bar {
     }
 
     _zone() {
-        return new St.BoxLayout({
+        const zone = new St.BoxLayout({
             orientation: this._actor.orientation,
             x_align: Clutter.ActorAlign.CENTER,
             y_align: Clutter.ActorAlign.CENTER,
-            style: 'spacing: 12px;',
+            style: this._zoneStyle(),
         });
+        return zone;
+    }
+
+    _cornerInset() {
+        if (!this._state.border || this._state.kind === 'dock' || this._state.margin || this._state.length < 100)
+            return 0;
+        return Math.max(0, this._state.radius || 0);
+    }
+
+    _barPadding() {
+        // Narrow rails need room for value labels plus the group's fill padding.
+        // Keep the viewport centred across the full rail, with a small gutter.
+        return {along: 6 + Math.min(this._cornerInset(), 16), cross: 2};
+    }
+
+    _sectionPill(scroll, zone, place) {
+        const plate = new St.DrawingArea({
+            reactive: false, x_expand: true, y_expand: true,
+        });
+        plate.connect('repaint', () => this._paintSectionPill(plate, zone, place));
+        zone.connectObject('notify::allocation', () => plate.queue_repaint(), plate);
+        scroll.clip_to_allocation = false;
+        scroll.x_expand = true;
+        scroll.y_expand = true;
+        const bin = new St.Widget({
+            layout_manager: new Clutter.BinLayout(),
+            clip_to_allocation: false,
+        });
+        bin.add_child(plate);
+        bin.add_child(scroll);
+        bin._bezelPack = scroll;
+        bin._bezelPlate = plate;
+        return bin;
+    }
+
+    _paintSectionPill(area, zone, place) {
+        const cr = area.get_context();
+        try {
+            if (this._state.barOpacity === 0) return;
+            const [sw, sh] = area.get_surface_size();
+            const width = Math.max(1, area.width || sw);
+            const height = Math.max(1, area.height || sh);
+            if (width < 2 || height < 2)
+                return;
+            if (sw > 0 && sh > 0)
+                cr.scale(sw / width, sh / height);
+            const vertical = this._vertical;
+            const along = vertical ? height : width;
+            // Measure the allocated children, not the recursive preferred-size
+            // estimate (or the zone's synthetic alignment padding).
+            const [ax, ay] = area.get_transformed_position();
+            const [aw, ah] = area.get_transformed_size();
+            const scale = vertical ? ah / height : aw / width;
+            const bounds = zone.get_children().filter(child => child.visible).map(child => {
+                const [x, y] = child.get_transformed_position();
+                const [w, h] = child.get_transformed_size();
+                const start = ((vertical ? y : x) - (vertical ? ay : ax)) / (scale || 1);
+                return [start, start + (vertical ? h : w) / (scale || 1)];
+            });
+            if (!bounds.length)
+                return;
+            const inset = 2;
+            const offset = Math.max(inset, Math.min(...bounds.map(b => b[0])) - 6);
+            const end = Math.min(along - inset, Math.max(...bounds.map(b => b[1])) + 6);
+            const span = Math.max(1, end - offset);
+            const shadowInset = Math.max(inset, (Number(this._state.shadow) || 0) / 4 + 1);
+            const rect = vertical
+                ? {x: inset, y: offset, w: Math.max(1, width - inset - shadowInset), h: span}
+                : {x: offset, y: inset, w: span, h: Math.max(1, height - inset - shadowInset)};
+            const radius = Math.min(18, rect.w / 2, rect.h / 2);
+            const round = (x, y, w, h, r) => {
+                cr.newSubPath();
+                cr.arc(x + w - r, y + r, r, -Math.PI / 2, 0);
+                cr.arc(x + w - r, y + h - r, r, 0, Math.PI / 2);
+                cr.arc(x + r, y + h - r, r, Math.PI / 2, Math.PI);
+                cr.arc(x + r, y + r, r, Math.PI, Math.PI * 1.5);
+                cr.closePath();
+            };
+            const depth = Number(this._state.shadow) || 0;
+            if (depth > 0) {
+                cr.setSourceRGBA(0, 0, 0, 0.22);
+                round(rect.x, rect.y + Math.max(1, depth / 4), rect.w, rect.h, radius);
+                cr.fill();
+            }
+            const hex = `${this._theme.bg}`.replace('#', '');
+            const rgb = [0, 2, 4].map(index => parseInt(hex.slice(index, index + 2), 16) / 255);
+            round(rect.x, rect.y, rect.w, rect.h, radius);
+            cr.setSourceRGBA(rgb[0] || 0, rgb[1] || 0, rgb[2] || 0, (this._state.barOpacity ?? 100) / 100);
+            cr.fill();
+        } finally {
+            cr.$dispose();
+        }
+    }
+
+    _zoneStyle(extra = '') {
+        const pills = this._state.sections === 'pills';
+        const pad = pills ? ` padding: ${this._vertical ? '10px 0px' : '0px 10px'};` : '';
+        return `spacing: ${pills ? 8 : 12}px;${pad}${extra}`;
     }
 
     _drag(actor, id) {
@@ -966,6 +1238,9 @@ class Bar {
             if (picked !== actor && !actor.contains(picked))
                 return Clutter.EVENT_PROPAGATE;
             if (id === 'apps' && actor.get_children().some(child => child === picked || child.contains(picked)))
+                return Clutter.EVENT_PROPAGATE;
+            // Extension icons reorder inside the slot. Let that gesture run.
+            if (id === 'indicators' && actor.get_children().some(child => child._bezelRole && (child === picked || child.contains(picked))))
                 return Clutter.EVENT_PROPAGATE;
             this._endDrag();
             let moved = false;
@@ -1114,6 +1389,8 @@ class Bar {
         try {
             if (actor._bezelBalance || actor.visible === false)
                 return 0;
+            if (actor._bezelVertical)
+                return Math.max(0, actor.height || 0);
             if (actor === this._appViewport && this._appsRow) {
                 const inner = this._iconRowSpan(this._appsRow);
                 return raw ? inner : Math.max(0, this._appsLimit(inner) - this._appsLeadingSpace());
@@ -1128,6 +1405,12 @@ class Bar {
                     ? this._appsLimit(inner) - this._appsLeadingSpace() : inner;
             }
             if (actor instanceof St.Button) {
+                const child = actor.child ?? actor.get_child?.();
+                if (child && this._vertical) {
+                    const inner = this._contentSpan(child, depth + 1, raw);
+                    if (inner > 0)
+                        return inner;
+                }
                 const [, size] = this._longPreferred(actor);
                 return size || 0;
             }
@@ -1141,7 +1424,17 @@ class Bar {
                     total += this._contentSpan(child, depth + 1, raw);
                     shown++;
                 }
-                return total + Math.max(0, shown - 1) * this._boxSpacing(actor) +
+                const node = actor.get_theme_node();
+                const padding = actor._bezelGroupPadding
+                    ? (this._vertical ? node.get_vertical_padding() : node.get_horizontal_padding())
+                    : (actor._bezelAlongPad || 0);
+                // Non-scrolling groups must never be sized below their real
+                // preferred width, including wide labels and themed controls.
+                if (actor._bezelGroupPadding && !actor.contains(this._appViewport ?? this._actor)) {
+                    const [, natural] = this._longPreferred(actor);
+                    return Math.max(natural, total + padding);
+                }
+                return total + Math.max(0, shown - 1) * this._boxSpacing(actor) + padding +
                     (!raw && actor === this._appsZone ? this._appsLeadingSpace() : 0);
             }
             const [, size] = this._longPreferred(actor);
@@ -1202,7 +1495,7 @@ class Bar {
         const extra = Math.max(0, footprint - natural);
         const leading = this._appsPlace === 'end' ? extra : this._centerApps ? extra / 2 : 0;
         const length = footprint - leading;
-        if (this._appsZone) {
+        if (this._appsZone && this._state.sections !== 'pills') {
             const side = this._vertical ? 'top' : 'left';
             this._appsZone.style = `spacing: 12px; padding-${side}: ${leading}px;`;
             this._applyAppsAlign(this._appsZone);
@@ -1212,7 +1505,14 @@ class Bar {
         view.clip_to_allocation = true;
         view._bezelCap = length;
         this._applyAppsAlign(view);
-        view.set_size(this._vertical ? cross : length, this._vertical ? length : cross);
+        // The scroll window contains icons, not the surrounding group's padding.
+        // Giving it the full bar thickness feeds that allocation back into the
+        // next preferred-size measurement and grows the bar on every placement.
+        const naturalCross = this._appsRow
+            ? (this._vertical ? this._appsRow.get_preferred_width(-1)[1] : this._appsRow.get_preferred_height(-1)[1])
+            : cross;
+        const fittedCross = Math.max(1, Math.min(cross, naturalCross || cross));
+        view.set_size(this._vertical ? fittedCross : length, this._vertical ? length : fittedCross);
         this._syncAppsScrollRange(length);
         return length + leading;
     }
@@ -1299,10 +1599,16 @@ class Bar {
             const after = index < 0 ? 0 : children.slice(index + 1).reduce((sum, child) => sum + this._contentSpan(child), 0);
             return [before, this._contentSpan(view), after];
         }
-        const cells = this._cells ?? [];
-        if (cells.length === 3)
-            return cells.map(cell => this._contentSpan(cell));
-        return ['start', 'center', 'end'].map(place => this._contentSpan(this._zones?.[place]));
+        return ['start', 'center', 'end'].map(place => {
+            const zone = this._zones?.[place];
+            if (!zone || !zone.visible)
+                return 0;
+            // St knows button padding and the orientation of nested boxes.
+            // Only apps need a recursive measurement of their scroll window.
+            if (zone.contains(this._appViewport ?? this._actor))
+                return this._contentSpan(zone);
+            return this._longPreferred(zone)[1];
+        });
     }
 
     _fitDock(outerW, outerH) {
@@ -1464,25 +1770,6 @@ class Bar {
         }
     }
 
-    _stickOuterEdge() {
-        const place = this._appsPlace;
-        if ((place !== 'start' && place !== 'end') || this._dockContent)
-            return;
-        const cells = this._cells ?? [];
-        if (cells.length < 3)
-            return;
-        const outerPlace = place === 'start' ? 'end' : 'start';
-        const cell = cells[outerPlace === 'end' ? 2 : 0];
-        const zone = this._zones?.[outerPlace];
-        if (!cell || !zone)
-            return;
-        const along = cell._bezelAlong || 0;
-        const need = this._contentSpan(zone);
-        const pad = outerPlace === 'end' ? Math.max(0, Math.round(along - need)) : 0;
-        const side = this._vertical ? 'top' : 'left';
-        zone.style = `spacing: 12px; padding-${side}: ${pad}px;`;
-    }
-
     _place(overrides = null) {
         overrides ??= this._geomDrag?.pending;
         this._layoutApps = overrides && overrides.appsLength != null
@@ -1502,7 +1789,12 @@ class Bar {
             x += left;
         }
         const edge = this._state.edge;
-        const span = overrides?.thickness ?? this._state.thickness;
+        let span = overrides?.thickness ?? this._state.thickness;
+        if (!this._vertical) {
+            const crossPad = this._barPadding();
+            const needed = Math.ceil(this._contentCross() + crossPad.cross * 2 + 8);
+            span = Math.max(span, Math.min(88, needed));
+        }
         let px = x;
         let py = y;
         let w = width;
@@ -1552,22 +1844,59 @@ class Bar {
             this._dockContent.set_size(Math.max(1, w - 12), Math.max(1, h - 12));
         else
             this._dockViewport?.set_size(Math.max(1, w - 12), Math.max(1, h - 12));
-        this._fitDock(Math.max(1, w - 12), Math.max(1, h - 12));
-        const available = (this._vertical ? h : w) - 28;
-        const sizes = horizontalZoneWidths(available, [startSize, centerSize, endSize]);
+        const pad = this._barPadding();
+        const innerAlong = Math.max(1, (this._vertical ? h : w) - pad.along * 2);
+        const innerCross = Math.max(1, (this._vertical ? w : h) - pad.cross * 2);
+        this._fitDock(innerAlong, innerCross);
+        const placed = zonePlacement(innerAlong, [startSize, centerSize, endSize]);
+        const sizes = placed.sizes.map(value => Math.max(0, Math.round(value)));
+        let before = Math.max(0, Math.round(placed.before));
+        let after = Math.max(0, Math.round(placed.after));
+        let drift = Math.round(innerAlong - (sizes[0] + sizes[1] + sizes[2] + before + after));
+        if (drift >= 0)
+            after += drift;
+        else {
+            const take = Math.min(before + after, -drift);
+            const fromAfter = Math.min(after, take);
+            after -= fromAfter;
+            before -= take - fromAfter;
+        }
         for (const [index, cell] of (this._cells ?? []).entries()) {
+            if (!cell)
+                continue;
             const pinned = (this._appsPlace === 'start' || this._appsPlace === 'end')
                 && (cell === this._appViewport || cell.contains?.(this._appViewport));
+            const along = cell.visible === false ? 0 : sizes[index] ?? 0;
+            // Only the cross axis fills the bar. The along size is the content,
+            // so a zone cell never keeps an empty cut beside its colour group.
             cell.x_expand = this._vertical && !pinned;
             cell.y_expand = !this._vertical && !pinned;
-            cell._bezelAlong = sizes[index];
-            cell.set_size(this._vertical ? Math.max(1, w - 12) : sizes[index],
-                this._vertical ? sizes[index] : Math.max(1, h - 12));
+            cell._bezelAlong = along;
+            cell.set_size(this._vertical ? innerCross : along, this._vertical ? along : innerCross);
+            cell._bezelPlate?.queue_repaint();
+            if (!this._vertical)
+                this._centerBarZone(cell);
         }
-        this._stickOuterEdge();
+        if (this._zoneGaps) {
+            const [lead, trail] = this._zoneGaps;
+            const placeGap = (widget, length) => {
+                widget.visible = length >= 1;
+                widget.set_size(this._vertical ? Math.max(1, innerCross) : length,
+                    this._vertical ? length : Math.max(1, innerCross));
+            };
+            placeGap(lead, before);
+            placeGap(trail, after);
+        }
+        // _alignZone already anchors the opposite zone at its outer edge.
+        // Padding a scrollable St.BoxLayout to fill its cell leaves visible
+        // buttons outside its pick region, so they stop receiving clicks.
         this._alignAppsContents();
         this._pinEdgeZones();
         this._layoutEditHandles();
+        if (this._state.border && this._state.kind !== 'dock' && !margin && this._state.length === 100) {
+            this._overlay._frames.get(this._monitor.index)?.setReveal(this._index, edge, span,
+                this._state.autohide ? (this._revealProgress ?? 0) : 1);
+        }
     }
 
     _chosenApps() {
@@ -1960,13 +2289,19 @@ class Bar {
             const target = show ? 1 : 0;
             const frame = this._overlay._frames.get(this._monitor.index);
             const paint = value => {
+                if (this._destroyed || !this._actor?.get_stage())
+                    return;
                 this._revealProgress = value;
-                frame?.setReveal(this._index, this._state.edge, this._state.thickness, value);
+                frame?.setReveal(this._index, this._state.edge, this._vertical ? this._box.width : this._box.height, value);
                 const {width, height} = this._box;
-                this._actor.set_clip(this._state.edge === 'right' ? width * (1 - value) : 0,
-                    this._state.edge === 'bottom' ? height * (1 - value) : 0,
-                    this._vertical ? width * value : width, this._vertical ? height : height * value);
-                this._actor.opacity = Math.round(255 * value);
+                try {
+                    this._actor.set_clip(this._state.edge === 'right' ? width * (1 - value) : 0,
+                        this._state.edge === 'bottom' ? height * (1 - value) : 0,
+                        this._vertical ? width * value : width, this._vertical ? height : height * value);
+                    this._actor.opacity = Math.round(255 * value);
+                } catch {
+                    return;
+                }
                 this._overlay.relayoutPopups(this._monitor.index);
             };
             this._actor.show();
@@ -2012,12 +2347,21 @@ class Bar {
 
     _slideLater() {
         this._later('_hideTimer', 280, () => {
-            if (!this._actor.hover && !this._trigger?.hover && !this._edgeHoverActive && !this._popout && !this._indicatorMenuOpen)
+            if (!this._actor.hover && !this._trigger?.hover && !this._edgeHoverActive && !this._popout && !this._shelfOpen && !this._indicatorMenuOpen)
                 this._slide(false, true);
         });
     }
 
     _module(id, icon) {
+        return moduleView(this, id)._buildModule(moduleType(id), icon);
+    }
+
+    _buildModule(id, icon) {
+        if (id === 'shelf') return shelfFace(this, icon);
+        if (id === 'timer') return this._panelModule(id, timerFace(this, moduleFeatures(this, id), icon), () => expandedModule(this, id));
+        if (id === 'shortcuts') return this._panelModule(id, shortcutFace(this, moduleFeatures(this, id), icon), () => expandedModule(this, id));
+        if (['shortcuts', 'timer', 'devices', 'input'].includes(id)) return this._panelModule(id, this._button(GROUP_ITEMS[id].icon, icon), () => expandedModule(this, id));
+        if (id === 'notifications') return this._panelModule(id, this._button('preferences-system-notifications-symbolic', icon), () => buildNotificationCenter(this));
         switch (id) {
         case 'logo': {
             const mark = new St.Icon({
@@ -2055,28 +2399,23 @@ class Bar {
         case 'window':
             return this._window(icon);
         case 'weather':
-            return weatherWidget(this, true);
+            return this._panelModule('weather', this._weatherFace(icon), () => weatherWidget(this));
         case 'date':
             return this._date();
         case 'clock':
             return this._clock();
+        case 'output':
+        case 'bluetooth':
+        case 'brightness':
+            return this._panelModule(id, this._button(GROUP_ITEMS[id].icon, icon), () => this._groupItem({module: id, view: 'full'}));
         case 'volume':
         case 'network':
         case 'battery':
             return this._statusGroup(icon, [id]);
-        case 'power': {
-            const button = this._button('system-shutdown-symbolic', icon);
-            button._activate = () => this._toggle('power', button, () => this._session());
-            this._hoverDrawer('power', button, () => this._session(),
-                this._state.powerButtonHover && this._state.powerStyle !== 'rail');
-            return button;
-        }
-        case 'dashboard': {
-            const button = this._button('view-paged-symbolic', icon);
-            button._activate = () => this._toggle('dashboard', button, () => this._dashboard());
-            this._hoverDrawer('dashboard', button, () => this._dashboard(), this._state.dashboardHover);
-            return button;
-        }
+        case 'power':
+            return this._panelModule('power', this._button('system-shutdown-symbolic', icon), () => this._session());
+        case 'dashboard':
+            return this._panelModule('dashboard', this._button('view-paged-symbolic', icon), () => this._dashboard());
         case 'screenshot': {
             const button = this._button('camera-photo-symbolic', icon);
             button.accessible_name = 'Screenshot';
@@ -2084,6 +2423,7 @@ class Bar {
                 this._close();
                 openScreenshot().catch(error => console.warn(`Bezel: screenshot UI unavailable: ${error.message}`));
             };
+            this._hoverDrawer('screenshot', button, () => moduleSection(this, 'screenshot'), this._hoverFor('screenshot'));
             return button;
         }
         case 'dnd':
@@ -2092,34 +2432,183 @@ class Bar {
             return this._switch('nightlight', icon, 'night-light-symbolic', 'night-light-disabled-symbolic', 'Night Light', nightLightControl());
         case 'dark':
             return this._switch('dark', icon, 'weather-clear-night-symbolic', 'weather-clear-symbolic', 'Dark style', darkStyleControl());
-        case 'performance': {
-            const button = this._button('power-profile-balanced-symbolic', icon);
-            button.accessible_name = 'Performance';
-            button._activate = () => this._toggle('performance', button, () => performanceMenu(this));
-            return button;
-        }
-        case 'vpn': {
-            const button = this._button('network-vpn-symbolic', icon);
-            button.accessible_name = 'VPN';
-            button._activate = () => this._toggle('vpn', button, () => vpnMenu(this));
-            return button;
-        }
-        case 'settings': {
-            const button = this._button('preferences-system-symbolic', icon);
-            button.accessible_name = 'Settings';
-            button._activate = () => this._toggle('settings', button, () => settingsMenu(this));
-            return button;
-        }
+        case 'performance':
+            return this._panelModule('performance', buildValueButton(this, 'performance', 'power-profile-balanced-symbolic', icon, 'Performance'), () => expandedModule(this, 'performance'));
+        case 'vpn':
+            return this._panelModule('vpn', buildValueButton(this, 'vpn', 'network-vpn-symbolic', icon, 'VPN'), () => vpnMenu(this));
+        case 'settings':
+            return this._panelModule('settings', this._button('preferences-system-symbolic', icon), () => settingsMenu(this));
+        case 'media':
+            return this._panelModule('media', buildMediaFace(this, icon), () => this._mediaCard(true, 72));
+        case 'microphone':
+            return this._panelModule('microphone', buildMicFace(this, icon), () => this._groupItem({module: 'microphone'}));
+        case 'clipboard':
+            return this._panelModule('clipboard', this._button('edit-paste-symbolic', icon), () => buildClipboardPanel(this));
+        case 'keyboard':
+            return buildKeyboardFace(this, icon);
+        case 'awake':
+            return buildAwakeFace(this, icon);
+        case 'indicators':
+            return this._indicatorsFace();
         default:
             return isSpacer(id) ? this._spacer(id) : null;
         }
     }
 
-    _switch(_id, icon, onIcon, offIcon, name, control) {
+    _indicatorsFace() {
+        // The module stays in the layout so its place is remembered. While the
+        // switch is off, leave the icons on the GNOME panel and take no slot.
+        if (!this._overlay._settings.get_boolean('panel-indicators'))
+            return null;
+        const box = new St.BoxLayout({
+            orientation: this._actor.orientation,
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.CENTER,
+            style: `spacing: ${this._overlay._settings.get_int('indicator-spacing')}px;`,
+        });
+        this._indicatorSlot = box;
+        return box;
+    }
+
+    _sideways(color, fontSize) {
+        const area = new St.DrawingArea({
+            reactive: false,
+            clip_to_allocation: true,
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        area._bezelVertical = true;
+        area._bezelFont = fontSize;
+        area._bezelColor = color;
+        area._bezelString = '';
+        area.connect('repaint', () => this._paintSideways(area));
+        this._fitSideways(area, '');
+        return area;
+    }
+
+    _fitSideways(area, text) {
+        if (!area?._bezelVertical)
+            return;
+        const next = text ?? '';
+        const font = area._bezelFont || 13;
+        const fitted = next ? area.height > 0 : area.height === 0;
+        if (area._bezelString === next && area._bezelFit === font && fitted)
+            return;
+        area._bezelString = next;
+        area._bezelFit = font;
+        if (!next) {
+            area._bezelLimit = false;
+            area.width = font + 4;
+            area.height = 0;
+            area.queue_repaint();
+            return;
+        }
+        const probe = new St.Label({
+            text: next,
+            style: `font-size: ${font}px; font-weight: 600;`,
+        });
+        probe.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+        const [, natW] = probe.get_preferred_width(-1);
+        const [, natH] = probe.get_preferred_height(-1);
+        probe.destroy();
+        const limit = Math.max(font * 7, 128);
+        const pixels = Math.ceil(natW || next.length * font * 0.62);
+        const length = Math.max(Math.ceil(natH) + 2, Math.min(pixels, limit));
+        const thick = Math.max(Math.ceil(natH) + 4, font + 4);
+        area._bezelLimit = pixels > limit + 1;
+        area.width = thick;
+        area.height = length;
+        area.queue_repaint();
+    }
+
+    _paintSideways(area) {
+        const cr = area.get_context();
+        const text = area._bezelString || '';
+        if (!text) {
+            cr.$dispose();
+            return;
+        }
+        try {
+            const [sw, sh] = area.get_surface_size();
+            const width = Math.max(1, area.width || 1);
+            const height = Math.max(1, area.height || 1);
+            if (sw > 0 && sh > 0 && (Math.abs(sw - width) > 1 || Math.abs(sh - height) > 1))
+                cr.scale(sw / width, sh / height);
+            const layout = PangoCairo.create_layout(cr);
+            const font = area._bezelFont || 13;
+            const description = new Pango.FontDescription();
+            description.set_family('Sans');
+            description.set_absolute_size(font * Pango.SCALE);
+            description.set_weight(Pango.Weight.SEMIBOLD);
+            layout.set_font_description(description);
+            layout.set_text(text, -1);
+            if (area._bezelLimit) {
+                layout.set_width(Math.max(1, height - 2) * Pango.SCALE);
+                layout.set_ellipsize(Pango.EllipsizeMode.END);
+            } else {
+                layout.set_ellipsize(Pango.EllipsizeMode.NONE);
+            }
+            const hex = `${area._bezelColor || '#cdd6f4'}`.replace('#', '');
+            const rgb = [0, 2, 4].map(index => parseInt(hex.slice(index, index + 2), 16) / 255);
+            cr.setSourceRGB(rgb[0] || 1, rgb[1] || 1, rgb[2] || 1);
+            const [, textHeight] = layout.get_pixel_size();
+            const glyph = textHeight || font;
+            const offset = Math.max(0, (width - glyph) / 2);
+            // Start the string at the icon and run downward, so the slot
+            // is only as long as the text and there is no gap above it.
+            cr.translate(offset + glyph, 0);
+            cr.rotate(Math.PI / 2);
+            PangoCairo.show_layout(cr, layout);
+        } finally {
+            cr.$dispose();
+        }
+    }
+
+    _hoverFor(id) {
+        const module = this._state.modules.find(item => item.id === id);
+        const group = module?.group ? barGroups(this._state).find(item => item.id === module.group) : null;
+        return hoverEnabled(module, group, this._overlay._settings);
+    }
+
+    _panelModule(id, button, build) {
+        if (!button)
+            return null;
+        button._activate = () => this._toggle(id, button, build);
+        this._hoverDrawer(id, button, build, this._hoverFor(id));
+        return button;
+    }
+
+    _weatherFace(size) {
+        const look = moduleLook(this._state.modules.find(item => item.id === 'weather'), this._state);
+        const row = new St.BoxLayout({
+            orientation: this._vertical ? Clutter.Orientation.VERTICAL : Clutter.Orientation.HORIZONTAL,
+            style: 'spacing: 4px;', x_align: Clutter.ActorAlign.CENTER,
+        });
+        const icon = new St.Icon({icon_size: size, style: `color: ${this._theme.accent};`});
+        const text = label(this._theme.fg, Math.max(11, Math.round(size * 0.55)));
+        if (look.icon)
+            row.add_child(icon);
+        if (look.value)
+            row.add_child(text);
+        const button = new St.Button({reactive: true, child: row, x_align: Clutter.ActorAlign.CENTER});
+        const unsubscribe = this._overlay.weather.subscribe(() => {
+            const summary = this._overlay.weather.summary;
+            icon.icon_name = summary.icon;
+            text.text = railTemp(summary.compact);
+            button.accessible_name = summary.text;
+            if (this._box) this._place();
+        });
+        button.connect('destroy', unsubscribe);
+        return button;
+    }
+
+    _switch(id, icon, onIcon, offIcon, name, control) {
         if (!control)
             return null;
         const button = this._button(offIcon, icon);
-        return bindToggle(button, {onIcon, offIcon, name, ...control});
+        bindToggle(button, {onIcon, offIcon, name, ...control});
+        this._hoverDrawer(id, button, () => moduleSection(this, id), this._hoverFor(id));
+        return button;
     }
 
     _spacer(id) {
@@ -2140,20 +2629,25 @@ class Bar {
 
     _cluster(members, icon) {
         const ids = members.map(item => item.id);
-        if (ids.length === 1)
-            return this._module(ids[0], icon);
+        const group = barGroups(this._state).find(group => group.id === members[0]?.group);
+        if (group?.popout) return this._customGroupFace(members, group, icon);
+        if (group && ids.some(id => id !== moduleType(id) || ['output', 'bluetooth', 'brightness'].includes(id)))
+            return this._customGroupFace(members, {...group, popout: groupLayoutPreset('stacked', ids)}, icon);
+        if (ids.length === 1) {
+            const face = this._module(ids[0], icon);
+            if (face)
+                this._wire(face);
+            return face;
+        }
         const panel = () => this._groupPanel(ids);
         const popoutId = this._groupPopoutId(ids);
-        const hover = popoutId === 'clock' ? this._state.clockHover
-            : popoutId === 'power' ? this._state.powerButtonHover && this._state.powerStyle !== 'rail'
-            : popoutId === 'dashboard' ? this._state.dashboardHover
-            : this._state.statusHover;
+        const hover = ids.some(id => this._hoverFor(id));
         const faces = [];
         for (const id of ids) {
             const face = this._groupFace(id, ids, icon);
             if (!face)
                 continue;
-            if (!isSpacer(id) && !['workspaces', 'apps', 'window', 'logo'].includes(id)) {
+            if (!isSpacer(id) && !['workspaces', 'logo'].includes(id)) {
                 face._activate = () => this._toggle(popoutId, face, panel);
                 this._hoverDrawer(popoutId, face, panel, hover);
             }
@@ -2172,7 +2666,106 @@ class Bar {
         return box;
     }
 
+    _customGroupFace(members, group, icon) {
+        const box = new St.BoxLayout({orientation: this._actor.orientation, style: 'spacing: 6px;',
+            x_align: Clutter.ActorAlign.CENTER});
+        const ids = group.face === 'single' ? [null] : members.map(item => item.id);
+        for (const id of ids) {
+            const direct = id && (group.clicks?.[id] === 'direct' || ['apps', 'workspaces'].includes(moduleType(id)));
+            const face = direct ? this._module(id, icon) : id && ['clock', 'date', 'weather', 'volume', 'network', 'battery'].includes(id)
+                ? this._groupFace(id, [id], icon) : id ? this._groupFace(id, [id], icon) : this._button(group.icon || 'view-grid-symbolic', icon);
+            if (!face) continue;
+            if (!direct) {
+                const panel = () => buildGroupPopout(this, group, group.clicks?.[id] === 'tab' ? id : null);
+                face._activate = () => this._toggle(`group:${group.id}`, face, panel);
+                face.accessible_name = id ? GROUP_ITEMS[moduleType(id)]?.title || id : group.name;
+                this._hoverDrawer(`group:${group.id}`, face, panel, typeof group.hover === 'boolean' ? group.hover : members.some(member => this._hoverFor(member.id)));
+            }
+            this._wire(face); box.add_child(face);
+        }
+        return box;
+    }
+
+    _groupItemAvailable(id) {
+        if (['output', 'network', 'bluetooth'].includes(id)) return deviceAvailable(id);
+        if (id === 'brightness') return this._overlay.services.hasBrightness;
+        if (id === 'battery') return this._overlay.services.batteryInfo.present;
+        return true;
+    }
+
+    _notificationsAction() {
+        return this._action('Notifications', 'preferences-system-notifications-symbolic', () => this._open('notifications', this._actor, () => buildNotificationCenter(this)));
+    }
+
+    _groupItem(item) {
+        if (item.instance && item.instance !== this._moduleInstance) return moduleView(this, item.instance)._groupItem({...item, instance: null});
+        const id = item.module;
+        const features = moduleFeatures(this, id, item.options);
+        if (id === 'shelf') return shelfPanel(this, features);
+        if (['shortcuts', 'timer', 'devices', 'input', 'performance'].includes(id)) return expandedModule(this, id, item.options);
+        if (id === 'notifications') return features.embedded ? buildNotificationCenter(this, true) : this._notificationsAction();
+        const services = this._overlay.services;
+        const box = () => new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 8px;', x_expand: true});
+        if (['output', 'network', 'bluetooth'].includes(id)) {
+            const root = box();
+            if (id === 'network' && !item.groupHeader) {
+                const line = this._networkPopoutLine(item.options);
+                if (line) root.add_child(line);
+            }
+            root.add_child(buildDevicePanel(this, id, item.options));
+            return root;
+        }
+        if (id === 'logo' || id === 'apps') return this._action('Applications', GROUP_ITEMS.logo.icon, () => this._overlay.toggleLauncher(this));
+        if (id === 'dashboard') return this._action('Dashboard', GROUP_ITEMS.dashboard.icon, () => this._open('dashboard', this._actor, () => this._dashboard()));
+        if (item.view === 'action' && id === 'power') return this._action('Power menu', GROUP_ITEMS.power.icon, () => this._open('power', this._actor, () => this._session()));
+        if (item.view === 'action' && id === 'settings') return this._action('Settings', GROUP_ITEMS.settings.icon, () => this._overlay.openSettings());
+        if (id === 'volume' || id === 'brightness') {
+            const root = buildLevelControl(this, id, true, item.options);
+            if (id === 'volume' && features.showOutputDevices) root.add_child(outputDevices(this));
+            return root;
+        }
+        if (id === 'clock' || id === 'date') {
+            const root = box();
+            const value = label(this._theme.fg, id === 'clock' ? 26 : 16);
+            root.add_child(value);
+            const clockBar = readBars(this._overlay._settings)[this._index];
+            const desktopClock = new Gio.Settings({schema_id: 'org.gnome.desktop.interface'});
+            const twelve = barTimeFormat(clockBar, desktopClock.get_string('clock-format')) === '12h';
+            const sharedClock = clockBar?.modules.find(module => module.id === (this._moduleInstance || 'clock'));
+            const seconds = (sharedClock ? sharedClock.showSeconds : item.options?.showSeconds) ?? clockBar?.clockSeconds === true;
+            const update = () => { value.text = GLib.DateTime.new_now_local().format(id === 'date' ? DATE_FORMATS[barDateFormat(clockBar, this._overlay._settings)].format : timePattern(twelve, seconds)) || ''; return GLib.SOURCE_CONTINUE; };
+            update();
+            const timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, update);
+            this._popupCleanups.push(() => GLib.source_remove(timer));
+            return root;
+        }
+        if (id === 'calendar') return this._monthGrid(features);
+        if (id === 'weather') return weatherWidget(this, features);
+        if (id === 'power') return this._session(features);
+        if (id === 'media') return this._mediaCard(true, 72, features);
+        if (id === 'microphone') { const root = buildMicPanel(this, item.options); if (features.showInputDevices) root.add_child(inputDevices(this)); return root; }
+        if (id === 'clipboard') return buildClipboardPanel(this);
+        if (id === 'keyboard') return buildKeyboardPanel(this);
+        if (id === 'awake') {
+            const toggle = new St.Button({can_focus: true, style_class: 'bezel-action'});
+            this._popupCleanups.push(services.subscribe(() => { toggle.label = `Keep awake · ${services.awake ? 'On' : 'Off'}`; }));
+            toggle.connect('clicked', () => services.setAwake(!services.awake)); return toggle;
+        }
+        if (id === 'battery') {
+            const value = label(this._theme.fg, 14, services.batteryInfo.text);
+            this._popupCleanups.push(services.subscribe(() => { value.text = services.batteryInfo.text; })); return value;
+        }
+        if (id === 'window') return label(this._theme.fg, 14, global.display.focus_window?.get_title() || 'No focused window');
+        if (id === 'workspaces') {
+            const root = box(); const manager = global.workspace_manager;
+            for (let i = 0; i < manager.n_workspaces; i++) root.add_child(this._action(`Workspace ${i + 1}`, GROUP_ITEMS.workspaces.icon, () => manager.get_workspace_by_index(i)?.activate(global.get_current_time())));
+            return root;
+        }
+        return moduleSection(this, id);
+    }
+
     _groupFace(id, ids, icon) {
+        if (id !== moduleType(id)) return this._module(id, icon);
         if (['clock', 'date', 'weather'].includes(id)) {
             if (id !== ids.find(item => ['clock', 'date', 'weather'].includes(item)))
                 return null;
@@ -2221,15 +2814,39 @@ class Bar {
         const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 14px;'});
         if (ids.some(id => id === 'clock' || id === 'date'))
             box.add_child(this._calendar(ids));
-        if (ids.some(id => ['volume', 'network', 'battery'].includes(id)))
-            box.add_child(this._statusPanel());
+        if (ids.some(id => ['volume', 'network', 'battery'].includes(id))) {
+            const layout = sliderLayout(this._state.modules.find(item => item.id === 'volume'), this._overlay._settings);
+            if (layout === 'drawer')
+                box.add_child(this._statusPanel());
+            else {
+                if (ids.includes('network')) {
+                    const line = this._networkPopoutLine();
+                    if (line)
+                        box.add_child(line);
+                }
+                box.add_child(layout === 'stack' ? buildStacked(this) : buildOsd(this));
+                box.add_child(buildDeviceControls(this));
+            }
+        }
         if (ids.includes('power'))
             box.add_child(this._session());
         if (ids.includes('weather') && !ids.some(id => id === 'clock' || id === 'date'))
-            box.add_child(weatherWidget(this, {forecast: false}));
+            box.add_child(weatherWidget(this));
+        if (ids.includes('notifications') && !ids.some(id => id === 'clock' || id === 'date')) box.add_child(this._groupItem({module: 'notifications'}));
+        if (ids.includes('media'))
+            box.add_child(this._mediaCard(true, 72));
+        if (ids.includes('microphone'))
+            box.add_child(this._groupItem({module: 'microphone'}));
+        if (ids.includes('clipboard'))
+            box.add_child(buildClipboardPanel(this));
+        if (ids.includes('keyboard'))
+            box.add_child(buildKeyboardPanel(this));
         if (ids.includes('dashboard'))
             box.add_child(this._dashboard());
-        for (const id of ['screenshot', 'dnd', 'nightlight', 'dark', 'performance', 'vpn', 'settings']) {
+        for (const id of ['shortcuts', 'timer', 'devices', 'input']) if (ids.includes(id)) box.add_child(expandedModule(this, id));
+        if (ids.includes('shelf')) box.add_child(shelfPanel(this));
+        if (ids.includes('performance')) box.add_child(expandedModule(this, 'performance'));
+        for (const id of ['screenshot', 'dnd', 'nightlight', 'dark', 'vpn', 'settings']) {
             if (ids.includes(id)) {
                 const section = moduleSection(this, id);
                 if (section)
@@ -2260,21 +2877,35 @@ class Bar {
             style: 'spacing: 4px;',
         });
         const manager = global.workspace_manager;
+        const style = this._state.modules.find(item => item.id === 'workspaces')?.workspaceStyle || 'pills';
         const paint = () => {
             box.destroy_all_children();
             const active = manager.get_active_workspace_index();
             for (let i = 0; i < manager.get_n_workspaces(); i++) {
                 const selected = i === active;
-                const button = new St.Button({
-                    can_focus: true, style_class: 'bezel-workspace',
-                    accessible_name: `Workspace ${i + 1}${selected ? ', active' : ''}`,
-                    child: new St.Widget({
+                const workspace = manager.get_workspace_by_index(i);
+                let child;
+                if (style === 'numbers')
+                    child = label(selected ? this._theme.accent : this._theme.muted, 13, `${i + 1}`);
+                else if (style === 'icons') {
+                    const win = workspace?.list_windows().find(item => !item.skip_taskbar && item.has_focus?.())
+                        ?? workspace?.list_windows().find(item => !item.skip_taskbar);
+                    const app = win ? Shell.WindowTracker.get_default().get_window_app(win) : null;
+                    child = app ? app.create_icon_texture(this._state.iconSize) : label(this._theme.muted, 13, `${i + 1}`);
+                    if (!selected && child.opacity !== undefined)
+                        child.opacity = 160;
+                } else
+                    child = new St.Widget({
                         width: !this._vertical && selected ? 22 : 8,
                         height: this._vertical && selected ? 22 : 8,
                         style: `background-color: ${selected ? this._theme.accent : this._theme.muted}; border-radius: 99px;`,
-                    }),
+                    });
+                const button = new St.Button({
+                    can_focus: true, style_class: 'bezel-workspace',
+                    accessible_name: `Workspace ${i + 1}${selected ? ', active' : ''}`,
+                    child,
                 });
-                button.connect('clicked', () => manager.get_workspace_by_index(i)?.activate(global.get_current_time()));
+                button.connect('clicked', () => workspace?.activate(global.get_current_time()));
                 box.add_child(button);
             }
         };
@@ -2293,20 +2924,39 @@ class Bar {
     }
 
     _window(size) {
+        const look = moduleLook(this._state.modules.find(item => item.id === 'window'), this._state);
+        const row = new St.BoxLayout({
+            orientation: this._vertical ? Clutter.Orientation.VERTICAL : Clutter.Orientation.HORIZONTAL,
+            style: 'spacing: 6px;', x_align: Clutter.ActorAlign.CENTER,
+        });
         const icon = new St.Icon({
             icon_name: 'window-symbolic',
             icon_size: size,
             style: `color: ${this._theme.fg};`,
         });
+        const title = !look.value ? null : this._vertical ? this._sideways(this._theme.fg, 13) : label(this._theme.fg, 13);
+        if (title && !this._vertical) {
+            title.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+            title.width = 280;
+        }
+        if (look.icon)
+            row.add_child(icon);
+        if (title)
+            row.add_child(title);
         const button = new St.Button({
             reactive: true,
-            child: icon,
+            child: row,
             x_align: Clutter.ActorAlign.CENTER,
         });
         const paint = () => {
             const win = global.display.focus_window;
             const app = win ? Shell.WindowTracker.get_default().get_window_app(win) : null;
             icon.gicon = app?.get_app_info()?.get_icon() ?? null;
+            const text = win?.get_title() ?? '';
+            if (title?._bezelVertical)
+                this._fitSideways(title, text);
+            else if (title)
+                title.text = text;
             button.accessible_name = win?.get_title() ?? 'Focused app';
             button.visible = Boolean(win);
         };
@@ -2322,6 +2972,11 @@ class Bar {
                 this._open(`app:${app.get_id()}`, button, () => this._appMenu(`app:${app.get_id()}`, app));
             return Clutter.EVENT_STOP;
         });
+        this._hoverDrawer('window', button, () => {
+            const win = global.display.focus_window;
+            const app = win ? Shell.WindowTracker.get_default().get_window_app(win) : null;
+            return app?.get_id() ? this._appMenu(`app:${app.get_id()}`, app) : label(this._theme.muted, 13, 'No focused window');
+        }, this._hoverFor('window'));
         return button;
     }
 
@@ -2372,12 +3027,14 @@ class Bar {
 
     _app(id, size) {
         const app = Shell.AppSystem.get_default().lookup_app(id.slice(4));
-        const content = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 3px;'});
+        const content = new St.Widget({width: size, height: size, layout_manager: new Clutter.BinLayout()});
         content.add_child(app ? app.create_icon_texture(size) : new St.Icon({icon_name: 'application-x-executable-symbolic', icon_size: size}));
-        const indicator = new St.Widget({height: 3, width: 14, x_align: Clutter.ActorAlign.CENTER,
+        const indicator = new St.Widget({height: 3, width: this._state.appIndicator === 'dot' ? 3 : 14, x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.END, x_expand: true, y_expand: true, translation_y: 5,
             style: `background-color: ${this._theme.accent}; border-radius: 3px;`});
-        indicator.visible = Boolean(app?.get_windows().length);
+        indicator.visible = this._state.appIndicator !== 'none' && Boolean(app?.get_windows().length);
         content.add_child(indicator);
+        content._bezelRunningIndicator = indicator;
         const button = new St.Button({child: content, track_hover: true, x_align: Clutter.ActorAlign.CENTER,
             style: 'padding: 5px; border-radius: 12px;',
             accessible_name: app?.get_name() ?? id.slice(4)});
@@ -2402,7 +3059,7 @@ class Bar {
         });
         button.connect('notify::hover', () => {
             this._cancel('_appHover');
-            if (button.hover && !this._state.editMode)
+            if (button.hover && !this._state.editMode && this._hoverFor('apps'))
                 this._later('_appHover', this._state.hoverDelay + 150, () => this._open(id, button, () => this._appMenu(id, app), null, true));
             else
                 this._closeSoon();
@@ -2454,7 +3111,7 @@ class Bar {
         this._fillClock(column, button, ids);
         const panel = () => this._groupPanel(ids);
         button._activate = () => this._toggle('clock', button, panel);
-        this._hoverDrawer('clock', button, panel, this._state.clockHover);
+        this._hoverDrawer('clock', button, panel, this._hoverFor(ids.includes('date') && !ids.includes('clock') ? 'date' : 'clock'));
         return button;
     }
 
@@ -2482,7 +3139,7 @@ class Bar {
         const paint = () => {
             const bar = readBars(this._overlay._settings)[this._index];
             const twelve = barTimeFormat(bar, clockSettings.get_string('clock-format')) === '12h';
-            const seconds = bar?.clockSeconds === true;
+            const seconds = bar?.modules.find(item => item.id === (this._moduleInstance || 'clock'))?.showSeconds ?? bar?.clockSeconds === true;
             if (ids.includes('clock')) {
                 const shown = (GLib.DateTime.new_now_local().format(timePattern(twelve, seconds)) ?? '').replace(/^0/, '');
                 const hour = (GLib.DateTime.new_now_local().format(twelve ? '%I' : '%H') ?? '').replace(/^0/, '');
@@ -2516,11 +3173,14 @@ class Bar {
             this._signals.push([clockSettings, clockSettings.connect('changed::clock-format', paint)]);
         if (ids.includes('date') && this._overlay._settings.settings_schema.has_key('date-format'))
             this._signals.push([this._overlay._settings, this._overlay._settings.connect('changed::date-format', paint)]);
-        this._timers.add(GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, readBars(this._overlay._settings)[this._index]?.clockSeconds ? 1 : 10, () => {
+        this._timers.add(GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
             paint();
             return GLib.SOURCE_CONTINUE;
         }));
         if (showWeather) {
+            const look = moduleLook(this._state.modules.find(item => item.id === 'weather'), this._state);
+            weatherIcon.visible = look.icon;
+            temperature.visible = look.value;
             const unsubscribe = this._overlay.weather.subscribe(() => {
                 const weather = this._overlay.weather.summary;
                 weatherIcon.icon_name = weather.icon;
@@ -2533,26 +3193,30 @@ class Bar {
 
     _fillStatusIcons(box, button, ids, size) {
         const icons = {};
-        const percent = label(this._theme.fg, 12);
+        const values = {};
         for (const id of ids) {
-            icons[id] = new St.Icon({icon_size: size, style: `color: ${this._theme.fg};`});
-            box.add_child(icons[id]);
-            if (id === 'battery')
-                box.add_child(percent);
+            const look = moduleLook(this._state.modules.find(item => item.id === id), this._state);
+            if (look.icon) {
+                icons[id] = new St.Icon({icon_size: size, style: `color: ${this._theme.fg};`});
+                box.add_child(icons[id]);
+            }
+            if (look.value) {
+                values[id] = id === 'network' && this._vertical ? this._sideways(this._theme.fg, 12) : readingLabel(this._theme.fg);
+                box.add_child(values[id]);
+            }
         }
-        if (!icons.battery)
-            box.add_child(percent);
         this._cleanups.push(this._overlay.services.subscribe(() => {
             const services = this._overlay.services;
             if (icons.volume)
                 icons.volume.icon_name = services.volumeIcon;
+            this._setReading(values.volume, services.stream?.is_muted ? 'Muted' : `${Math.round(services.volume * 100)}%`);
             if (icons.network)
                 icons.network.icon_name = services.networkInfo.icon;
-            percent.visible = Boolean(icons.battery && this._state.batteryPercentage && services.batteryInfo.present);
-            percent.text = `${services.batteryInfo.percent}%`;
+            this._setReading(values.network, services.networkInfo.short);
+            this._setReading(values.battery, services.batteryInfo.present ? `${services.batteryInfo.percent}%` : 'AC');
             if (icons.battery) {
                 icons.battery.icon_name = services.batteryInfo.icon;
-                icons.battery.visible = services.batteryInfo.present;
+                icons.battery.visible = services.batteryInfo.present || !values.battery;
             }
         }));
     }
@@ -2562,36 +3226,84 @@ class Bar {
         const box = new St.BoxLayout({orientation: this._actor.orientation, style: 'spacing: 10px;'});
         const button = new St.Button({child: box, track_hover: true, accessible_name: 'Quick controls'});
         const icons = {};
+        const values = {};
         for (const id of wanted) {
-            icons[id] = new St.Icon({icon_size: size, style: `color: ${this._theme.fg};`});
-            box.add_child(icons[id]);
+            const look = moduleLook(this._state.modules.find(item => item.id === id), this._state);
+            if (look.icon) {
+                icons[id] = new St.Icon({icon_size: size, style: `color: ${this._theme.fg};`});
+                box.add_child(icons[id]);
+            }
+            if (look.value) {
+                values[id] = id === 'network' && this._vertical ? this._sideways(this._theme.fg, 12) : readingLabel(this._theme.fg);
+                box.add_child(values[id]);
+            }
         }
-        const percent = label(this._theme.fg, 12);
-        box.add_child(percent);
         const services = this._overlay.services;
         this._cleanups.push(services.subscribe(() => {
             if (icons.volume)
                 icons.volume.icon_name = services.volumeIcon;
+            this._setReading(values.volume, services.stream?.is_muted ? 'Muted' : `${Math.round(services.volume * 100)}%`);
             if (icons.network)
                 icons.network.icon_name = services.networkInfo.icon;
-            percent.visible = Boolean(icons.battery && this._state.batteryPercentage && services.batteryInfo.present);
-            percent.text = `${services.batteryInfo.percent}%`;
+            this._setReading(values.network, services.networkInfo.short);
+            this._setReading(values.battery, services.batteryInfo.present ? `${services.batteryInfo.percent}%` : 'AC');
             button.accessible_name = `${services.networkInfo.text}; ${services.batteryInfo.text}`;
             if (icons.battery) {
                 icons.battery.icon_name = services.batteryInfo.icon;
-                icons.battery.visible = services.batteryInfo.present;
+                icons.battery.visible = services.batteryInfo.present || !values.battery;
             }
         }));
-        button._activate = () => this._toggle('status', button, () => this._statusPanel());
+        const layout = sliderLayout(this._state.modules.find(item => item.id === 'volume'), this._overlay._settings);
+        const openId = layout === 'edge' ? 'osd' : 'status';
+        const build = () => {
+            if (wanted.length === 1 && (wanted[0] !== 'volume' || layout === 'drawer'))
+                return this._groupItem({module: wanted[0], view: 'full'});
+            const body = layout === 'edge' ? buildOsd(this) : layout === 'stack' ? buildStacked(this) : this._statusPanel();
+            if (layout === 'drawer' || !wanted.includes('network'))
+                return body;
+            const line = this._networkPopoutLine();
+            if (!line)
+                return body;
+            const wrap = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 12px;'});
+            wrap.add_child(line);
+            wrap.add_child(body);
+            return wrap;
+        };
+        button._activate = () => this._toggle(openId, button, build);
         button.connect('scroll-event', (_actor, event) => {
             services.setVolume(services.volume - scrollStep(event) * 0.05);
             return Clutter.EVENT_STOP;
         });
-        if (this._state.sliderStyle === 'edge')
-            this._hoverDrawer('osd', button, () => buildOsd(this), this._state.statusHover);
-        else
-            this._hoverDrawer('status', button, () => this._statusPanel(), this._state.statusHover);
+        this._hoverDrawer(openId, button, build, wanted.some(id => this._hoverFor(id)));
         return button;
+    }
+
+    _setReading(actor, text) {
+        if (actor?._bezelVertical) {
+            if (actor._bezelString === text)
+                return;
+            this._fitSideways(actor, text);
+            if (this._box)
+                this._place();
+            return;
+        }
+        if (!actor || actor.text === text)
+            return;
+        actor.text = text;
+        if (this._box)
+            this._place();
+    }
+
+    _networkPopoutLine(options = null) {
+        const module = this._state.modules.find(item => item.id === 'network') || {id: 'network', ...options};
+        if (!switchOn(module, this._state, 'popValue'))
+            return null;
+        const name = label(this._theme.fg, 14, '');
+        this._popupCleanups.push(this._overlay.services.subscribe(() => {
+            name.text = this._overlay.services.networkInfo.text;
+            name.visible = Boolean(name.text);
+        }));
+        return name;
     }
 
     _hoverDrawer(id, button, build, enabled) {
@@ -2601,7 +3313,7 @@ class Bar {
             this._cancel(timer);
             if (button.hover && enabled && !this._state.editMode && !Main.overview.visible) {
                 this._later(timer, this._state.hoverDelay, () => {
-                    if (button.hover && !Main.overview.visible && this._popoutId !== id)
+                    if (button.hover && !Main.overview.visible && (this._popoutId !== id || this._popoutInstance !== (this._moduleInstance || null)))
                         this._open(id, button, build, null, true);
                 });
             } else {
@@ -2611,7 +3323,7 @@ class Bar {
     }
 
     _toggle(id, anchor, build) {
-        if (this._popoutId === id)
+        if (this._popoutId === id && this._popoutInstance === (this._moduleInstance || null))
             this._close(true);
         else
             this._open(id, anchor, build);
@@ -2627,7 +3339,7 @@ class Bar {
                 this._animatePopup(1);
             return;
         }
-        if (hover && this._overlay._bars.some(bar => bar !== this && bar._containsPointer()))
+        if (hover && this._overlay._bars.some(bar => bar !== (this._moduleOwner || this) && bar._containsPointer()))
             return;
         for (const bar of this._overlay._bars)
             bar._close();
@@ -2635,13 +3347,15 @@ class Bar {
         this._anchor = anchor;
         this._hoverPopup = hover;
         this._popoutId = id;
+        this._popupInputHole = false;
+        this._popoutInstance = this._moduleInstance || null;
         if (id === 'notifications') this._overlay._notifications?.setHistoryOpen(true);
         if (this._state.autohide)
             this._slide(true, false);
         const monitor = this._monitor;
         const edgeTrigger = edge !== null;
         const corners = ['top-left', 'top-right', 'bottom-left', 'bottom-right'];
-        const rail = id === 'power' && this._state.powerStyle === 'rail';
+        const rail = id === 'power' && powerLayout(this._state.modules.find(item => item.id === 'power'), this._overlay._settings) === 'rail';
         const osd = id === 'osd';
         const position = ['power', 'dashboard', 'notifications'].includes(id)
             ? this._overlay._settings.get_string(`${id}-position`) : osd ? 'right' : 'icon';
@@ -2684,8 +3398,11 @@ class Bar {
         this._popupJoined = attached ? joined : `${radius}px`;
         const availableWidth = monitor.width - this._side.left - this._side.right - 16;
         const width = osd || rail ? (osd ? 88 : 80)
-            : Math.min(id === 'dashboard' ? this._state.dashboardWidth : id === 'launcher' ? this._state.launcherWidth : id === 'notifications' ? 420 : id === 'status' ? 400 : id === 'clock' ? 360 : 320, availableWidth - radius * 2);
+            : Math.min(id === 'dashboard' ? 520 : id === 'launcher' ? this._state.launcherWidth : id === 'notifications' ? 420 : id === 'status' ? 400 : id === 'clock' ? 360 : 320, availableWidth - radius * 2);
+        this._popupWidth = width;
         this._popupCleanups = [];
+        this._popupAuxActors = new Set();
+        this._popupCloseOutside = true;
         this._popupChromeStyle = {
             bg: this._theme.bg, fg: this._theme.fg, attached, edge, location, radius,
             pad: osd || rail ? '12px 10px' : '18px',
@@ -2703,7 +3420,8 @@ class Bar {
             this._popout.add_child(this._popupChrome);
         const scroll = new St.ScrollView({
             style_class: 'bezel-popout-scroll', overlay_scrollbars: true,
-            hscrollbar_policy: St.PolicyType.NEVER, vscrollbar_policy: St.PolicyType.NEVER,
+            hscrollbar_policy: St.PolicyType.NEVER,
+            vscrollbar_policy: id === 'dashboard' || id === 'shelf' || String(id).startsWith('group:') ? St.PolicyType.AUTOMATIC : St.PolicyType.NEVER,
             x_expand: true, y_expand: true,
         });
         const menu = this._menuPopup(id);
@@ -2733,6 +3451,18 @@ class Bar {
                 return Clutter.EVENT_PROPAGATE;
             if (this._onPopupScroll?.(step))
                 return Clutter.EVENT_STOP;
+            const [px, py] = event.get_coords();
+            const picked = global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, px, py);
+            const nested = scrollViewUnder(picked, this._popout, this._popupScroll);
+            if (nested) {
+                const adj = nested.vadjustment;
+                const limit = adj.upper - adj.page_size;
+                const next = clamp(adj.value + step * 36, adj.lower, Math.max(adj.lower, limit));
+                if (next !== adj.value) {
+                    adj.value = next;
+                    return Clutter.EVENT_STOP;
+                }
+            }
             if (!adjustment)
                 return Clutter.EVENT_PROPAGATE;
             const limit = adjustment.upper - adjustment.page_size;
@@ -2745,11 +3475,11 @@ class Bar {
         // chrome frame lands at (0, 0) on the primary monitor.
         this._popout.opacity = 0;
         this._popupProgress = 0;
-        if (id === 'power' && this._state.sessionDim)
+        if (id === 'power' && powerDim(this._state.modules.find(item => item.id === 'power'), this._overlay._settings))
             this._overlay._showDim(monitor, this._opening());
         chrome(this._popout, true, false);
         const app = String(id).startsWith('app:');
-        const stable = id === 'dashboard' || id === 'osd' || id === 'clock' || rail;
+        const stable = id === 'dashboard' || id === 'osd' || id === 'clock' || id === 'shelf' || rail;
         if (!app && !stable) {
             const requestFit = () => {
                 if ((this._popupProgress ?? 0) < 1)
@@ -2767,19 +3497,26 @@ class Bar {
         this._animatePopup(1);
         this._press = global.stage.connect('captured-event', (_stage, event) => {
             if (event.type() === Clutter.EventType.KEY_PRESS && event.get_key_symbol() === Clutter.KEY_Escape) {
+                const auxiliary = [...(this._popupAuxActors ?? [])].find(actor => actor._bezelCloseOnEscape);
+                if (auxiliary) { auxiliary._bezelCloseOnEscape(); return Clutter.EVENT_STOP; }
+                if (this._dashboardGesture) {
+                    this._dashboardGesture();
+                    return Clutter.EVENT_STOP;
+                }
                 const focus = this._anchor;
                 this._close(true);
                 if (focus?.can_focus)
                     focus.grab_key_focus();
                 return Clutter.EVENT_STOP;
             }
-            if (event.type() === Clutter.EventType.BUTTON_PRESS || event.type() === Clutter.EventType.TOUCH_BEGIN) {
+            if (this._popupCloseOutside !== false && (event.type() === Clutter.EventType.BUTTON_PRESS || event.type() === Clutter.EventType.TOUCH_BEGIN)) {
                 const [px, py] = event.get_coords();
                 const picked = global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, px, py);
                 if (!picked)
                     return Clutter.EVENT_PROPAGATE;
                 if (!this._popout.contains(picked) && picked !== this._popout
-                    && !this._anchor?.contains(picked) && picked !== this._anchor)
+                    && !this._anchor?.contains(picked) && picked !== this._anchor
+                    && ![...(this._popupAuxActors ?? [])].some(actor => actor === picked || actor.contains(picked)))
                     this._close(true);
             }
             return Clutter.EVENT_PROPAGATE;
@@ -2799,28 +3536,88 @@ class Bar {
         this._enableOutsideDismiss();
     }
 
+    _resetOutsideDismiss() {
+        if (this._dismissStrips?.length) {
+            for (const strip of this._dismissStrips)
+                drop(strip);
+        } else {
+            drop(this._dismissLayer);
+        }
+        this._dismissLayer = null;
+        this._dismissStrips = null;
+        this._enableOutsideDismiss();
+    }
+
     _enableOutsideDismiss() {
-        if (!this._popout || this._dismissLayer)
+        if (!this._popout || this._dismissLayer || this._popupCloseOutside === false)
             return;
         // Wayland client clicks never reach stage capture. A Shell chrome
         // layer under the drawer still sits above application windows.
+        const dismiss = () => this._close(true);
+        const wire = actor => {
+            actor.connect('button-press-event', () => {
+                dismiss();
+                return Clutter.EVENT_STOP;
+            });
+            actor.connect('touch-event', (_actor, event) => {
+                if (event.type() === Clutter.EventType.TOUCH_BEGIN) dismiss();
+                return Clutter.EVENT_STOP;
+            });
+        };
+        const placeBelow = actor => {
+            const parent = actor.get_parent();
+            const below = [this._popout, ...this._overlay._bars.map(bar => bar._actor), ...this._overlay._chrome]
+                .find(item => item && item.get_parent() === parent);
+            if (below)
+                parent.set_child_below_sibling(actor, below);
+        };
+        if (this._popupInputHole) {
+            // Separate strips, not one stage-sized parent, so the GTK shelf
+            // keeps a real hole in the chrome input region.
+            this._dismissStrips = [0, 1, 2, 3].map(() => {
+                const strip = new St.Widget({reactive: true});
+                chrome(strip, true, false);
+                placeBelow(strip);
+                wire(strip);
+                return strip;
+            });
+            this._dismissLayer = this._dismissStrips[0];
+            this._layoutDismissStrips();
+            return;
+        }
         const layer = new St.Widget({reactive: true, x: 0, y: 0});
         layer.add_constraint(new Clutter.BindConstraint({source: global.stage, coordinate: Clutter.BindCoordinate.SIZE}));
         chrome(layer, true, false);
-        const parent = layer.get_parent();
-        const below = [this._popout, ...this._overlay._bars.map(bar => bar._actor), ...this._overlay._chrome]
-            .find(actor => actor && actor.get_parent() === parent);
-        if (below)
-            parent.set_child_below_sibling(layer, below);
-        layer.connect('button-press-event', () => {
-            this._close(true);
-            return Clutter.EVENT_STOP;
-        });
-        layer.connect('touch-event', (_actor, event) => {
-            if (event.type() === Clutter.EventType.TOUCH_BEGIN) this._close(true);
-            return Clutter.EVENT_STOP;
-        });
+        placeBelow(layer);
+        wire(layer);
         this._dismissLayer = layer;
+    }
+
+    _layoutDismissStrips() {
+        const strips = this._dismissStrips;
+        if (!strips?.length)
+            return;
+        const sw = global.stage.width, sh = global.stage.height;
+        const g = this._popupGeometry;
+        if (!g) {
+            strips[0].set_position(0, 0);
+            strips[0].set_size(sw, sh);
+            for (let i = 1; i < 4; i++)
+                strips[i].set_size(0, 0);
+            return;
+        }
+        const x = Math.max(0, Math.round(g.x));
+        const y = Math.max(0, Math.round(g.y));
+        const w = Math.max(0, Math.round(g.width));
+        const h = Math.max(0, Math.round(g.height));
+        strips[0].set_position(0, 0);
+        strips[0].set_size(sw, y);
+        strips[1].set_position(0, y);
+        strips[1].set_size(x, h);
+        strips[2].set_position(x + w, y);
+        strips[2].set_size(Math.max(0, sw - x - w), h);
+        strips[3].set_position(0, y + h);
+        strips[3].set_size(sw, Math.max(0, sh - y - h));
     }
 
     _opening() {
@@ -2875,7 +3672,7 @@ class Bar {
         const scrolling = this._popupScrolls();
         if (scrolling && this._popupScroll) {
             const chrome = this._popupChrome?.height ?? 0;
-            const room = Math.max(48, height - chrome - 24);
+            const room = Math.max(48, height - chrome - (this._popoutId === 'dashboard' || String(this._popoutId).startsWith('group:') ? 36 : 24));
             this._popupScroll.height = room;
             this._popupScroll.get_parent().height = room;
         }
@@ -2890,18 +3687,18 @@ class Bar {
     }
 
     _popupScrolls() {
-        return ['notifications', 'launcher', 'settings', 'vpn', 'performance'].includes(this._popoutId)
-            || this._menuPopup();
+        return ['dashboard', 'notifications', 'launcher', 'settings', 'vpn', 'performance', 'timer', 'shortcuts', 'devices', 'input', 'shelf'].includes(this._popoutId)
+            || String(this._popoutId).startsWith('group:') || this._menuPopup();
     }
 
     _fitPopup() {
-        if (this._popupFitLock || this._popupLockedHeight || !this._popout || !this._popupContent)
+        if (this._popupFitLock || (this._popupLockedHeight && this._popoutId !== 'dashboard') || !this._popout || !this._popupContent)
             return;
-        const pad = this._popoutId === 'status' ? 52 : this._popoutId === 'osd' || this._state.powerStyle === 'rail' && this._popoutId === 'power' ? 24 : 36;
+        const pad = this._popoutId === 'status' ? 52 : this._popoutId === 'osd' || powerLayout(this._state.modules.find(item => item.id === 'power'), this._overlay._settings) === 'rail' && this._popoutId === 'power' ? 24 : 36;
         const width = Math.max(1, this._popout.width - pad);
         const app = String(this._popoutId).startsWith('app:');
         const scrolling = this._popupScrolls();
-        const cap = app ? 420 : scrolling ? 480
+        const cap = this._popoutId === 'dashboard' || String(this._popoutId).startsWith('group:') ? 900 : app ? 420 : this._popoutId === 'shelf' ? 560 : scrolling ? 480
             : ['dashboard', 'status', 'clock', 'osd', 'power'].includes(this._popoutId) ? 900 : 400;
         const extent = this._stackHeight(this._popupContent, width, scrolling ? 8000 : cap);
         let chrome = 0;
@@ -2972,6 +3769,7 @@ class Bar {
             return;
         this._popout.set_position(x, y);
         this._popupGeometry = geometry;
+        this._layoutDismissStrips();
         this._clipPopup(this._popupProgress);
     }
 
@@ -3094,7 +3892,7 @@ class Bar {
     }
 
     _close(animate = false) {
-        if (animate && this._popout && this._popupProgress > 0) {
+        if (animate && this._popout && this._popupProgress > 0 && this._popout.visible && !this._popupInputHole) {
             this._animatePopup(0, () => this._close());
             return;
         }
@@ -3110,6 +3908,7 @@ class Bar {
         this._cancel('_closeTimer');
         for (const id of ['status', 'clock', 'power', 'dashboard'])
             this._cancel(`_drawerHover_${id}`);
+        if (this._popoutId) this._cancel(`_drawerHover_${this._popoutId}`);
         this._cancel('_dashboardTimer');
         this._cancel('_fitPopupId');
         this._cancel('_deviceListFitId');
@@ -3127,11 +3926,19 @@ class Bar {
         }
         if (global.stage.key_focus && this._popout?.contains(global.stage.key_focus))
             global.stage.set_key_focus(null);
-        drop(this._dismissLayer);
+        if (this._dismissStrips?.length) {
+            for (const strip of this._dismissStrips)
+                drop(strip);
+        } else {
+            drop(this._dismissLayer);
+        }
         this._dismissLayer = null;
+        this._dismissStrips = null;
+        this._popupInputHole = false;
         drop(this._popout);
         this._popout = null;
         this._popupContent = null;
+        this._popupAuxActors = null;
         this._popupChrome = null;
         this._popupScroll = null;
         this._launcherEntry = null;
@@ -3146,11 +3953,11 @@ class Bar {
         return widget;
     }
 
-    _monthGrid() {
-        return monthGrid(this._theme, date => { if (openCalendarDate(date)) this._close(); });
+    _monthGrid(options = moduleFeatures(this, 'clock')) {
+        return monthGrid(this._theme, date => { if (openCalendarDate(date)) this._close(); }, options);
     }
 
-    _mediaCard(artwork = false, artSize = 84) {
+    _mediaCard(artwork = false, artSize = 84, options = moduleFeatures(this, 'media')) {
         const services = this._overlay.services;
         const box = card(this._theme);
         const art = new St.Icon({icon_name: 'audio-x-generic-symbolic', icon_size: artSize,
@@ -3180,6 +3987,57 @@ class Bar {
             buttons[method] = button;
         }
         box.add_child(controls);
+        if (options.mediaSeek) {
+            const seek = new Slider.Slider(0); seek.x_expand = true; seek.accessible_name = 'Track position';
+            const reading = label(this._theme.muted, 12, '');
+            box.add_child(seek); if (options.mediaTime) box.add_child(reading);
+            else reading.hide();
+            let updating = false, dragging = false, pending = false, disposed = false;
+            const cancel = new Gio.Cancellable();
+            const time = value => { const seconds = Math.floor(value / 1e6); return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`; };
+            const apply = () => {
+                const media = services.media;
+                if (updating || !media?.canSeek || !media.duration || !media.trackId) return;
+                media.proxy.call('SetPosition', new GLib.Variant('(ox)', [media.trackId, Math.round(seek.value * media.duration)]), Gio.DBusCallFlags.NONE, 3000, cancel,
+                    (proxy, result) => { try { proxy.call_finish(result); } catch (error) { if (!cancel.is_cancelled()) console.warn(`Bezel seek: ${error.message}`); } });
+            };
+            seek.connect('drag-begin', () => { dragging = true; });
+            seek.connect('drag-end', () => { dragging = false; apply(); });
+            seek.connect('notify::value', () => { if (!dragging) apply(); });
+            const update = () => {
+                const media = services.media;
+                seek.reactive = Boolean(media?.canSeek && media.duration && media.trackId);
+                seek.visible = Boolean(media?.duration);
+                if (!media?.duration) { reading.text = media ? 'Live / duration unavailable' : ''; return GLib.SOURCE_CONTINUE; }
+                if (pending || dragging || disposed) return GLib.SOURCE_CONTINUE;
+                pending = true;
+                media.proxy.call('org.freedesktop.DBus.Properties.Get', new GLib.Variant('(ss)', ['org.mpris.MediaPlayer2.Player', 'Position']), Gio.DBusCallFlags.NONE, 3000, cancel,
+                    (proxy, result) => {
+                        pending = false;
+                        try {
+                            const [variant] = proxy.call_finish(result).deepUnpack();
+                            const position = Number(variant?.deepUnpack?.() ?? variant);
+                            if (disposed || dragging || services.media?.trackId !== media.trackId || services.media?.proxy !== media.proxy) return;
+                            updating = true; seek.value = Math.max(0, Math.min(1, position / media.duration)); updating = false;
+                            reading.text = `${time(position)} / ${time(media.duration)}`;
+                        } catch { if (!disposed) reading.text = 'Position unavailable'; }
+                    });
+                return GLib.SOURCE_CONTINUE;
+            };
+            update(); const timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, update);
+            box.connect('destroy', () => { disposed = true; cancel.cancel(); GLib.source_remove(timer); if (!options.mediaTime) reading.destroy(); });
+        }
+        box._dashLayout = ({height}) => {
+            const factor = height ? Math.max(0.6, Math.min(2.1, height / 230)) : 1;
+            if (artwork)
+                art.icon_size = Math.max(32, Math.round(artSize * factor));
+            title.style = `color: ${this._theme.fg}; font-size: ${Math.max(12, Math.round(16 * factor))}px; font-weight: 600;`;
+            artist.style = `color: ${this._theme.muted}; font-size: ${Math.max(10, Math.round(12 * factor))}px;`;
+            for (const button of controls.get_children()) {
+                if (button.child?.icon_size)
+                    button.child.icon_size = Math.max(16, Math.round(22 * factor));
+            }
+        };
         this._popupCleanups.push(services.subscribe(() => {
             const media = services.media;
             if (artwork) {
@@ -3198,14 +4056,14 @@ class Bar {
 
     _calendar(ids = null) {
         const members = ids ?? this._state.modules.filter(item => item.group === 'clock' || item.id === 'clock' || item.id === 'date').map(item => item.id);
-        const nowDate = GLib.DateTime.new_now_local();
         const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 8px;'});
-        box.add_child(label(this._theme.fg, 28, now('%H:%M')));
-        box.add_child(label(this._theme.muted, 13, nowDate.format('%A, %B %e') ?? ''));
-        box.add_child(this._monthGrid());
+        const options = moduleFeatures(this, 'clock');
+        if (options.calendarTime) box.add_child(this._groupItem({module: 'clock'}));
+        if (options.calendarDate) box.add_child(this._groupItem({module: 'date'}));
+        if (options.calendarGrid) box.add_child(this._monthGrid(options));
         if (members.includes('weather'))
-            box.add_child(weatherWidget(this, {forecast: false}));
-        box.add_child(this._action('Notifications', 'preferences-system-notifications-symbolic', () => this._open('notifications', this._order.find(item => item.id === 'clock')?.actor ?? this._actor, () => buildNotificationCenter(this))));
+            box.add_child(weatherWidget(this));
+        if (options.calendarNotifications) box.add_child(this._groupItem({module: 'notifications'}));
         return box;
     }
 
@@ -3213,9 +4071,9 @@ class Bar {
         return buildOsd(this);
     }
 
-    _session() {
-        if (this._state.powerStyle === 'rail')
-            return buildSessionRail(this);
+    _session(options = moduleFeatures(this, 'power')) {
+        if (options.powerStyle ? options.powerStyle === 'rail' : options.powerIcons || powerLayout(this._state.modules.find(item => item.id === 'power'), this._overlay._settings) === 'rail')
+            return buildSessionRail(this, options);
         const actions = SystemActions.getDefault();
         const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 8px;'});
         const rows = [
@@ -3226,7 +4084,8 @@ class Bar {
             ['Power off', 'system-shutdown-symbolic', actions.can_power_off, () => actions.activatePowerOff()],
         ];
         for (const [title, iconName, allowed, run] of rows) {
-            if (!allowed)
+            const key = {'Lock': 'powerLock', 'Suspend': 'powerSuspend', 'Log out': 'powerLogout', 'Restart': 'powerRestart', 'Power off': 'powerOff'}[title];
+            if (!allowed || options[key] === false)
                 continue;
             const button = new St.Button({
                 reactive: true,
@@ -3260,38 +4119,46 @@ class Bar {
         const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 14px;'});
         const title = label(this._theme.fg, 18, 'Quick controls');
         box.add_child(title);
-        const volume = label(this._theme.muted, 13);
-        box.add_child(volume);
+        box.add_child(buildStacked(this));
+        const networkModule = this._state.modules.find(item => item.id === 'network');
+        const showName = switchOn(networkModule, this._state, 'popValue');
+        const network = label(this._theme.fg, 13);
+        const battery = label(this._theme.fg, 13);
+        network.visible = showName;
+        box.add_child(network);
+        box.add_child(battery);
+        this._popupCleanups.push(services.subscribe(() => {
+            network.text = showName ? services.networkInfo.text : '';
+            network.visible = showName && Boolean(network.text);
+            battery.text = services.batteryInfo.text;
+        }));
+        box.add_child(buildDeviceControls(this));
+        return box;
+    }
+
+    _levelSlider(box, caption, name, getValue, setValue, captionText, getMax) {
+        const services = this._overlay.services;
         const slider = new Slider.Slider(0);
-        slider.accessible_name = 'Output volume';
+        slider.accessible_name = name;
         slider.style = `height: 28px; -barlevel-height: 24px; -slider-handle-radius: 0px; color: ${this._theme.accent}; -barlevel-active-background-color: ${this._theme.accent}; -barlevel-background-color: ${this._theme.border};`;
         let updating = false;
         slider.connect('notify::value', () => {
             if (!updating)
-                services.setVolume(slider.value);
+                setValue(slider.value);
         });
         box.add_child(slider);
-        const mute = new St.Button({can_focus: true, style_class: 'bezel-action', label: 'Mute / unmute',
-            style: `background-color: ${this._theme.surface}; color: ${this._theme.fg}; border-radius: 14px; padding: 12px 10px;`});
-        mute.connect('clicked', () => services.toggleMute());
-        box.add_child(mute);
-        const network = label(this._theme.fg, 13);
-        const battery = label(this._theme.fg, 13);
-        box.add_child(network);
-        box.add_child(battery);
         this._popupCleanups.push(services.subscribe(() => {
             updating = true;
-            slider.maximum_value = services.maxVolume;
+            slider.maximum_value = getMax();
             slider.overdrive_start = 1;
-            slider.value = services.stream?.is_muted ? 0 : Math.min(services.maxVolume, services.volume);
-            slider.reactive = Boolean(services.stream);
-            volume.text = services.stream ? `Volume · ${services.stream.is_muted ? 'Muted' : `${Math.round(services.volume * 100)}%`}` : 'No audio output';
-            network.text = services.networkInfo.text;
-            battery.text = services.batteryInfo.text;
+            slider.value = getValue();
+            if (caption) {
+                caption.text = captionText();
+                caption.visible = Boolean(caption.text);
+            }
             updating = false;
         }));
-        box.add_child(buildDeviceControls(this));
-        return box;
+        return slider;
     }
 
 }
@@ -3301,6 +4168,12 @@ function row(iconName, text, theme) {
     box.add_child(new St.Icon({icon_name: iconName, icon_size: 18, style: `color: ${theme.fg};`}));
     box.add_child(label(theme.fg, 14, text));
     return box;
+}
+
+function readingLabel(color) {
+    const widget = label(color, 12);
+    widget.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+    return widget;
 }
 
 function label(color, size, text = '') {
@@ -3431,6 +4304,14 @@ function inside(actor, x, y, pad = 0) {
     }
 }
 
+
+function scrollViewUnder(actor, stop, outer) {
+    for (let node = actor; node && node !== stop; node = node.get_parent?.()) {
+        if (node instanceof St.ScrollView && node !== outer && node.vadjustment)
+            return node;
+    }
+    return null;
+}
 
 function scrollStep(event) {
     const direction = event.get_scroll_direction();

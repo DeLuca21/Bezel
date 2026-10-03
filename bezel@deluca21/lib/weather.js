@@ -1,3 +1,4 @@
+import {moduleFeatures} from './moduleFeatures.js';
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import Pango from 'gi://Pango';
@@ -10,7 +11,7 @@ export class Weather {
     constructor() {
         this.client = Main.panel.statusArea.dateMenu?._weatherItem?._weatherClient;
         this.listeners = new Set();
-        this.signal = this.client?.connect('changed', () => this.listeners.forEach(callback => callback()));
+        this.signal = this.client?.connect('changed', () => { if (!this.client.loading && this.client.info?.is_valid()) this.updatedAt = GLib.DateTime.new_now_local(); this.listeners.forEach(callback => callback()); });
         this.lastRefresh = 0;
         this.timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 900, () => {
             if (this.listeners.size) this.refresh();
@@ -97,7 +98,8 @@ export class Weather {
 
 export function weatherWidget(bar, options = {}) {
     const compact = options === true || options.compact === true;
-    const showForecast = !compact && options.forecast !== false;
+    if (!compact) options = {...moduleFeatures(bar, 'weather'), ...options};
+    const showForecast = !compact && options.forecast !== false && options.weatherForecast !== false;
     const weather = bar._overlay.weather;
     const vertical = compact && bar._vertical;
     const size = compact ? bar._state.iconSize : 28;
@@ -146,34 +148,53 @@ export function weatherWidget(bar, options = {}) {
         style: 'spacing: 6px;', x_expand: true, x_align: Clutter.ActorAlign.CENTER,
         height: 56,
     }) : null;
+    let scale = 1;
     const card = compact ? button : new St.BoxLayout({
         orientation: Clutter.Orientation.VERTICAL, x_expand: true,
         style: `background-color: ${bar._theme.surface}; border-radius: 16px; padding: 12px 14px; spacing: 10px;`,
     });
     if (!compact) {
+        button.visible = options.weatherCurrent !== false || options.weatherLocation !== false;
+        icon.visible = options.weatherCurrent !== false;
+        if (detail) detail.visible = options.weatherCurrent !== false;
         card.add_child(button);
         if (forecast)
             card.add_child(forecast);
     }
+    const status = !compact && options.weatherStatus ? new St.Label({style: `color: ${bar._theme.muted}; font-size: 11px;`}) : null;
+    if (status) card.add_child(status);
     const unsubscribe = weather.subscribe(() => {
         const summary = weather.summary;
         icon.icon_name = summary.icon;
+        if (status) status.text = weather.client?.loading ? 'Updating…' : weather.updatedAt ? `Updated ${weather.updatedAt.format('%H:%M')}` : summary.compact === '—' ? summary.text : 'Using available weather data';
         text.text = compact ? railTemp(summary.compact)
-            : [summary.location, summary.compact].filter(Boolean).join(' · ') || summary.text;
+            : [options.weatherLocation === false ? '' : summary.location, options.weatherCurrent === false ? '' : summary.compact].filter(Boolean).join(' · ') || summary.text;
         if (detail)
             detail.text = summary.conditions && summary.conditions !== '-' ? summary.conditions : '';
         button.accessible_name = `${summary.location ?? 'Weather'}: ${summary.text}`;
         if (forecast)
-            paintForecast(forecast, weather.forecast, bar);
+            paintForecast(forecast, weather.forecast, bar, scale);
         if (compact && bar._box) bar._place();
         else if (!compact && ['dashboard', 'clock'].includes(bar._popoutId))
             bar._later('_fitPopupId', 40, () => bar._fitPopup());
     });
+    if (!compact) {
+        card._dashLayout = ({height}) => {
+            const base = forecast ? 148 : 84;
+            scale = height ? Math.max(0.65, Math.min(2.1, height / base)) : 1;
+            icon.icon_size = Math.round(28 * scale);
+            text.style = `color: ${bar._theme.fg}; font-size: ${Math.round(14 * scale)}px;`;
+            if (detail)
+                detail.style = `color: ${bar._theme.muted}; font-size: ${Math.round(12 * scale)}px;`;
+            if (forecast)
+                paintForecast(forecast, weather.forecast, bar, scale);
+        };
+    }
     card.connect('destroy', unsubscribe);
     return card;
 }
 
-function paintForecast(row, days, bar) {
+function paintForecast(row, days, bar, scale = 1) {
     row.destroy_all_children();
     row.visible = days.length > 0;
     for (const day of days) {
@@ -183,21 +204,22 @@ function paintForecast(row, days, bar) {
         });
         column.add_child(new St.Label({
             text: day.label, x_align: Clutter.ActorAlign.CENTER,
-            style: `color: ${bar._theme.muted}; font-size: 10px;`,
+            style: `color: ${bar._theme.muted}; font-size: ${Math.max(9, Math.round(10 * scale))}px;`,
         }));
         column.add_child(new St.Icon({
-            icon_name: day.icon, icon_size: 18, style: `color: ${bar._theme.accent};`,
+            icon_name: day.icon, icon_size: Math.max(14, Math.round(18 * scale)), style: `color: ${bar._theme.accent};`,
             x_align: Clutter.ActorAlign.CENTER,
         }));
         column.add_child(new St.Label({
             text: railTemp(day.temp), x_align: Clutter.ActorAlign.CENTER,
-            style: `color: ${bar._theme.fg}; font-size: 11px;`,
+            style: `color: ${bar._theme.fg}; font-size: ${Math.max(10, Math.round(11 * scale))}px;`,
         }));
         const button = new St.Button({child: column, can_focus: true, x_expand: true, style: 'padding: 4px 6px;'});
         button._bezelForecast = true;
         button.connect('clicked', () => { bar._close(); bar._overlay.weather.open(); });
         row.add_child(button);
     }
+    row.height = Math.max(40, Math.round(56 * scale));
 }
 
 function forecastItem(item, label) {
@@ -226,6 +248,28 @@ function forecastTime(item) {
     } catch {
     }
     return null;
+}
+
+export function forecastCard(bar) {
+    const weather = bar._overlay.weather;
+    const box = new St.BoxLayout({
+        orientation: Clutter.Orientation.VERTICAL, x_expand: true,
+        style: `background-color: ${bar._theme.surface}; border-radius: 16px; padding: 10px 12px; spacing: 8px;`,
+    });
+    box.add_child(new St.Label({
+        text: 'Forecast', x_align: Clutter.ActorAlign.CENTER,
+        style: `color: ${bar._theme.muted}; font-size: 12px;`,
+    }));
+    const row = new St.BoxLayout({style: 'spacing: 6px;', x_expand: true, x_align: Clutter.ActorAlign.CENTER, height: 56});
+    box.add_child(row);
+    let scale = 1;
+    box._dashLayout = ({height}) => {
+        scale = height ? Math.max(0.7, Math.min(2.2, height / 96)) : 1;
+        paintForecast(row, weather.forecast, bar, scale);
+    };
+    const unsubscribe = weather.subscribe(() => paintForecast(row, weather.forecast, bar, scale));
+    box.connect('destroy', unsubscribe);
+    return box;
 }
 
 export function railTemp(value) {

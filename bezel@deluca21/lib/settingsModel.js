@@ -1,3 +1,4 @@
+import {nextModuleId} from './moduleIdentity.js';
 import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
 import Gtk from 'gi://Gtk';
@@ -5,6 +6,8 @@ import Gtk from 'gi://Gtk';
 import {DATE_FORMATS, barGroups, EDGES, clamp, isSpacer, nextSpacerId, readBars, saveBars} from './config.js';
 
 export const MODULES = [
+    ['shelf', 'File shelf'], ['shortcuts', 'Shortcuts'], ['timer', 'Timer / stopwatch'], ['devices', 'Device batteries'], ['input', 'Sound input'],
+    ['notifications', 'Notifications'],
     ['logo', 'Logo'],
     ['workspaces', 'Workspaces'],
     ['window', 'Focused app'],
@@ -14,7 +17,10 @@ export const MODULES = [
     ['weather', 'Weather'],
     ['dashboard', 'Dashboard'],
     ['volume', 'Volume'],
-    ['network', 'Network'],
+    ['network', 'Wi-Fi'],
+    ['output', 'Sound output'],
+    ['bluetooth', 'Bluetooth'],
+    ['brightness', 'Brightness'],
     ['battery', 'Battery'],
     ['power', 'Power'],
     ['screenshot', 'Screenshot'],
@@ -24,6 +30,12 @@ export const MODULES = [
     ['performance', 'Performance'],
     ['vpn', 'VPN'],
     ['settings', 'Settings'],
+    ['media', 'Now playing'],
+    ['microphone', 'Microphone'],
+    ['clipboard', 'Clipboard'],
+    ['keyboard', 'Keyboard'],
+    ['awake', 'Keep awake'],
+    ['indicators', 'Extensions'],
 ];
 
 export const DRAWER_SPOTS = [
@@ -83,9 +95,7 @@ export function addModule(settings, index, id, place) {
     } else if (!MODULES.some(([key]) => key === id)) {
         return false;
     } else {
-        const previous = bar.modules.find(item => item.id === id);
-        bar.modules = bar.modules.filter(item => item.id !== id);
-        bar.modules.push({id, place: spot, group: previous?.group ?? ''});
+        bar.modules.push({id: nextModuleId(bar.modules, id), place: spot, group: ''});
     }
     saveBars(settings, bars);
     return true;
@@ -276,6 +286,24 @@ export function assignGroup(settings, index, moduleId, groupId) {
     saveBars(settings, bars);
 }
 
+export function patchModule(settings, index, id, values) {
+    const bars = readBars(settings);
+    const bar = bars[index];
+    if (!bar?.modules.some(item => item.id === id))
+        return;
+    bar.modules = bar.modules.map(item => item.id === id ? {...item, ...values} : item);
+    saveBars(settings, bars);
+}
+
+export function patchGroup(settings, index, id, values) {
+    const bars = readBars(settings);
+    const bar = bars[index];
+    if (!bar || !barGroups(bar).some(group => group.id === id))
+        return;
+    bar.groups = barGroups(bar).map(group => group.id === id ? {...group, ...values} : group);
+    saveBars(settings, bars);
+}
+
 export function resizeSpacer(settings, index, id, size) {
     const bars = readBars(settings);
     const bar = bars[index];
@@ -399,10 +427,6 @@ export function setIndicatorShown(settings, name, shown) {
     if (!shown)
         hidden.push(name);
     settings.set_strv('hidden-indicators', hidden);
-}
-
-export function hostsIndicators(settings, index) {
-    return settings.get_boolean('panel-indicators') && settings.get_int('indicator-bar') === index + 1;
 }
 
 function shortcutConflict(accelerator) {

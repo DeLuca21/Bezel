@@ -129,7 +129,7 @@ export class NotificationBridge {
             'bottom-right': `${this.radius}px 0 0 0`,
             'bottom-left': `0 ${this.radius}px 0 0`,
         };
-        banner.set_style(`${record.style ? `${record.style};` : ''} margin: 0; background-color: ${this.frame ? 'transparent' : this.theme.bg}; color: ${this.theme.fg}; border: none; border-radius: ${this.framed ? radii[this._corner()] : `${this.radius}px`}; box-shadow: ${this.frame ? 'none' : '0 3px 10px rgba(0,0,0,0.22)'};`);
+        this._bannerStyle(banner, record, radii);
         for (const [actor, style] of [[banner._header, `color: ${this.theme.muted};`],
             [banner._header?.closeButton, `color: ${this.theme.fg}; background-color: ${this.theme.surface}; border-radius: 12px;`]]) {
             if (!actor) continue;
@@ -137,6 +137,35 @@ export class NotificationBridge {
             actor.set_style(style);
         }
         this.position();
+    }
+
+    // The frame actor is hidden while a monitor is fullscreen, so a banner
+    // joined to that frame would have nothing behind it.
+    _frameOpen() {
+        const actor = this.frame?.actor;
+        if (!this.framed || !actor?.visible)
+            return false;
+        const index = this.monitor?.index;
+        if (index == null)
+            return true;
+        return !global.display.get_monitor_in_fullscreen(index);
+    }
+
+    _bannerStyle(banner, record, radii = null) {
+        const open = this._frameOpen();
+        const corner = this._corner();
+        const joined = {
+            'top-right': `0 0 0 ${this.radius}px`,
+            'top-left': `0 0 ${this.radius}px 0`,
+            'bottom-right': `${this.radius}px 0 0 0`,
+            'bottom-left': `0 ${this.radius}px 0 0`,
+        };
+        banner.set_style(`${record.style ? `${record.style};` : ''} margin: 0; background-color: ${open ? 'transparent' : this.theme.bg}; color: ${this.theme.fg}; border: none; border-radius: ${open ? (radii ?? joined)[corner] : `${this.radius}px`}; box-shadow: ${open ? 'none' : '0 3px 10px rgba(0,0,0,0.22)'};`);
+    }
+
+    restyle() {
+        for (const [banner, record] of this.records)
+            this._bannerStyle(banner, record);
     }
 
     setHistoryOpen(open) {
@@ -180,13 +209,24 @@ export class NotificationBridge {
 
 // Separate views of the same notification objects preserve actions and dismissal.
 // Destroying a view does not dismiss its notification.
-export function buildNotificationCenter(bar) {
+export function buildNotificationCenter(bar, embedded = false) {
     const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL,
         style: 'spacing: 10px;'});
     box.add_child(new St.Label({text: 'Notifications', style: 'font-weight: bold; font-size: 18px;'}));
     const empty = new St.Label({text: 'No notifications', style: `color: ${bar._theme.muted}; padding: 20px;`});
     box.add_child(empty);
     const messages = new Map();
+    const fitHistory = () => {
+        bar._popupLockedHeight = false;
+        const fit = () => {
+            if ((!embedded && bar._popoutId !== 'notifications') || !bar._popout)
+                return;
+            bar._popupLockedHeight = false;
+            bar._fitPopup();
+        };
+        fit();
+        bar._later?.('_historyFitId', 60, fit);
+    };
     const add = notification => {
         if (messages.has(notification)) return;
         const message = new MessageList.NotificationMessage(notification);
@@ -199,15 +239,26 @@ export function buildNotificationCenter(bar) {
         message._header?.closeButton.set_style(`color: ${bar._theme.fg}; background-color: ${bar._theme.bg}; border-radius: 12px;`);
         styleActions(message, bar._theme);
         messages.set(notification, message);
-        message.connect_after('close', () => {
-            messages.delete(notification);
-            message.destroy();
+        const shrinkHistory = () => {
+            if (!messages.delete(notification))
+                return;
+            // Closing the drawer destroys these views. The scroll adjustment is
+            // already gone by then, so only refit while the shade is open.
+            if ((!embedded && bar._popoutId !== 'notifications') || !bar._popout)
+                return;
             empty.visible = messages.size === 0;
             bar._popupScroll?.get_parent?.()?._bezelSyncOverflow?.();
+            fitHistory();
+        };
+        message.connect_after('close', () => {
+            message.destroy();
+            shrinkHistory();
         });
+        message.connect('destroy', shrinkHistory);
         box.insert_child_at_index(message, 1);
         empty.hide();
         bar._popupScroll?.get_parent?.()?._bezelSyncOverflow?.();
+        fitHistory();
     };
     const sources = new Set();
     const watch = source => {
