@@ -14,7 +14,7 @@ import Soup from 'gi://Soup?version=3.0';
 import {readBars, saveBars, barGroups, groupAppearance, barAppearancePreset, isSpacer, spacerLabel, applyPreset, presetBars, EDGES, DATE_FORMATS, barDateFormat, barTimeFormat, settingChoice, settingFlag, MODULE_SWITCHES, switchOn, hoverEnabled, sliderLayout, powerLayout, powerDim, PANEL_MODULES, hexColor} from './config.js';
 import {PRESETS, resolveTheme} from './theme.js';
 import {layoutPreview} from './layoutPreview.js';
-import {savedLayouts, saveLayout, restoreLayout, deleteLayout, matchingLayout} from './profiles.js';
+import {savedLayouts, saveLayout, restoreLayout, deleteLayout, matchingLayout, layoutIsClean, captureCleanLayout, rememberLayout, noteRevertedLayout} from './profiles.js';
 import {LOGOS} from './logos.js';
 import {MODULES, addBar, removeBar, addModule, removeModule, patchBar, setFloating, setKind,
     createGroup, deleteGroup, assignGroup, resizeSpacer, reorderModule, moveModule, undoPreset, setCustomColor, patchModule, patchGroup,
@@ -102,7 +102,7 @@ export class SettingsWindow {
         this._build();
         this.changed = settings.connect('changed', (_settings, key) => {
             if (this.writing) return;
-            if (key === 'group-preview') return;
+            if (key === 'group-preview' || key === 'layout-baseline') return;
             if (key === 'preferences-group') { this.groupId = settings.get_string(key) || null; this.mode = 'bar'; }
             if (key === 'preferences-bar') {
                 const index = settings.get_int(key);
@@ -182,6 +182,7 @@ export class SettingsWindow {
             card.connect('clicked', () => this._confirmLayout(() => this._write(() => {
                 const favorites = new Gio.Settings({schema_id: 'org.gnome.shell'}).get_strv('favorite-apps');
                 applyPreset(this.settings, id, favorites);
+                rememberLayout(this.settings);
                 this.barIndex = 0; this.moduleId = null; this.mode = 'bar';
             })));
             this.presets.append(card);
@@ -197,7 +198,10 @@ export class SettingsWindow {
         const savedScroll = new Gtk.ScrolledWindow({child: this.savedChips, hexpand: true,
             hscrollbar_policy: Gtk.PolicyType.AUTOMATIC, vscrollbar_policy: Gtk.PolicyType.NEVER});
         saved.append(savedScroll);
-        this.undo = button('Undo', () => this._confirmLayout(() => this._write(() => undoPreset(this.settings))));
+        this.undo = button('Undo', () => this._confirmLayout(() => this._write(() => {
+            undoPreset(this.settings);
+            noteRevertedLayout(this.settings);
+        })));
         saved.append(this.undo);
         this.savedRow = saved;
         content.append(saved);
@@ -241,9 +245,22 @@ export class SettingsWindow {
         this._refresh();
     }
 
+    _captureCleanLayout() {
+        const wasWriting = this.writing;
+        this.writing = true;
+        try { captureCleanLayout(this.settings); }
+        finally { this.writing = wasWriting; }
+    }
+
     _status() {
+        this._captureCleanLayout();
         const profile = matchingLayout(this.settings);
-        this.status.label = profile ? `Saved as “${profile.name}”` : 'Unsaved layout changes\nChanges apply live to your desktop.';
+        if (!layoutIsClean(this.settings))
+            this.status.label = 'Unsaved layout changes\nChanges apply live to your desktop.';
+        else if (profile)
+            this.status.label = `Saved as “${profile.name}”`;
+        else
+            this.status.label = 'Changes apply live to your desktop.';
     }
 
     _loadCss() {
@@ -1616,7 +1633,8 @@ export class SettingsWindow {
     }
 
     _confirmLayout(action) {
-        if (matchingLayout(this.settings)) { action(); return; }
+        this._captureCleanLayout();
+        if (layoutIsClean(this.settings)) { action(); return; }
         const dialog = new Adw.AlertDialog({heading: 'Keep your layout changes?', body: 'Save your current layout before switching, or discard the unsaved changes.'});
         let n = 1; while (savedLayouts(this.settings).some(profile => profile.name === `Layout ${n}`)) n++;
         const entry = new Gtk.Entry({text: `Layout ${n}`, max_length: 80}); dialog.extra_child = entry;

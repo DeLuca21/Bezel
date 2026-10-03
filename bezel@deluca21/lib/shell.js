@@ -73,7 +73,7 @@ export class BezelOverlay {
                 this.openSettings();
                 return;
             }
-            if (!['known-indicators', 'saved-layouts', 'previous-layout', 'shortcut-overrides', 'show-settings', 'preferences-bar'].includes(key)) this.queueRebuild();
+            if (!['known-indicators', 'saved-layouts', 'previous-layout', 'layout-baseline', 'shortcut-overrides', 'show-settings', 'preferences-bar'].includes(key)) this.queueRebuild();
         });
         this._monitors = Main.layoutManager.connect('monitors-changed', () => this.queueRebuild());
         this._recordingWatch = Main.screenshotUI?.connect('notify::screencast-in-progress', () => this._syncRecordingStop());

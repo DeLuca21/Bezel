@@ -344,6 +344,10 @@ function groupRecord(group) {
 export function readBars(settings) {
     const config = readConfig(settings);
     const bars = Array.isArray(config.bars) && config.bars.length ? config.bars : [{}];
+    return normalizeBars(bars);
+}
+
+export function normalizeBars(bars) {
     return bars.slice(0, 4).map(value => {
         const bar = value && typeof value === 'object' ? value : {};
         const modules = normalizeModules(bar.modules);
@@ -510,6 +514,80 @@ export function saveDashboard(settings, dashboard) {
     settings.set_string('config', JSON.stringify({...readConfig(settings), dashboard}));
 }
 
+export const PRESET_IDS = ['caelestia', 'panel', 'dock', 'hybrid', 'islands', 'split'];
+
+const stableValue = value => {
+    if (Array.isArray(value)) return value.map(stableValue);
+    if (value && typeof value === 'object')
+        return Object.fromEntries(Object.keys(value).sort().map(key => [key, stableValue(value[key])]));
+    return value;
+};
+
+const presetOptions = id => {
+    const shell = id === 'caelestia';
+    return {
+        showFrame: shell,
+        indicatorBar: 0,
+        powerStyle: shell ? 'rail' : 'list',
+        sliderStyle: shell ? 'edge' : 'drawer',
+        powerPosition: shell ? 'right' : 'icon',
+        sessionDim: shell,
+        powerButtonHover: !shell,
+        indicatorIconSize: shell ? 16 : 22,
+        indicatorSpacing: shell ? 16 : 14,
+        superLauncher: !shell,
+    };
+};
+
+// Pins, logo, and a running indicator ride along; everything else is the preset.
+function barsForPreset(settings, id, favorites = []) {
+    const config = readConfig(settings);
+    const bars = readBars(settings);
+    const pins = [...new Set(bars.flatMap(bar => bar.pinned))];
+    const source = bars.find(bar => bar.modules.some(module => module.id === 'logo')) ?? bars[0];
+    const indicator = bars.flatMap(bar => bar.modules).find(module => module.id === 'indicators');
+    const next = presetBars(id, Array.isArray(config.bars) ? pins : favorites.map(app => `app:${app}`)).map((bar, index) => {
+        const current = bars[index];
+        const carried = current?.modules.some(module => module.id === 'apps') ? current.runningApps : source?.runningApps;
+        return {...bar,
+            logoIcon: source?.logoIcon, logoAction: source?.logoAction, appClick: source?.appClick,
+            runningApps: bar.modules.some(module => module.id === 'apps') ? carried !== false : false};
+    });
+    if (indicator && next[0])
+        next[0].modules = [...next[0].modules, {id: 'indicators', place: indicator.place || 'end', group: ''}];
+    return next;
+}
+
+function presetMatches(settings, id) {
+    const config = readConfig(settings);
+    const current = Array.isArray(config.bars) && config.bars.length ? config.bars : [{}];
+    if (JSON.stringify(stableValue(normalizeBars(current))) !== JSON.stringify(stableValue(normalizeBars(barsForPreset(settings, id)))))
+        return false;
+    const options = presetOptions(id);
+    if (settings.get_boolean('show-frame') !== options.showFrame) return false;
+    if (settings.get_int('indicator-bar') !== options.indicatorBar) return false;
+    const has = key => !settings.settings_schema || settings.settings_schema.has_key?.(key);
+    if (has('power-style') && (settings.get_string('power-style') !== options.powerStyle
+        || settings.get_string('slider-style') !== options.sliderStyle
+        || settings.get_string('power-position') !== options.powerPosition
+        || settings.get_boolean('session-dim') !== options.sessionDim
+        || settings.get_boolean('power-button-hover') !== options.powerButtonHover))
+        return false;
+    if (has('indicator-icon-size') && (settings.get_int('indicator-icon-size') !== options.indicatorIconSize
+        || settings.get_int('indicator-spacing') !== options.indicatorSpacing))
+        return false;
+    if (has('super-launcher') && settings.get_boolean('super-launcher') !== options.superLauncher)
+        return false;
+    return true;
+}
+
+// The layout currently on screen, when it is still an untouched built-in preset.
+export function builtInLayout(settings) {
+    const mode = readConfig(settings).layoutMode;
+    const ids = PRESET_IDS.includes(mode) ? [mode] : PRESET_IDS;
+    return ids.find(id => presetMatches(settings, id)) ?? null;
+}
+
 export function presetBars(id, pinned = []) {
     const modules = (ids, places = {}) => ids.map(key => ({id: key, place: places[key] ?? PLACES[key]}));
     const dockModules = () => modules(['logo', 'apps'], {apps: 'center'});
@@ -539,36 +617,27 @@ export function presetBars(id, pinned = []) {
 
 // Built-in layouts replace geometry; named profiles retain complete custom layouts.
 export function applyPreset(settings, id, favorites = []) {
-    if (!['caelestia', 'panel', 'dock', 'hybrid', 'islands', 'split'].includes(id)) return;
+    if (!PRESET_IDS.includes(id)) return;
     const config = readConfig(settings);
-    const bars = readBars(settings);
     settings.set_string('previous-layout', JSON.stringify({config: settings.get_string('config'), frame: settings.get_boolean('show-frame'), indicatorBar: settings.get_int('indicator-bar')}));
-    const pins = [...new Set(bars.flatMap(bar => bar.pinned))];
-    const source = bars.find(bar => bar.modules.some(module => module.id === 'logo')) ?? bars[0];
-    const indicator = bars.flatMap(bar => bar.modules).find(module => module.id === 'indicators');
-    const next = presetBars(id, Array.isArray(config.bars) ? pins : favorites.map(app => `app:${app}`)).map(bar => ({...bar,
-            logoIcon: source.logoIcon, logoAction: source.logoAction,
-            appClick: source.appClick, runningApps: bar.modules.some(module => module.id === 'apps') ? source.runningApps : false}));
-    if (indicator && next[0])
-        next[0].modules = [...next[0].modules, {id: 'indicators', place: indicator.place || 'end', group: ''}];
-    settings.set_string('config', JSON.stringify({...config, layoutMode: id, bars: next}));
-    settings.set_boolean('show-frame', id === 'caelestia');
-    settings.set_int('indicator-bar', 0);
-    const shell = id === 'caelestia';
+    const options = presetOptions(id);
+    settings.set_string('config', JSON.stringify({...config, layoutMode: id, bars: barsForPreset(settings, id, favorites)}));
+    settings.set_boolean('show-frame', options.showFrame);
+    settings.set_int('indicator-bar', options.indicatorBar);
     if (!settings.settings_schema || settings.settings_schema.has_key?.('power-style')) {
-        settings.set_string('power-style', shell ? 'rail' : 'list');
-        settings.set_string('slider-style', shell ? 'edge' : 'drawer');
-        settings.set_string('power-position', shell ? 'right' : 'icon');
-        settings.set_boolean('session-dim', shell);
-        settings.set_boolean('power-button-hover', !shell);
+        settings.set_string('power-style', options.powerStyle);
+        settings.set_string('slider-style', options.sliderStyle);
+        settings.set_string('power-position', options.powerPosition);
+        settings.set_boolean('session-dim', options.sessionDim);
+        settings.set_boolean('power-button-hover', options.powerButtonHover);
     }
     if (!settings.settings_schema || settings.settings_schema.has_key?.('indicator-icon-size')) {
-        settings.set_int('indicator-icon-size', shell ? 16 : 22);
-        settings.set_int('indicator-spacing', shell ? 16 : 14);
+        settings.set_int('indicator-icon-size', options.indicatorIconSize);
+        settings.set_int('indicator-spacing', options.indicatorSpacing);
     }
     if (!settings.settings_schema || settings.settings_schema.has_key?.('super-launcher')) {
-        settings.set_boolean('super-launcher', !shell);
-        if (shell) {
+        settings.set_boolean('super-launcher', options.superLauncher);
+        if (id === 'caelestia') {
             settings.set_strv('launcher-shortcut', ['<Super>space']);
             settings.set_strv('overview-shortcut', []);
         }

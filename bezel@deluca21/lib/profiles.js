@@ -1,6 +1,58 @@
 import GLib from 'gi://GLib';
 
-const EXCLUDED = new Set(['saved-layouts', 'previous-layout', 'shortcut-overrides', 'known-indicators', 'show-settings', 'preferences-bar', 'edit-mode']);
+import {builtInLayout} from './config.js';
+
+const EXCLUDED = new Set(['saved-layouts', 'previous-layout', 'layout-baseline', 'shortcut-overrides', 'known-indicators', 'show-settings', 'preferences-bar', 'preferences-group', 'group-preview', 'edit-mode']);
+
+const hasBaseline = settings => Boolean(settings.settings_schema?.has_key?.('layout-baseline'));
+
+const stableValue = value => {
+    if (Array.isArray(value)) return value.map(stableValue);
+    if (value && typeof value === 'object')
+        return Object.fromEntries(Object.keys(value).sort().map(key => [key, stableValue(value[key])]));
+    return value;
+};
+
+const parsedConfig = value => {
+    try {
+        const config = JSON.parse(value || '{}');
+        if (!config || typeof config !== 'object' || Array.isArray(config)) return null;
+        delete config.indicatorsPlaced;
+        return stableValue(config);
+    } catch {
+        return null;
+    }
+};
+
+const sameItem = (key, saved, current) => {
+    if (!saved || saved.type !== current.type) return false;
+    if (JSON.stringify(saved.value) === JSON.stringify(current.value)) return true;
+    if (key !== 'config') return false;
+    const left = parsedConfig(saved.value);
+    const right = parsedConfig(current.value);
+    return Boolean(left && right) && JSON.stringify(left) === JSON.stringify(right);
+};
+
+const defaultItem = (settings, key) => {
+    const value = settings.settings_schema.get_key(key).get_default_value();
+    return {type: value.get_type_string(), value: value.deepUnpack()};
+};
+
+const sameValues = (settings, stored, current) => Object.entries(current).every(([key, item]) => {
+    const saved = stored?.[key];
+    return sameItem(key, saved ?? defaultItem(settings, key), item);
+});
+
+const baselineValues = settings => {
+    if (!hasBaseline(settings)) return null;
+    try {
+        const value = JSON.parse(settings.get_string('layout-baseline') || '');
+        return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+    } catch {
+        return null;
+    }
+};
+
 export function savedLayouts(settings) {
     try {
         const list = JSON.parse(settings.get_string('saved-layouts'));
@@ -17,8 +69,32 @@ export function layoutValues(settings) {
 
 export function matchingLayout(settings) {
     const current = layoutValues(settings);
-    return savedLayouts(settings).find(profile => Object.entries(current).every(([key, item]) =>
-        JSON.stringify(profile.values[key]) === JSON.stringify(item))) ?? null;
+    return savedLayouts(settings).find(profile => sameValues(settings, profile.values, current)) ?? null;
+}
+
+// Clean when the screen matches a named save, the last applied or loaded layout, or an untouched preset.
+export function layoutIsClean(settings) {
+    if (matchingLayout(settings)) return true;
+    const baseline = baselineValues(settings);
+    if (baseline) return sameValues(settings, baseline, layoutValues(settings));
+    return Boolean(builtInLayout(settings));
+}
+
+export function captureCleanLayout(settings) {
+    if (!hasBaseline(settings) || settings.get_string('layout-baseline')) return;
+    if (matchingLayout(settings) || builtInLayout(settings))
+        settings.set_string('layout-baseline', JSON.stringify(layoutValues(settings)));
+}
+
+export function rememberLayout(settings) {
+    if (!hasBaseline(settings)) return;
+    settings.set_string('layout-baseline', JSON.stringify(layoutValues(settings)));
+}
+
+export function noteRevertedLayout(settings) {
+    if (!hasBaseline(settings)) return;
+    if (matchingLayout(settings) || builtInLayout(settings)) rememberLayout(settings);
+    else settings.set_string('layout-baseline', '');
 }
 
 export function saveLayout(settings, name) {
@@ -28,6 +104,7 @@ export function saveLayout(settings, name) {
     const list = savedLayouts(settings).filter(item => item.name !== name);
     list.push({name, values});
     settings.set_string('saved-layouts', JSON.stringify(list));
+    rememberLayout(settings);
 }
 
 export function deleteLayout(settings, name) {
@@ -47,4 +124,5 @@ export function restoreLayout(settings, profile) {
         values.push([key, variant]);
     }
     for (const [key, variant] of values) settings.set_value(key, variant);
+    rememberLayout(settings);
 }

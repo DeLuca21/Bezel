@@ -37,6 +37,7 @@
     <key name="frame-notifications" type="b"><default>true</default></key>
     <key name="indicator-icon-size" type="i"><default>22</default><range min="12" max="40"/></key>
     <key name="previous-layout" type="s"><default>""</default></key>
+    <key name="layout-baseline" type="s"><default>""</default><summary>Last saved or applied layout, used to detect unsaved changes</summary></key>
     <key name="power-hover" type="b"><default>false</default></key>
     <key name="clock-hover" type="b"><default>true</default></key>
     <key name="power-button-hover" type="b"><default>true</default></key>
