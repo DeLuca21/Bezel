@@ -1770,27 +1770,6 @@ class Bar {
         }
     }
 
-    _stickOuterEdge() {
-        const place = this._appsPlace;
-        if ((place !== 'start' && place !== 'end') || this._dockContent)
-            return;
-        const cells = this._cells ?? [];
-        if (cells.length < 3)
-            return;
-        const outerPlace = place === 'start' ? 'end' : 'start';
-        const cell = cells[outerPlace === 'end' ? 2 : 0];
-        const zone = this._zones?.[outerPlace];
-        if (!cell || !zone)
-            return;
-        const along = cell._bezelAlong || 0;
-        const need = this._contentSpan(zone);
-        const pad = outerPlace === 'end' ? Math.max(0, Math.round(along - need)) : 0;
-        const side = this._vertical ? 'top' : 'left';
-        zone.style = this._emptyPills?.has(outerPlace)
-            ? 'spacing: 0px;'
-            : this._zoneStyle(` padding-${side}: ${pad}px;`);
-    }
-
     _place(overrides = null) {
         overrides ??= this._geomDrag?.pending;
         this._layoutApps = overrides && overrides.appsLength != null
@@ -1908,7 +1887,9 @@ class Bar {
             placeGap(lead, before);
             placeGap(trail, after);
         }
-        this._stickOuterEdge();
+        // _alignZone already anchors the opposite zone at its outer edge.
+        // Padding a scrollable St.BoxLayout to fill its cell leaves visible
+        // buttons outside its pick region, so they stop receiving clicks.
         this._alignAppsContents();
         this._pinEdgeZones();
         this._layoutEditHandles();
