@@ -956,11 +956,10 @@ class Bar {
             parent.remove_child(apps);
             const view = pinParent ? this._dockViewport : this._appsClip();
             const scroll = view._bezelScroll ?? view;
-            for (const child of [...scroll.get_children()])
-                if (child !== apps)
-                    scroll.remove_child(child);
-            if (apps.get_parent() !== scroll)
-                scroll.add_child(apps);
+            // ScrollView owns internal scrollbar actors as well as its content.
+            // Removing its children directly leaves native scrollbar references
+            // pointing at detached (and eventually disposed) actors.
+            scroll.set_child(apps);
             apps.x_expand = false;
             apps.y_expand = false;
             parent.insert_child_at_index(view, index);
