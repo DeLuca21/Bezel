@@ -1,16 +1,25 @@
-<p align="center">
-  <img src="./assets/icon/bezel.png" alt="Bezel" width="140">
-</p>
-
 # Bezel
 
-<p align="center">
-  <img alt="GNOME Shell" src="https://img.shields.io/badge/GNOME%20Shell-48%E2%80%9351-4c4f69?style=flat-square">
-  <img alt="Extension" src="https://img.shields.io/badge/extension-bezel%40deluca21-7287fd?style=flat-square">
-</p>
+[![GNOME Shell](https://img.shields.io/badge/GNOME%20Shell-48%E2%80%9351-%23b4befe?style=for-the-badge&labelColor=%23585b70&logo=gnome&logoColor=white)](https://www.gnome.org)
+[![Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FDeLuca21%2FBezel%2Fmaster%2Fbezel%40deluca21%2Fmetadata.json&query=%24%5B%27version-name%27%5D&label=version&style=for-the-badge&labelColor=%23585b70&color=%23cba6f7)](https://github.com/DeLuca21/Bezel/blob/master/bezel@deluca21/metadata.json)
+[![GitHub Issues](https://img.shields.io/github/issues/DeLuca21/Bezel?style=for-the-badge&labelColor=%23585b70&color=%23eba0ac&logo=github)](https://github.com/DeLuca21/Bezel/issues)
+
+
+---
 
 <p align="center">
+  <img src="./assets/icon/bezel.png" alt="Bezel" width="180">
+</p>
+<p align="center">
   A Caelestia-inspired shell for GNOME: one rounded frame, your own bars and docks, and drawers that join the desktop.
+</p>
+<p align="center">
+  <a href="https://ko-fi.com/DeLuca21" target="_blank">
+    <img src="https://ko-fi.com/img/githubbutton_sm.svg" height="35" alt="Support me on Ko-fi" />
+  </a>
+  <a href="https://buymeacoffee.com/DeLuca21" target="_blank">
+    <img src="https://cdn.buymeacoffee.com/buttons/default-red.png" alt="Buy Me A Coffee" height="41" width="174">
+  </a>
 </p>
 
 ---
@@ -99,8 +108,18 @@ Right-click a bar for settings, edit mode, panel or dock, floating, autohide, an
 
 ## 🛠 Issues & Support
 
-- Found a bug? Open a GitHub issue.
-- Pull requests are welcome.
+- Found a bug? Report it via [GitHub Issues](https://github.com/DeLuca21/Bezel/issues).
+- Have a feature request? Feel free to suggest improvements.
+- Pull requests are welcome!
+
+---
+
+## ☕ Support the Project
+
+If you enjoy Bezel, consider **supporting development**:
+
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/DeLuca21)
+[![BuyMeACoffee](https://cdn.buymeacoffee.com/buttons/default-red.png)](https://www.buymeacoffee.com/DeLuca21)
 
 ---
 
