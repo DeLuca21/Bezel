@@ -66,7 +66,7 @@ const stringValue = text => {
 };
 const scroller = child => new Gtk.ScrolledWindow({child, hscrollbar_policy: Gtk.PolicyType.NEVER,
     vscrollbar_policy: Gtk.PolicyType.AUTOMATIC, hexpand: true, vexpand: true});
-const REMOTE_METADATA = 'https://raw.githubusercontent.com/DeLuca21/Bezel/master/bezel@deluca21/metadata.json';
+const REMOTE_METADATA = 'https://api.github.com/repos/DeLuca21/Bezel/contents/bezel@deluca21/metadata.json?ref=master';
 const UPDATE_COMMANDS = [
     'rm -rf /tmp/bezel-install',
     'git clone --depth 1 https://github.com/DeLuca21/Bezel.git /tmp/bezel-install',
@@ -91,6 +91,16 @@ const versionDelta = (local, remote) => {
         if (diff) return diff;
     }
     return 0;
+};
+const remoteVersion = text => {
+    const data = JSON.parse(text);
+    if (data['version-name'])
+        return data['version-name'];
+    if (data.encoding === 'base64' && data.content) {
+        const decoded = new TextDecoder().decode(GLib.base64_decode(data.content.replace(/\s/g, '')));
+        return JSON.parse(decoded)['version-name'] || null;
+    }
+    return null;
 };
 
 export class SettingsWindow {
@@ -235,11 +245,22 @@ export class SettingsWindow {
         this.sidebarScroll = new Gtk.ScrolledWindow({child: sidebar, hexpand: true, vexpand: true,
             hscrollbar_policy: Gtk.PolicyType.NEVER, vscrollbar_policy: Gtk.PolicyType.AUTOMATIC});
         const meta = this._metadata();
+        const versionRow = horizontal(4, {halign: Gtk.Align.START, valign: Gtk.Align.CENTER});
+        const refreshIcon = Gtk.Image.new_from_icon_name('view-refresh-symbolic');
+        refreshIcon.pixel_size = 12;
+        this.versionRefresh = new Gtk.Button({
+            child: refreshIcon, has_frame: false, valign: Gtk.Align.CENTER,
+            tooltip_text: 'Check for updates',
+        });
+        this.versionRefresh.add_css_class('version-refresh');
+        this.versionRefresh.connect('clicked', () => this._checkVersion());
         this.versionButton = button(meta['version-name'] || 'About', () => this._about(), 'version-tag',
             {halign: Gtk.Align.START, tooltip_text: 'About Bezel'});
+        versionRow.append(this.versionRefresh);
+        versionRow.append(this.versionButton);
         this.side = vertical(8, {width_request: 260, vexpand: true});
         this.side.append(this.sidebarScroll);
-        this.side.append(this.versionButton);
+        this.side.append(versionRow);
         body.append(this.side);
         this.card = vertical(14, {hexpand: true, valign: Gtk.Align.START});
         this.card.add_css_class('editor-card');
@@ -293,6 +314,13 @@ export class SettingsWindow {
             .bezel-settings button.version-tag label { color: ${theme.muted}; font-size: 12px; }
             .bezel-settings button.version-tag:hover label,
             .bezel-settings button.version-tag.has-update label { color: ${theme.accent}; }
+            .bezel-settings button.version-refresh,
+            .bezel-settings button.version-refresh:hover {
+                background: transparent; background-image: none; border-color: transparent; box-shadow: none;
+                padding: 0; min-height: 0; min-width: 0;
+            }
+            .bezel-settings button.version-refresh image { color: ${theme.muted}; }
+            .bezel-settings button.version-refresh:hover image { color: ${theme.accent}; }
             .bezel-settings linkbutton { background: transparent; border: none; box-shadow: none; padding: 0; min-height: 0; }
             .bezel-settings linkbutton label { color: ${theme.accent}; }
             .bezel-settings .heading { font-size: 21px; font-weight: 750; }
@@ -1635,6 +1663,11 @@ export class SettingsWindow {
             this.aboutUpdateButton.visible = available && !this.updateInstalling;
             this.aboutUpdateButton.sensitive = !this.updateInstalling;
         }
+        if (this.versionRefresh) {
+            const busy = this.updateRunning || this.updateInstalling;
+            this.versionRefresh.sensitive = !busy;
+            this.versionRefresh.tooltip_text = this.updateRunning ? 'Checking for updates…' : 'Check for updates';
+        }
     }
 
     _confirmUpdate() {
@@ -1713,7 +1746,6 @@ export class SettingsWindow {
             this._applyVersion();
             return;
         }
-        if (this.updateRunning) return;
         this.versionCancel?.cancel();
         const cancellable = new Gio.Cancellable();
         this.versionCancel = cancellable;
@@ -1723,15 +1755,20 @@ export class SettingsWindow {
         this._applyVersion();
         const session = new Soup.Session({timeout: 8});
         const message = Soup.Message.new('GET', REMOTE_METADATA);
+        const headers = message.get_request_headers();
+        headers.append('User-Agent', 'Bezel-Settings');
+        headers.append('Accept', 'application/vnd.github.raw+json');
+        headers.append('Cache-Control', 'no-cache');
         session.send_and_read_async(message, GLib.PRIORITY_DEFAULT, cancellable, (source, result) => {
+            const stale = () => cancellable.is_cancelled() || this.versionCancel !== cancellable;
             try {
                 const bytes = source.send_and_read_finish(result);
-                if (cancellable.is_cancelled()) return;
+                if (stale()) return;
                 if (message.get_status() !== Soup.Status.OK) throw new Error('status');
-                this.updateRemote = JSON.parse(textOf(bytes))['version-name'] || null;
+                this.updateRemote = remoteVersion(textOf(bytes));
                 this.updateError = null;
             } catch (error) {
-                if (cancellable.is_cancelled() || error?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
+                if (stale() || error?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
                 this.updateRemote = null;
                 this.updateError = 'Could not check for updates';
             }
