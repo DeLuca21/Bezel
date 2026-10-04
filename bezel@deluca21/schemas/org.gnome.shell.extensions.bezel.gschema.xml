@@ -1,6 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
   <schema id="org.gnome.shell.extensions.bezel" path="/org/gnome/shell/extensions/bezel/">
+    <key name="layout-transition" type="s"><default>'retreat'</default><choices><choice value="none"/><choice value="fade"/><choice value="slide"/><choice value="retreat"/><choice value="wipe"/></choices></key>
+    <key name="layout-transition-duration" type="i"><default>500</default><range min="0" max="1600"/></key>
+    <key name="layout-transition-request" type="i"><default>0</default></key>
+    <key name="preferences-target" type="s"><default>''</default></key>
+    <key name="launcher-layout-undo" type="s"><default>''</default></key>
+    <key name="launcher-web-engine" type="s"><default>'ddg'</default><choices><choice value="ddg"/><choice value="g"/><choice value="yt"/><choice value="w"/><choice value="gh"/></choices></key>
+    <key name="launcher-files" type="b"><default>true</default></key>
+    <key name="launcher-file-roots" type="as"><default>['~']</default></key>
     <key name="config" type="s">
       <default>""</default>
     </key>

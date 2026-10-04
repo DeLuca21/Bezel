@@ -1,8 +1,8 @@
 import GLib from 'gi://GLib';
 
-import {builtInLayout} from './config.js';
+import {builtInLayout, requestLayoutTransition} from './config.js';
 
-const EXCLUDED = new Set(['saved-layouts', 'previous-layout', 'layout-baseline', 'shortcut-overrides', 'known-indicators', 'show-settings', 'preferences-bar', 'preferences-group', 'group-preview', 'edit-mode']);
+const EXCLUDED = new Set(['layout-transition', 'layout-transition-duration', 'layout-transition-request', 'preferences-target', 'launcher-layout-undo', 'saved-layouts', 'previous-layout', 'layout-baseline', 'shortcut-overrides', 'known-indicators', 'show-settings', 'preferences-bar', 'preferences-group', 'group-preview', 'edit-mode']);
 
 const hasBaseline = settings => Boolean(settings.settings_schema?.has_key?.('layout-baseline'));
 
@@ -123,6 +123,7 @@ export function restoreLayout(settings, profile) {
         if (!settings.is_writable(key)) throw new Error(`${key} is locked`);
         values.push([key, variant]);
     }
+    requestLayoutTransition(settings);
     for (const [key, variant] of values) settings.set_value(key, variant);
     rememberLayout(settings);
 }

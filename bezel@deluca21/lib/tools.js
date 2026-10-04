@@ -3,32 +3,79 @@ import GLib from 'gi://GLib';
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
-const PANELS = [
-    ['Wi-Fi', 'network-wireless-symbolic', 'wifi'],
-    ['Network', 'network-wired-symbolic', 'network'],
-    ['Bluetooth', 'bluetooth-symbolic', 'bluetooth'],
-    ['Appearance', 'preferences-desktop-appearance-symbolic', 'appearance'],
-    ['Notifications', 'preferences-system-notifications-symbolic', 'notifications'],
-    ['Sound', 'audio-volume-high-symbolic', 'sound'],
-    ['Power', 'power-profile-balanced-symbolic', 'power'],
-    ['Displays', 'video-display-symbolic', 'display'],
-    ['Mouse & Touchpad', 'input-mouse-symbolic', 'mouse'],
-    ['Keyboard', 'input-keyboard-symbolic', 'keyboard'],
-    ['Privacy', 'preferences-system-privacy-symbolic', 'privacy'],
-    ['Users', 'system-users-symbolic', 'system'],
-    ['Date & Time', 'preferences-system-time-symbolic', 'datetime'],
-    ['Search', 'system-search-symbolic', 'search'],
-    ['Apps', 'view-app-grid-symbolic', 'applications'],
-    ['About', 'help-about-symbolic', 'info-overview'],
+const FALLBACK_PANELS = [
+    ['Wi-Fi', 'network-wireless-symbolic', ['wifi']],
+    ['Network', 'network-wired-symbolic', ['network']],
+    ['Bluetooth', 'bluetooth-symbolic', ['bluetooth']],
+    ['Appearance', 'preferences-desktop-appearance-symbolic', ['background']],
+    ['Notifications', 'preferences-system-notifications-symbolic', ['notifications']],
+    ['Sound', 'audio-volume-high-symbolic', ['sound']],
+    ['Power', 'power-profile-balanced-symbolic', ['power']],
+    ['Displays', 'video-display-symbolic', ['display']],
+    ['Mouse & Touchpad', 'input-mouse-symbolic', ['mouse']],
+    ['Keyboard', 'input-keyboard-symbolic', ['keyboard']],
+    ['Privacy & Security', 'preferences-system-privacy-symbolic', ['privacy']],
+    ['Users', 'system-users-symbolic', ['system', 'users']],
+    ['Date & Time', 'preferences-system-time-symbolic', ['system', 'datetime']],
+    ['Region & Language', 'preferences-desktop-locale-symbolic', ['system', 'region']],
+    ['Search', 'system-search-symbolic', ['search']],
+    ['Apps', 'view-app-grid-symbolic', ['applications']],
+    ['Online Accounts', 'goa-panel-symbolic', ['online-accounts']],
+    ['Sharing', 'folder-remote-symbolic', ['sharing']],
+    ['Printers', 'printer-symbolic', ['printers']],
+    ['Accessibility', 'preferences-desktop-accessibility-symbolic', ['universal-access']],
+    ['Multitasking', 'preferences-desktop-multitasking-symbolic', ['multitasking']],
+    ['System', 'preferences-system-symbolic', ['system']],
+    ['About', 'help-about-symbolic', ['system', 'about']],
 ];
 
-export function settingsPanels() {
-    return PANELS.map(([name, icon, panel]) => ({name, icon, panel, detail: 'Open Settings', keywords: `settings gnome control ${name}`}));
+let panelCache = null;
+
+function desktopPanels() {
+    const directory = Gio.File.new_for_path('/usr/share/applications');
+    const enumerator = directory.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+    const found = [];
+    try {
+        for (let info = enumerator.next_file(null); info; info = enumerator.next_file(null)) {
+            const filename = info.get_name();
+            if (!/^gnome-.*-panel\.desktop$/.test(filename))
+                continue;
+            const key = new GLib.KeyFile();
+            key.load_from_file(directory.get_child(filename).get_path(), GLib.KeyFileFlags.NONE);
+            const name = key.get_locale_string('Desktop Entry', 'Name', null);
+            const exec = key.get_string('Desktop Entry', 'Exec');
+            let icon = 'preferences-system-symbolic';
+            let words = '';
+            try { icon = key.get_string('Desktop Entry', 'Icon'); } catch { /* Icon is optional. */ }
+            try { words = key.get_string('Desktop Entry', 'Keywords'); } catch { /* Keywords are optional. */ }
+            const args = exec.split(/\s+/).slice(1).filter(arg => arg && !arg.startsWith('%'));
+            if (!name || !args.length)
+                continue;
+            found.push({name, icon, args, keywords: `settings gnome control ${name} ${words.replaceAll(';', ' ')}`});
+        }
+    } finally {
+        enumerator.close(null);
+    }
+    return found.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export function openSettings(panel) {
+export function settingsPanels() {
+    if (panelCache)
+        return panelCache;
     try {
-        Gio.Subprocess.new(['gnome-control-center', ...(panel ? [panel] : [])], Gio.SubprocessFlags.NONE);
+        const found = desktopPanels();
+        panelCache = found.length ? found : null;
+    } catch {
+        panelCache = null;
+    }
+    panelCache ??= FALLBACK_PANELS.map(([name, icon, args]) => ({name, icon, args, keywords: `settings gnome control ${name}`}));
+    return panelCache;
+}
+
+export function openSettings(...parts) {
+    const args = parts.flat().filter(Boolean);
+    try {
+        Gio.Subprocess.new(['gnome-control-center', ...args], Gio.SubprocessFlags.NONE);
     } catch (error) {
         console.warn(`Bezel: could not open Settings: ${error.message}`);
     }
@@ -217,8 +264,8 @@ function actionRow(bar, iconName, title, run) {
 export function settingsMenu(bar) {
     const box = new St.BoxLayout({orientation: 1, style: 'spacing: 8px;'});
     box.add_child(actionRow(bar, 'preferences-system-symbolic', 'All Settings', () => openSettings()));
-    for (const [name, icon, panel] of PANELS)
-        box.add_child(actionRow(bar, icon, name, () => openSettings(panel)));
+    for (const panel of settingsPanels())
+        box.add_child(actionRow(bar, panel.icon, panel.name, () => openSettings(panel.args)));
     return box;
 }
 

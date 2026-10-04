@@ -33,7 +33,8 @@ Bezel draws panels, docks, and popouts over GNOME Shell. Workspaces, apps, audio
 - **Desktop frame** with a rounded opening, drawer joins, and a shadow that follows the palette.
 - **Layouts** for a left rail, a bottom panel, a dock, or a top bar plus dock. Save your own and undo a preset.
 - **Bars and docks** on any edge, floating or reserved, with pins, running apps, and modules you can reorder.
-- **Launcher** on Super+Space. Search apps and Settings, run a calculation, convert a unit, or search the web with `!g`, `!yt`, `!r`, and the other bangs.
+- **Launcher** on Super+Space. Fuzzy-search apps, open windows, Bezel settings, themes and layouts. Visible Actions (`>`), Files (`/`), Web (`?`) and Commands (`$`) modes also support file paths, URLs, calculations, conversions and web bangs such as `!g` and `!yt`. Existing apps switch to their latest window; New window is a separate action.
+- **App feedback** per bar: highlight, lift or both on hover, optional press animation, and separate running/focused indicators.
 - **Quick controls** for volume, network, and Bluetooth, using GNOME’s own device lists.
 - **Dashboard** for the calendar, media, performance, and workspaces.
 - **Extension icons** hosted on a Bezel bar, with size, spacing, and order.
@@ -100,9 +101,15 @@ Log out and back in. The first time, enable **Bezel** in Extensions. Wayland loa
 
 Bezel settings open in a dedicated custom app, from the dashboard, launcher, Extensions app, or a bar’s right-click menu. Its palette, rounded cards and visual editor match Bezel. It runs as a real window with normal stacking, resizing and Super-dragging.
 
+In **Opening & motion**, Off, Fade, or Retreat runs for layout, preset, and palette changes. New installs use Retreat at 500 ms. Transitions respect GNOME’s reduced-motion preference.
+
 Preset cards and saved-layout chips sit above an interactive desktop preview and independently scrollable editor. Click a bar to select it, then use Contents, Size & space, or Apps & logo. Modules appear as chips inside sections and groups. Palettes show swatch cards; custom colours use GNOME’s picker. Switching layouts with unsaved changes offers Cancel, Discard, or Save and switch.
 
 Right-click a bar for settings, edit mode, panel or dock, floating, autohide, and remove. Edit mode outlines the bars, puts **+** on empty screen edges and on each section, and lets you drag what is already there. Edit mode never opens settings automatically. Right-click a module while editing to remove it, create a group, or move it into an existing group. Groups can contain any modules and empty spaces; removing a group keeps its contents. Resize spaces from their edit menu or click their chip in settings for an exact pixel size. App pins stay on the app’s right-click menu.
+
+Launcher search settings live under **Your shortcuts**: choose a web engine and search folders (separated by semicolons). File search excludes hidden folders and does not descend into symlinks, `node_modules` or `vendor`; each search covers up to six directory levels and 15,000 entries. Use `/claire` or `/ claire` to search filenames in Files mode. A full path such as `/home/jamie/Pictures/` searches that directory directly; use `//name` for an item directly under the filesystem root. Press Shift+Enter for a result’s secondary action. Matching apps show their windows directly underneath; select a window with Up/Down and Enter, or click it. Use the window-count button to expand or collapse the list. Commands run installed programs with arguments from your home folder: Enter uses a terminal, Shift+Enter runs in the background. Shell syntax requires an explicit shell such as `sh -c`.
+
+App feedback settings are under the selected bar’s **Apps** tab. Cycle windows is the default for bars without a saved click preference; existing preferences are preserved. Click actions include Cycle windows (focus the app, then cycle on repeated clicks), Minimize / restore (the current workspace’s window group), Activate, and Window list. Focus indicators can combine an accent line and background. Minimise/restore animations target the app’s icon, including after moving a bar. Lift points toward the desktop on each edge and respects GNOME’s motion preference. Applying a layout from the launcher exposes an **Undo layout change** action to restore the previous setup.
 
 ---
 

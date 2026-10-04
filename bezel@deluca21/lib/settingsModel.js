@@ -3,7 +3,7 @@ import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
 import Gtk from 'gi://Gtk';
 
-import {DATE_FORMATS, barGroups, EDGES, clamp, isSpacer, nextSpacerId, readBars, saveBars} from './config.js';
+import {requestLayoutTransition, DATE_FORMATS, barGroups, EDGES, clamp, isSpacer, nextSpacerId, readBars, saveBars} from './config.js';
 
 export const MODULES = [
     ['shelf', 'File shelf'], ['shortcuts', 'Shortcuts'], ['timer', 'Timer / stopwatch'], ['devices', 'Device batteries'], ['input', 'Sound input'],
@@ -352,6 +352,7 @@ export function undoPreset(settings) {
         const previous = JSON.parse(settings.get_string('previous-layout'));
         if (typeof previous.config !== 'string' || typeof previous.frame !== 'boolean')
             return false;
+        requestLayoutTransition(settings);
         settings.set_string('config', previous.config);
         settings.set_boolean('show-frame', previous.frame);
         if (Number.isInteger(previous.indicatorBar))

@@ -21,8 +21,9 @@ export function paintCorner(cr, width, height, color, corner) {
     cr.restore();
 }
 
-function source(cr, hex) {
-    cr.setSourceRGB(...[1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255));
+function source(cr, hex, alpha = 1) {
+    const rgb = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255);
+    cr.setSourceRGBA(rgb[0], rgb[1], rgb[2], alpha);
 }
 
 // The desktop opening is one path. A drawer is an indentation in that path,
@@ -110,7 +111,34 @@ export function openingPath(cr, width, height, sides, radius, popup = null, noti
     cr.closePath();
 }
 
-export function paintFrame(cr, width, height, sides, radius, color, shadow, popup = null, notification = null) {
+function roundedRect(cr, x, y, w, h, radius) {
+    const r = Math.max(0, Math.min(radius, w / 2, h / 2));
+    cr.newSubPath();
+    cr.arc(x + w - r, y + r, r, -Math.PI / 2, 0);
+    cr.arc(x + w - r, y + h - r, r, 0, Math.PI / 2);
+    cr.arc(x + r, y + h - r, r, Math.PI / 2, Math.PI);
+    cr.arc(x + r, y + r, r, Math.PI, Math.PI * 1.5);
+    cr.closePath();
+}
+
+// Island pills are a filled rounded rect. The shadow is only an offset under
+// that fill; without the fill the pill has no backdrop.
+export function paintPillBackdrop(cr, rect, radius, color, opacity, shadow) {
+    const depth = Number(shadow) || 0;
+    if (depth > 0) {
+        cr.setSourceRGBA(0, 0, 0, 0.22);
+        roundedRect(cr, rect.x, rect.y + Math.max(1, depth / 4), rect.w, rect.h, radius);
+        cr.fill();
+    }
+    const hex = `${color}`.replace('#', '');
+    const rgb = [0, 2, 4].map(index => parseInt(hex.slice(index, index + 2), 16) / 255);
+    roundedRect(cr, rect.x, rect.y, rect.w, rect.h, radius);
+    cr.setSourceRGBA(rgb[0] || 0, rgb[1] || 0, rgb[2] || 0, opacity);
+    cr.fill();
+}
+
+export function paintFrame(cr, width, height, sides, radius, color, shadow, popup = null, notification = null, alpha = 1) {
+    const coverage = Math.max(0, Math.min(1, Number(alpha) || 0));
     cr.setOperator(Cairo.Operator.CLEAR);
     cr.paint();
     cr.setOperator(Cairo.Operator.OVER);
@@ -120,16 +148,16 @@ export function paintFrame(cr, width, height, sides, radius, color, shadow, popu
     cr.rectangle(0, 0, width, height);
     cr.appendPath(opening);
     cr.setFillRule(Cairo.FillRule.EVEN_ODD);
-    source(cr, color);
+    source(cr, color, coverage);
     cr.fill();
-    if (shadow > 0) {
+    if (shadow > 0 && coverage > 0) {
         cr.save();
         cr.appendPath(opening);
         cr.clip();
         for (let i = shadow; i >= 1; i--) {
             cr.appendPath(opening);
             cr.setLineWidth(i * 2);
-            cr.setSourceRGBA(0, 0, 0, 0.035 * (1 - i / (shadow + 1)));
+            cr.setSourceRGBA(0, 0, 0, 0.035 * (1 - i / (shadow + 1)) * coverage);
             cr.stroke();
         }
         cr.restore();

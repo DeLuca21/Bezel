@@ -367,7 +367,10 @@ export function normalizeBars(bars) {
             appsLength: number(bar.appsLength ?? 0, 0, 0, 2400),
             appsCap: bar.appsCap === true,
             batteryPercentage: bar.batteryPercentage === true,
-            appClick: bar.appClick === 'activate' ? 'activate' : 'minimize',
+            appHover: ['none', 'lift', 'both'].includes(bar.appHover) ? bar.appHover : 'highlight',
+            appPress: bar.appPress !== false,
+            appFocus: ['none', 'background', 'both'].includes(bar.appFocus) ? bar.appFocus : 'line',
+            appClick: ['activate', 'minimize', 'previews'].includes(bar.appClick) ? bar.appClick : 'cycle',
             thickness: number(bar.thickness ?? 56, 56, 44, 88),
             iconSize: number(bar.iconSize ?? 22, 22, 12, 40),
             reserveSpace: bar.reserveSpace !== false,
@@ -618,6 +621,7 @@ export function presetBars(id, pinned = []) {
 // Built-in layouts replace geometry; named profiles retain complete custom layouts.
 export function applyPreset(settings, id, favorites = []) {
     if (!PRESET_IDS.includes(id)) return;
+    requestLayoutTransition(settings);
     const config = readConfig(settings);
     settings.set_string('previous-layout', JSON.stringify({config: settings.get_string('config'), frame: settings.get_boolean('show-frame'), indicatorBar: settings.get_int('indicator-bar')}));
     const options = presetOptions(id);
@@ -642,4 +646,10 @@ export function applyPreset(settings, id, favorites = []) {
             settings.set_strv('overview-shortcut', []);
         }
     }
+}
+
+// A request distinguishes deliberate layout switches from live editor updates.
+export function requestLayoutTransition(settings) {
+    if (settings.settings_schema?.has_key('layout-transition-request'))
+        settings.set_int('layout-transition-request', (settings.get_int('layout-transition-request') + 1) % 2147483647);
 }

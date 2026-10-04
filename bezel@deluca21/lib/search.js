@@ -1,43 +1,94 @@
 const normalize = value => String(value ?? '').normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase();
 
-// A word counts only when it appears in order as real text. Scattered letters do not match.
+function distance(a, b) {
+    let previous = null;
+    let row = Array.from({length: b.length + 1}, (_, i) => i);
+    for (let i = 0; i < a.length; i++) {
+        const next = [i + 1];
+        for (let j = 0; j < b.length; j++) {
+            let cost = Math.min(next[j] + 1, row[j + 1] + 1, row[j] + Number(a[i] !== b[j]));
+            if (i > 0 && j > 0 && a[i] === b[j - 1] && a[i - 1] === b[j]) cost = Math.min(cost, previous[j - 1] + 1);
+            next.push(cost);
+        }
+        previous = row; row = next;
+    }
+    return row[b.length];
+}
+
+function wordScore(word, text) {
+    if (word === text) return 0;
+    if (text.startsWith(word)) return 2;
+    const parts = text.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    if (parts.join('') === word) return 1;
+    const prefix = parts.findIndex(part => part.startsWith(word));
+    if (prefix >= 0) return 5 + Math.min(prefix, 6);
+    if (word.length > 1 && parts.map(part => part[0]).join('').startsWith(word)) return 8;
+    const at = text.indexOf(word);
+    if (at >= 0) return 12 + Math.min(at, 20);
+    let best = Infinity;
+    if (word.length >= 3) {
+        for (const [position, part] of parts.entries()) {
+            let cursor = 0, first = -1, last = -1;
+            for (let i = 0; i < part.length && cursor < word.length; i++) {
+                if (part[i] === word[cursor]) { if (first < 0) first = i; last = i; cursor++; }
+            }
+            if (cursor === word.length && last - first <= word.length * 4)
+                best = Math.min(best, 35 + last - first - word.length + Math.min(position * 3, 12) + Math.min(first, 8));
+        }
+    }
+    if (word.length >= 4) for (const [position, part] of parts.entries()) {
+        if (Math.abs(part.length - word.length) <= 1 && distance(word, part) <= 1)
+            best = Math.min(best, 45 + Math.min(position * 3, 12));
+    }
+    return best;
+}
+
 export function matchScore(query, value) {
     const text = normalize(value);
+    if (normalize(query).trim() === text) return 0;
     const words = normalize(query).trim().split(/\s+/).filter(Boolean);
-    if (!words.length)
-        return 0;
-    let score = 0;
-    for (const word of words) {
-        const at = text.indexOf(word);
-        if (at < 0)
-            return Infinity;
-        score += at === 0 ? 0 : 8 + Math.min(at, 24);
-    }
-    return score;
+    return words.reduce((sum, word) => sum + wordScore(word, text), 0);
 }
 
 export function scoreItem(query, item) {
-    const name = matchScore(query, item.name);
-    const keys = matchScore(query, item.keywords ?? '');
-    if (!Number.isFinite(name) && !Number.isFinite(keys))
-        return Infinity;
-    if (!Number.isFinite(name))
-        return 60 + keys;
-    if (!Number.isFinite(keys))
-        return name;
-    return Math.min(name, keys + 24);
+    return Math.min(matchScore(query, item.name), 60 + matchScore(query, `${item.name} ${item.keywords ?? ''}`));
 }
 
-// An exact or prefix hit drops results that only brushed a keyword or description.
 export function filterMatches(query, items) {
-    const ranked = items.map(item => ({...item, score: scoreItem(query, item)}))
+    return items.map(item => ({...item, score: scoreItem(query, item)}))
         .filter(item => Number.isFinite(item.score))
-        .sort((a, b) => a.score - b.score || a.name.localeCompare(b.name));
-    if (!normalize(query) || !ranked.length)
-        return ranked;
-    const best = ranked[0].score;
-    const limit = best <= 16 ? Math.max(best, 16) : best;
-    return ranked.filter(item => item.score <= limit);
+        .sort(compareSearchResults);
+}
+
+// Keep literal file hits useful, but prefer an equally good app name over a folder.
+export function compareSearchResults(a, b) {
+    const priority = item => item.file ? 6 : item.window ? 2 : 0;
+    return (a.score ?? -100) + priority(a) - ((b.score ?? -100) + priority(b))
+        || Number(Boolean(a.file)) - Number(Boolean(b.file))
+        || a.name.localeCompare(b.name, undefined, {sensitivity: 'base'})
+        || String(a.detail ?? '').localeCompare(String(b.detail ?? ''));
+}
+
+export function parseLauncherQuery(value) {
+    const query = value.trim();
+    const first = query[0];
+    if (['>', '$', '?'].includes(first)) return {mode: first, text: query.slice(1).trim()};
+    if (first === '/') {
+        // /name and / name are filters. A second slash makes a path explicit:
+        // /home/user/name, /tmp/, or //etc for an item directly under root.
+        const filter = /^\/\s/.test(value.trimStart()) || !query.slice(1).includes('/');
+        return {mode: '/', text: filter ? query.slice(1).trim() : query.replace(/^\/\//, '/')};
+    }
+    return {mode: first === '~' ? '/' : '', text: query};
+}
+
+export function websiteUrl(query) {
+    const value = query.trim();
+    if (/\s/.test(value)) return null;
+    if (/^https?:\/\/[^/]+/i.test(value)) return value;
+    if (/^(?:localhost|(?:\d{1,3}\.){3}\d{1,3})(?::\d+)?(?:[/?#].*)?$/i.test(value)) return `http://${value}`;
+    if (/^(?:[a-z0-9-]+\.)+(?:com|org|net|io|dev|app|edu|gov|co|au|uk|de|me|ai)(?::\d+)?(?:[/?#].*)?$/i.test(value)) return `https://${value}`;
+    return null;
 }
 
 const FACTORS = {

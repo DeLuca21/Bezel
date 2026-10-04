@@ -12,6 +12,8 @@ export class DesktopFrame {
         this.padding = state.radius + state.shadow + 2;
         this.state = state;
         this.theme = theme;
+        this.fade = 1;
+        this.spread = 1;
         this.actor = new St.Widget({reactive: false, x: monitor.x, y: monitor.y,
             width: monitor.width, height: monitor.height});
         this.actor.connect('destroy', () => { this.destroyed = true; });
@@ -42,13 +44,19 @@ export class DesktopFrame {
                         const [w, h] = area.get_surface_size();
                         cr.scale(w / area.width, h / area.height);
                         cr.translate(-area.x, -area.y);
-                        paintFrame(cr, width, height, this.sides, this.state.radius, this.theme.bg,
-                            this.state.shadow, this.popup?.corner ? null : this.popup,
+                        const spread = this.spread ?? 1;
+                        const sides = {
+                            top: this.sides.top * spread, right: this.sides.right * spread,
+                            bottom: this.sides.bottom * spread, left: this.sides.left * spread,
+                        };
+                        paintFrame(cr, width, height, sides, this.state.radius * spread, this.theme.bg,
+                            this.state.shadow * spread, this.popup?.corner ? null : this.popup,
                             this.popup?.corner ? this.popup : this.popup ? null : this.notification);
                     } finally { cr.$dispose(); }
                 });
             }
-            const content = JSON.stringify([this.sides, dynamic ? popup : null, dynamic ? notification : null]);
+            area.opacity = Math.round((this.fade ?? 1) * 255);
+            const content = JSON.stringify([this.sides, this.spread, dynamic ? popup : null, dynamic ? notification : null]);
             if (area._frameContent !== content) {
                 area._frameContent = content;
                 area.queue_repaint();
@@ -61,6 +69,27 @@ export class DesktopFrame {
             if (!retained.has(key)) area.destroy();
         this.surfaces = retained;
         this.areas = [...retained.values()];
+    }
+
+    setFade(alpha) {
+        const next = Math.max(0, Math.min(1, Number.isFinite(alpha) ? alpha : 0));
+        const opacity = Math.round(next * 255);
+        this.fade = next;
+        for (const area of this.areas)
+            area.opacity = opacity;
+    }
+
+    // shown 1 is the resting border. shown 0 has grown the opening out to the
+    // screen edge, so the border is gone. The actor itself does not move.
+    setSpread(shown) {
+        const next = Math.max(0, Math.min(1, Number.isFinite(shown) ? shown : 1));
+        if (this.spread === next)
+            return;
+        this.spread = next;
+        for (const area of this.areas) {
+            area._frameContent = null;
+            area.queue_repaint();
+        }
     }
 
     setReveal(id, edge, thickness, progress) {

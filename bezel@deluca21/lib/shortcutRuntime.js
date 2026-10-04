@@ -1,3 +1,4 @@
+import {activateApp} from './appActivation.js';
 import Pango from 'gi://Pango';
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
@@ -379,7 +380,7 @@ export function shortcutsPanel(bar, options) {
             try {
                 if (item.type === 'command') { show(commandPanel(bar, item)); return; }
                 if (item.type === 'live-folder') { show(liveFolder(bar, item.target)); return; }
-                if (item.type === 'app') { const app = Shell.AppSystem.get_default().lookup_app(item.target); if (!app) throw new Error('Application is not installed'); app.activate(); }
+                if (item.type === 'app') { const app = Shell.AppSystem.get_default().lookup_app(item.target); if (!app) throw new Error('Application is not installed'); activateApp(app); }
                 else if (['file', 'folder'].includes(item.type)) launch(fileFor(item.target));
                 else {
                     const actions = {screenshot: () => activateScreenshot().catch(error => Main.notify('Screenshot', error.message)), settings: () => openSettings(), notifications: () => { const a = bar._notificationsAction(); a.emit('clicked', 1); a.destroy(); }, power: () => bar._open('power', bar._actor, () => bar._session())};

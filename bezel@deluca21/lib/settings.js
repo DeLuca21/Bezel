@@ -130,6 +130,11 @@ export class SettingsWindow {
     open(index = -1) {
         if (index >= 0) { this.barIndex = index; this.mode = 'bar'; }
         this.groupId = this.settings.get_string('preferences-group') || null;
+        try {
+            const target = JSON.parse(this.settings.get_string('preferences-target') || '{}');
+            if (['bar', 'look', 'frame', 'shortcuts', 'opening', 'desktop'].includes(target.page)) this.mode = target.page;
+            if (['contents', 'size', 'appearance', 'apps'].includes(target.tab)) this.barTab = target.tab;
+        } catch {}
         this._refresh();
         this._checkVersion();
         this.window.present();
@@ -1262,10 +1267,17 @@ export class SettingsWindow {
 
     _apps(bar) {
         this.card.append(this._toggle('Show running applications', bar.runningApps, value => patchBar(this.settings, this.barIndex, {runningApps: value})));
-        this.card.append(this._segments([['minimize', 'Click to minimize'], ['activate', 'Click to activate']], bar.appClick, value => patchBar(this.settings, this.barIndex, {appClick: value})));
+        this.card.append(this._segments([['cycle', 'Cycle windows'], ['minimize', 'Minimize / restore'], ['activate', 'Activate'], ['previews', 'Window list']], bar.appClick, value => patchBar(this.settings, this.barIndex, {appClick: value})));
         this.card.append(label('Running indicator', 'subheading'));
         this.card.append(this._segments([['line', 'Line'], ['dot', 'Dot'], ['none', 'None']], bar.appIndicator,
             value => patchBar(this.settings, this.barIndex, {appIndicator: value})));
+        this.card.append(label('Hover effect', 'subheading'));
+        this.card.append(this._segments([['none', 'None'], ['highlight', 'Highlight'], ['lift', 'Lift'], ['both', 'Highlight + lift']], bar.appHover,
+            value => patchBar(this.settings, this.barIndex, {appHover: value})));
+        this.card.append(this._toggle('Press animation on click', bar.appPress, value => patchBar(this.settings, this.barIndex, {appPress: value})));
+        this.card.append(label('Focused application', 'subheading'));
+        this.card.append(this._segments([['none', 'None'], ['line', 'Accent line'], ['background', 'Background'], ['both', 'Line + background']], bar.appFocus,
+            value => patchBar(this.settings, this.barIndex, {appFocus: value})));
         this.card.append(label('Pinned applications', 'subheading'));
         const pins = flow(3);
         for (const id of bar.pinned) pins.insert(button(`${GioUnix.DesktopAppInfo.new(id.slice(4))?.get_display_name() ?? id.slice(4)} ×`, () => {
@@ -1414,6 +1426,16 @@ export class SettingsWindow {
             this._queueCard();
         }, 'accent'));
         this.card.append(this._step('Launcher width', this.settings.get_int('launcher-width'), 360, 1000, 20, value => this.settings.set_int('launcher-width', value)));
+        this.card.append(label('Launcher search', 'subheading'));
+        this.card.append(this._segments([['ddg', 'DuckDuckGo'], ['g', 'Google'], ['w', 'Wikipedia'], ['gh', 'GitHub'], ['yt', 'YouTube']], this.settings.get_string('launcher-web-engine'), value => this.settings.set_string('launcher-web-engine', value)));
+        this.card.append(this._toggle('Search files', this.settings.get_boolean('launcher-files'), value => this.settings.set_boolean('launcher-files', value)));
+        const roots = new Gtk.Entry({text: this.settings.get_strv('launcher-file-roots').join('; '), placeholder_text: '~/Documents; ~/Downloads'});
+        roots.connect('activate', () => this.settings.set_strv('launcher-file-roots', roots.text.split(';').map(value => value.trim()).filter(value => value.startsWith('/') || value === '~' || value.startsWith('~/'))));
+        this.card.append(label('Search folders (separate with ; and press Enter)', 'caption'));
+        this.card.append(roots);
+        this.card.append(label('Hidden folders and symlinks are excluded. Searches cover up to 6 levels and 15,000 entries. Use a full path to browse deeper folders.', 'caption'));
+        this.card.append(label('Actions > · Files / · Web ? · Commands $ · Shift+Enter uses the secondary action', 'caption'));
+
     }
 
     _captureShortcut(key, title, current = null) {
@@ -1455,6 +1477,9 @@ export class SettingsWindow {
             this.card.append(this._toggle(title, this.settings.get_boolean(key), value => this.settings.set_boolean(key, value)));
         this.card.append(this._step('Hover delay (ms)', this.settings.get_int('hover-delay'), 100, 1000, 50, value => this.settings.set_int('hover-delay', value)));
         this.card.append(this._step('Animation (ms)', this.settings.get_int('animation-duration'), 0, 800, 20, value => this.settings.set_int('animation-duration', value)));
+        const motion = this.settings.get_string('layout-transition');
+        this.card.append(this._segments([['none', 'Off'], ['fade', 'Fade'], ['retreat', 'Retreat']], ['none', 'fade', 'retreat'].includes(motion) ? motion : 'fade', value => this.settings.set_string('layout-transition', value)));
+        this.card.append(this._step('Layout transition (ms)', this.settings.get_int('layout-transition-duration'), 0, 1600, 40, value => this.settings.set_int('layout-transition-duration', value)));
     }
 
     _desktopCard() {

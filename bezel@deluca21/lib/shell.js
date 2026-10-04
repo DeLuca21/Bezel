@@ -1,3 +1,6 @@
+import {LayoutTransition} from './layoutTransition.js';
+import {activateApp, appClickHandler} from './appActivation.js';
+import {AppIconGeometry} from './appIconGeometry.js';
 import {moduleType, moduleView} from './moduleIdentity.js';
 import {moduleFeatures} from './moduleFeatures.js';
 import {expandedModule, inputDevices, outputDevices} from './expandedModules.js';
@@ -23,7 +26,7 @@ import {hexToRgba, resolveTheme} from './theme.js';
 
 import {PLACES, DATE_FORMATS, timePattern, barDateFormat, barTimeFormat, readState, readBars, saveBars, clamp, settingFlag, settingChoice, isSpacer, barGroups, barTheme, groupFillColor, groupAppearance, hoverEnabled, moduleLook, sliderLayout, powerLayout, powerDim, switchOn, adoptIndicators, recordingStopHost} from './config.js';
 import {sideWidths, reservedWidths, cornerRadius, zonePlacement} from './geometry.js';
-import {paintCorner} from './drawing.js';
+import {paintCorner, paintPillBackdrop} from './drawing.js';
 import {Services} from './services.js';
 import {DesktopFrame} from './frame.js';
 import {monthGrid, openCalendarDate} from './calendar.js';
@@ -54,7 +57,15 @@ export class BezelOverlay {
         this._chrome = [];
         this._frames = new Map();
         this._bars = [];
+        this.appIconGeometry = new AppIconGeometry();
+        this._layoutTransition = new LayoutTransition(this);
         this._id = settings.connect('changed', (_settings, key) => {
+            if (key === 'layout-transition-request') {
+                this._animateLayout = true;
+                this.queueRebuild();
+                return;
+            }
+            if (['layout-transition', 'layout-transition-duration'].includes(key)) return;
             if (key === 'edit-mode')
                 this._syncEditEscape();
             if (key === 'preferences-bar') {
@@ -62,7 +73,7 @@ export class BezelOverlay {
                 for (const bar of this._bars) bar.syncEditOutline();
                 return;
             }
-            if (key === 'preferences-group') return;
+            if (['preferences-group', 'preferences-target', 'launcher-layout-undo', 'launcher-files', 'launcher-file-roots', 'launcher-web-engine'].includes(key)) return;
             if (key === 'group-preview') {
                 try { this._groupPreview = JSON.parse(settings.get_string(key)); } catch { this._groupPreview = null; }
                 if (this._groupPreview?.action === 'open') this._showGroupPreview();
@@ -73,6 +84,8 @@ export class BezelOverlay {
                 this.openSettings();
                 return;
             }
+            if (key === 'theme')
+                this._animateLayout = true;
             if (!['known-indicators', 'saved-layouts', 'previous-layout', 'layout-baseline', 'shortcut-overrides', 'show-settings', 'preferences-bar'].includes(key)) this.queueRebuild();
         });
         this._monitors = Main.layoutManager.connect('monitors-changed', () => this.queueRebuild());
@@ -104,7 +117,10 @@ export class BezelOverlay {
         this._rebuildId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 40, () => {
             this._rebuildId = 0;
             try {
-                this.rebuild();
+                const animate = this._animateLayout;
+                this._animateLayout = false;
+                if (animate) this._layoutTransition.run(() => this.rebuild());
+                else { this._layoutTransition.cancel(); this.rebuild(); }
             } catch (error) {
                 console.error('Bezel rebuild failed', error);
                 Main.panel.show();
@@ -216,6 +232,7 @@ export class BezelOverlay {
         try {
             this._settings.set_int('preferences-bar', Number.isInteger(options.barIndex) ? options.barIndex : -1);
             this._settings.set_string('preferences-group', options.groupId || '');
+            this._settings.set_string('preferences-target', JSON.stringify({page: options.page || '', tab: options.tab || ''}));
             this._openPreferences?.()?.catch?.(error => console.error('Bezel preferences failed', error));
         } catch (error) {
             console.error('Bezel settings failed to open', error);
@@ -350,6 +367,7 @@ export class BezelOverlay {
     }
 
     destroy() {
+        this._layoutTransition.cancel();
         if (this._rebuildId)
             GLib.source_remove(this._rebuildId);
         if (this._id)
@@ -368,6 +386,7 @@ export class BezelOverlay {
             Main.screenshotUI?.disconnect(this._recordingWatch);
         this._recordingWatch = 0;
         this._clear();
+        this.appIconGeometry.destroy();
         stopShelfHelper();
         this.services.destroy();
         this.weather.destroy();
@@ -1212,26 +1231,8 @@ class Bar {
             const rect = vertical
                 ? {x: inset, y: offset, w: Math.max(1, width - inset - shadowInset), h: span}
                 : {x: offset, y: inset, w: span, h: Math.max(1, height - inset - shadowInset)};
-            const radius = Math.min(18, rect.w / 2, rect.h / 2);
-            const round = (x, y, w, h, r) => {
-                cr.newSubPath();
-                cr.arc(x + w - r, y + r, r, -Math.PI / 2, 0);
-                cr.arc(x + w - r, y + h - r, r, 0, Math.PI / 2);
-                cr.arc(x + r, y + h - r, r, Math.PI / 2, Math.PI);
-                cr.arc(x + r, y + r, r, Math.PI, Math.PI * 1.5);
-                cr.closePath();
-            };
-            const depth = Number(this._state.shadow) || 0;
-            if (depth > 0) {
-                cr.setSourceRGBA(0, 0, 0, 0.22);
-                round(rect.x, rect.y + Math.max(1, depth / 4), rect.w, rect.h, radius);
-                cr.fill();
-            }
-            const hex = `${this._theme.bg}`.replace('#', '');
-            const rgb = [0, 2, 4].map(index => parseInt(hex.slice(index, index + 2), 16) / 255);
-            round(rect.x, rect.y, rect.w, rect.h, radius);
-            cr.setSourceRGBA(rgb[0] || 0, rgb[1] || 0, rgb[2] || 0, (this._state.barOpacity ?? 100) / 100);
-            cr.fill();
+            paintPillBackdrop(cr, rect, Math.min(18, rect.w / 2, rect.h / 2), this._theme.bg,
+                (this._state.barOpacity ?? 100) / 100, this._state.shadow);
         } finally {
             cr.$dispose();
         }
@@ -3101,7 +3102,9 @@ class Bar {
     _app(id, size) {
         const app = Shell.AppSystem.get_default().lookup_app(id.slice(4));
         const content = new St.Widget({width: size, height: size, layout_manager: new Clutter.BinLayout()});
-        content.add_child(app ? app.create_icon_texture(size) : new St.Icon({icon_name: 'application-x-executable-symbolic', icon_size: size}));
+        const icon = app ? app.create_icon_texture(size) : new St.Icon({icon_name: 'application-x-executable-symbolic', icon_size: size});
+        content.add_child(icon);
+        icon.set_pivot_point(.5, .5);
         const indicator = new St.Widget({height: 3, width: this._state.appIndicator === 'dot' ? 3 : 14, x_align: Clutter.ActorAlign.CENTER,
             y_align: Clutter.ActorAlign.END, x_expand: true, y_expand: true, translation_y: 5,
             style: `background-color: ${this._theme.accent}; border-radius: 3px;`});
@@ -3111,18 +3114,39 @@ class Bar {
         const button = new St.Button({child: content, track_hover: true, x_align: Clutter.ActorAlign.CENTER,
             style: 'padding: 5px; border-radius: 12px;',
             accessible_name: app?.get_name() ?? id.slice(4)});
+        const updateFeedback = () => {
+            const focused = Shell.WindowTracker.get_default().focus_app === app;
+            const highlighted = (button.hover && ['highlight', 'both'].includes(this._state.appHover)) || (focused && ['background', 'both'].includes(this._state.appFocus));
+            button.style = `padding: 5px; border-radius: 12px; background-color: ${highlighted ? this._theme.surface : 'transparent'};`;
+            indicator.visible = (focused && ['line', 'both'].includes(this._state.appFocus)) || (this._state.appIndicator !== 'none' && Boolean(app?.get_windows().length));
+            indicator.width = focused && ['line', 'both'].includes(this._state.appFocus) ? size * .7 : this._state.appIndicator === 'dot' ? 3 : 14;
+            indicator.opacity = focused ? 255 : 130;
+            const lift = button.hover && !this._state.editMode && ['lift', 'both'].includes(this._state.appHover) ? 4 : 0;
+            icon.ease({translation_x: this._state.edge === 'left' ? lift : this._state.edge === 'right' ? -lift : 0,
+                translation_y: this._state.edge === 'top' ? lift : this._state.edge === 'bottom' ? -lift : 0,
+                duration: allowsMotion(St.Settings.get(), St.ReducedMotion) ? 140 : 0, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
+        };
+        const tracker = Shell.WindowTracker.get_default();
+        const focusSignal = tracker.connect('notify::focus-app', updateFeedback);
+        button.connect('destroy', () => tracker.disconnect(focusSignal));
+        button.connect('notify::hover', updateFeedback);
+        button.connect('notify::pressed', () => {
+            if (!this._state.appPress || !allowsMotion(St.Settings.get(), St.ReducedMotion)) return;
+            icon.ease({scale_x: button.pressed ? .88 : 1, scale_y: button.pressed ? .88 : 1,
+                duration: 100, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
+        });
+        updateFeedback();
+        const updateGeometry = this._overlay.appIconGeometry.add(button, app, this);
+        const click = appClickHandler(app, this._state.appClick, () => this._toggle(id, button, () => this._appMenu(id, app)));
         button._activate = () => {
-            const windows = app?.get_windows() ?? [];
-            if (global.get_pointer()[2] & Clutter.ModifierType.CONTROL_MASK)
-                app?.open_new_window(-1);
-            else if (this._state.appClick === 'minimize' && windows.some(win => win.has_focus()))
-                windows.filter(win => win.has_focus()).forEach(win => win.minimize());
-            else
-                app?.activate();
+            updateGeometry();
+            if (global.get_pointer()[2] & Clutter.ModifierType.CONTROL_MASK) activateApp(app, true);
+            else click();
         };
         button.connect('button-press-event', (_actor, event) => {
             if (event.get_button() === 2) {
-                app?.open_new_window(-1);
+                updateGeometry();
+                activateApp(app, true);
                 return Clutter.EVENT_STOP;
             }
             if (event.get_button() !== 3)
@@ -3501,6 +3525,8 @@ class Bar {
         scroll.clip_to_allocation = true;
         scroll.set_child(content);
         this._popout.add_child(decorateScroll(scroll, this._theme, !menu));
+        this._popupFooter = content._bezelFooter ?? null;
+        if (this._popupFooter) this._popout.add_child(this._popupFooter);
         this._popupScroll = scroll;
         this._popupContent = content;
         this._popout.connect('notify::hover', () => {
@@ -3734,23 +3760,19 @@ class Bar {
         const join = side ? Math.max(24, radius + 10) : Math.max(16, radius);
         const maxHeight = this._monitor.height - opening.top - opening.bottom - join * 2;
         const height = Math.min(Math.max(64, next), maxHeight);
-        const animate = this._popoutId === 'launcher' && this._popupProgress >= 1 && Math.abs((this._popout.height || 0) - height) > 2;
-        if (animate) {
-            this._popout.ease({
-                height, duration: 180, mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
-                onUpdate: () => this._placePopup(),
-            });
-        } else
-            this._popout.height = height;
+        // Resize the frame and viewport together. Animating only the outer actor
+        // leaves its placement and clip behind the new content allocation.
+        this._popout.height = height;
         const scrolling = this._popupScrolls();
         if (scrolling && this._popupScroll) {
-            const chrome = this._popupChrome?.height ?? 0;
-            const room = Math.max(48, height - chrome - (this._popoutId === 'dashboard' || String(this._popoutId).startsWith('group:') ? 36 : 24));
+            const innerWidth = Math.max(1, this._popout.width - 36);
+            const chrome = this._popupChrome?.get_preferred_height(innerWidth)[1] ?? 0;
+            const footer = this._popupFooter?.get_preferred_height(innerWidth)[1] ?? 0;
+            const room = Math.max(48, height - chrome - footer - (this._popoutId === 'launcher' || this._popoutId === 'dashboard' || String(this._popoutId).startsWith('group:') ? 36 : 24));
             this._popupScroll.height = room;
             this._popupScroll.get_parent().height = room;
         }
-        if (!animate)
-            this._placePopup();
+        this._placePopup();
         this._popupScroll?.get_parent?.()?._bezelSyncOverflow?.();
     }
 
@@ -3777,11 +3799,12 @@ class Bar {
         let chrome = 0;
         if (this._popupChrome) {
             const [, header] = this._popupChrome.get_preferred_height(width);
-            chrome = Math.min(header, 160) + 10;
+            chrome = this._popoutId === 'launcher' ? header : Math.min(header, 160) + 10;
         }
         const minHeight = this._popoutId === 'launcher' ? 168 : app ? 280 : 64;
         const slack = ['notifications', 'status', 'launcher'].includes(this._popoutId) ? 12 : 0;
-        const wanted = Math.max(minHeight, extent + pad + chrome + slack);
+        const footer = this._popupFooter?.get_preferred_height(width)[1] ?? 0;
+        const wanted = Math.max(minHeight, extent + pad + chrome + footer + slack);
         this._setPopupHeight(scrolling ? Math.min(wanted, cap) : wanted);
         if (scrolling && this._popoutId !== 'launcher' && wanted > cap + 8)
             this._popupLockedHeight = true;
@@ -4013,6 +4036,7 @@ class Bar {
         this._popupContent = null;
         this._popupAuxActors = null;
         this._popupChrome = null;
+        this._popupFooter = null;
         this._popupScroll = null;
         this._launcherEntry = null;
         this._launcherWidget = null;
