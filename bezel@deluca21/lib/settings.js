@@ -567,11 +567,13 @@ export class SettingsWindow {
         return widget;
     }
 
-    _step(title, value, min, max, step, callback) {
+    _step(title, value, min, max, step, callback, enabled = true) {
         const row = horizontal(10);
         row.append(label(title, '', {hexpand: true}));
         const spin = new Gtk.SpinButton({adjustment: new Gtk.Adjustment({lower: min, upper: max, value, step_increment: step, page_increment: step * 5}), numeric: true, valign: Gtk.Align.CENTER, width_chars: 4});
-        spin.connect('value-changed', () => this._write(() => callback(spin.get_value_as_int()), false));
+        spin.sensitive = enabled;
+        if (enabled)
+            spin.connect('value-changed', () => this._write(() => callback(spin.get_value_as_int()), false));
         row.append(spin);
         return row;
     }
@@ -1254,6 +1256,12 @@ export class SettingsWindow {
             this.card.append(label('Attached bars share the screen frame background.', 'muted'));
         this.card.append(this._step('Bar corner rounding', bar.rounding, 0, 48, 2,
             value => patchBar(this.settings, this.barIndex, {rounding: value})));
+        const framed = this.settings.get_boolean('show-frame');
+        this.card.append(this._step('Bar shadow', framed ? 0 : bar.barShadow, 0, 24, 1,
+            value => patchBar(this.settings, this.barIndex, {barShadow: value}), !framed));
+        this.card.append(label(framed
+            ? 'Unavailable while the screen border is on. That border has its own shadow.'
+            : 'Set to 0 for no shadow. Screen border shadow is separate.', 'muted'));
         this.card.append(label('Colour groups', 'subheading'));
         this.card.append(this._toggle('Colour groups', bar.colourGroups, value => patchBar(this.settings, this.barIndex, {colourGroups: value})));
         for (const [key, title, max] of [['groupPadding', 'End padding', 32], ['groupInset', 'Side padding', 12],

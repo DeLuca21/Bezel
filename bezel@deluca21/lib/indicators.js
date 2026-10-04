@@ -32,7 +32,7 @@ export class IndicatorBridge {
         this.containers = new Map();
         this.verticalLayouts = new Map();
         this.host = bar._indicatorSlot ?? new St.BoxLayout({
-            orientation: bar._actor.orientation, style_class: 'bezel-indicators',
+            orientation: bar._content?.orientation ?? (bar._vertical ? Clutter.Orientation.VERTICAL : Clutter.Orientation.HORIZONTAL), style_class: 'bezel-indicators',
             style: `color: ${bar._theme.fg};`, x_align: Clutter.ActorAlign.CENTER,
         });
         this._ownsHost = !bar._indicatorSlot;

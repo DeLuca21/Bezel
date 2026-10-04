@@ -47,6 +47,14 @@ const number = (value, fallback, min, max) =>
 const HEX = /^#[0-9a-f]{6}$/i;
 export const hexColor = value => HEX.test(String(value ?? '')) ? String(value).toLowerCase() : '';
 
+// Screen-border shadow is the frame's Cairo glow. Bar shadows sit on top of
+// that opening and look wrong, so a framed desktop keeps bar glow at 0.
+export function barShadowDepth(shadow, frameOn) {
+    if (frameOn)
+        return 0;
+    return number(shadow, 0, 0, 24);
+}
+
 export const PANEL_MODULES = new Set([
     'shelf', 'timer', 'shortcuts', 'devices', 'input', 'notifications', 'clock', 'date', 'weather', 'volume', 'network', 'battery', 'power', 'dashboard',
     'performance', 'vpn', 'settings', 'window', 'apps', 'media', 'microphone', 'clipboard', 'keyboard',
@@ -362,6 +370,7 @@ export function normalizeBars(bars) {
             length: number(bar.length ?? 100, 100, 20, 100),
             margin: number(bar.margin ?? 0, 0, 0, 64),
             rounding: number(bar.rounding ?? 20, 20, 0, 48),
+            barShadow: number(bar.barShadow ?? 8, 8, 0, 24),
             runningApps: bar.runningApps !== false,
             appSpacing: number(bar.appSpacing ?? (bar.kind === 'dock' ? 12 : 8), 10, 0, 32),
             appsLength: number(bar.appsLength ?? 0, 0, 0, 2400),

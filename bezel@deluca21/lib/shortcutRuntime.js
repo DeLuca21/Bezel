@@ -26,12 +26,13 @@ function shortcutIcon(item, size) {
 export function shortcutFace(bar, options, size) {
     const item = options.shortcuts?.length === 1 ? options.shortcuts[0] : null;
     const name = item?.name || 'Shortcuts';
-    const row = new St.BoxLayout({orientation: bar._actor.orientation, style: `spacing: 6px; color: ${bar._theme.fg};`, y_align: Clutter.ActorAlign.CENTER});
+    const orientation = bar._content?.orientation ?? (bar._vertical ? Clutter.Orientation.VERTICAL : Clutter.Orientation.HORIZONTAL);
+    const row = new St.BoxLayout({orientation, style: `spacing: 6px; color: ${bar._theme.fg};`, y_align: Clutter.ActorAlign.CENTER});
     if (options.shortcutIcons !== false || options.shortcutNames === false) row.add_child(shortcutIcon(item, size));
     if (options.shortcutNames !== false) {
         const label = text(bar, name); label.y_align = Clutter.ActorAlign.CENTER;
         label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-        label.style += ` max-width: ${bar._actor.orientation === Clutter.Orientation.VERTICAL ? size : 140}px;`;
+        label.style += ` max-width: ${orientation === Clutter.Orientation.VERTICAL ? size : 140}px;`;
         row.add_child(label);
     }
     return new St.Button({child: row, accessible_name: name, can_focus: true, x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER});

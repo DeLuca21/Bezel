@@ -121,14 +121,24 @@ function roundedRect(cr, x, y, w, h, radius) {
     cr.closePath();
 }
 
-// Island pills are a filled rounded rect. The shadow is only an offset under
-// that fill; without the fill the pill has no backdrop.
+// Use the frame's concentric, low-opacity strokes, clipped outside the fill.
 export function paintPillBackdrop(cr, rect, radius, color, opacity, shadow) {
-    const depth = Number(shadow) || 0;
-    if (depth > 0) {
-        cr.setSourceRGBA(0, 0, 0, 0.22);
-        roundedRect(cr, rect.x, rect.y + Math.max(1, depth / 4), rect.w, rect.h, radius);
-        cr.fill();
+    const depth = Math.max(0, Number(shadow) || 0);
+    if (depth > 0 && opacity > 0) {
+        cr.save();
+        cr.newPath();
+        cr.rectangle(rect.x - depth - 1, rect.y - depth - 1,
+            rect.w + depth * 2 + 2, rect.h + depth * 2 + 2);
+        roundedRect(cr, rect.x, rect.y, rect.w, rect.h, radius);
+        cr.setFillRule(Cairo.FillRule.EVEN_ODD);
+        cr.clip();
+        for (let i = depth; i >= 1; i--) {
+            roundedRect(cr, rect.x, rect.y, rect.w, rect.h, radius);
+            cr.setLineWidth(i * 2);
+            cr.setSourceRGBA(0, 0, 0, 0.035 * (1 - i / (depth + 1)) * opacity);
+            cr.stroke();
+        }
+        cr.restore();
     }
     const hex = `${color}`.replace('#', '');
     const rgb = [0, 2, 4].map(index => parseInt(hex.slice(index, index + 2), 16) / 255);

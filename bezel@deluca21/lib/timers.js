@@ -31,7 +31,7 @@ function iconButton(bar, name, icon, run) {
 }
 export function timerFace(bar, options, size) {
     const states = bank(bar, options);
-    const row = new St.BoxLayout({orientation: bar._actor.orientation, style: `spacing: 5px; color: ${bar._theme.fg};`, y_align: Clutter.ActorAlign.CENTER});
+    const row = new St.BoxLayout({orientation: bar._content?.orientation ?? (bar._vertical ? Clutter.Orientation.VERTICAL : Clutter.Orientation.HORIZONTAL), style: `spacing: 5px; color: ${bar._theme.fg};`, y_align: Clutter.ActorAlign.CENTER});
     if (options.timerIcon !== false || !options.timerName && !options.timerRemaining) row.add_child(new St.Icon({icon_name: 'alarm-symbolic', icon_size: size}));
     const label = new St.Label({y_align: Clutter.ActorAlign.CENTER});
     if (options.timerName || options.timerRemaining) row.add_child(label);

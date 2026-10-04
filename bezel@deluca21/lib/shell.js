@@ -24,7 +24,7 @@ import * as SystemActions from 'resource:///org/gnome/shell/misc/systemActions.j
 
 import {hexToRgba, resolveTheme} from './theme.js';
 
-import {PLACES, DATE_FORMATS, timePattern, barDateFormat, barTimeFormat, readState, readBars, saveBars, clamp, settingFlag, settingChoice, isSpacer, barGroups, barTheme, groupFillColor, groupAppearance, hoverEnabled, moduleLook, sliderLayout, powerLayout, powerDim, switchOn, adoptIndicators, recordingStopHost} from './config.js';
+import {PLACES, DATE_FORMATS, timePattern, barDateFormat, barTimeFormat, readState, readBars, saveBars, clamp, settingFlag, settingChoice, isSpacer, barGroups, barTheme, groupFillColor, groupAppearance, hoverEnabled, moduleLook, sliderLayout, powerLayout, powerDim, switchOn, adoptIndicators, recordingStopHost, barShadowDepth} from './config.js';
 import {sideWidths, reservedWidths, cornerRadius, zonePlacement} from './geometry.js';
 import {paintCorner, paintPillBackdrop} from './drawing.js';
 import {Services} from './services.js';
@@ -575,17 +575,33 @@ class Bar {
 
     _build() {
         const vertical = this._vertical;
-        this._joinedAutohide = this._state.border && this._state.autohide && this._state.kind !== 'dock' && !this._state.margin && this._state.length === 100;
+        this._attachedToFrame = this._state.border && this._state.kind !== 'dock' && !this._state.margin && this._state.length === 100;
+        this._joinedAutohide = this._attachedToFrame && this._state.autohide;
         const pills = this._state.sections === 'pills';
         const pad = this._barPadding();
         const padding = vertical ? `${pad.along}px ${pad.cross}px` : `${pad.cross}px ${pad.along}px`;
-        this._actor = new St.BoxLayout({
-            orientation: vertical ? Clutter.Orientation.VERTICAL : Clutter.Orientation.HORIZONTAL,
+        this._actor = new St.Widget({
+            layout_manager: new Clutter.BinLayout(),
             reactive: true,
             track_hover: true,
-            clip_to_allocation: true,
-            style: `background-color: ${this._joinedAutohide || pills ? 'transparent' : hexToRgba(this._theme.bg, this._state.barOpacity / 100)}; spacing: ${pills ? 0 : 8}px; padding: ${padding}; border-radius: ${pills ? 0 : this._state.kind === 'dock' || this._state.margin || this._state.length < 100 ? this._state.rounding : 0}px; ${this._state.kind === 'dock' && !pills && this._state.barOpacity > 0 ? 'box-shadow: 0 3px 10px rgba(0,0,0,0.22);' : ''}`,
+            clip_to_allocation: false,
+            style: 'background-color: transparent;',
         });
+        this._content = new St.BoxLayout({
+            orientation: vertical ? Clutter.Orientation.VERTICAL : Clutter.Orientation.HORIZONTAL,
+            x_expand: true, y_expand: true,
+            clip_to_allocation: false,
+            style: `spacing: ${pills ? 0 : 8}px; padding: ${padding};`,
+        });
+        // Paint outside the bar's allocation without enlarging its input or
+        // reserved region. CSS shadows change blur paths for wider radii and
+        // can abruptly lose strength on thin panels. Attached in-frame bars
+        // use the screen border fill instead of a second plate.
+        if (!pills && !this._attachedToFrame) {
+            this._backdrop = this._backdropPlate(area => this._paintBarBackdrop(area));
+            this._actor.add_child(this._backdrop);
+        }
+        this._actor.add_child(this._content);
         this._baseStyle = this._actor.style;
         this.syncEditOutline();
         const icon = Math.min(this._state.iconSize, this._state.thickness - 12);
@@ -614,7 +630,7 @@ class Bar {
                     const along = appearance.padding;
                     const cross = appearance.inset;
                     const pad = new St.BoxLayout({
-                        orientation: this._actor.orientation,
+                        orientation: this._content.orientation,
                         x_expand: false, y_expand: false,
                         style: `padding: ${this._vertical ? `${along}px ${cross}px` : `${cross}px ${along}px`};`,
                     });
@@ -673,18 +689,18 @@ class Bar {
         this._zones = zones;
         // Vertical rails use equal cells; horizontal panels share unused space
         // so a long app list is not confined to an otherwise empty third.
-        this._actor.layout_manager.homogeneous = false;
+        this._content.layout_manager.homogeneous = false;
         this._cells = [];
         this._appViewport = null;
         if (this._state.kind === 'dock') {
-            this._dockContent = new St.BoxLayout({orientation: this._actor.orientation,
+            this._dockContent = new St.BoxLayout({orientation: this._content.orientation,
                 x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER,
                 x_expand: true, y_expand: true, clip_to_allocation: true, style: 'spacing: 12px;'});
             this._dockViewport = this._appsClip();
             this._dockCell = new St.Widget({layout_manager: new Clutter.BinLayout(),
                 x_expand: true, y_expand: true});
             this._dockCell.add_child(this._dockContent);
-            this._actor.add_child(this._dockCell);
+            this._content.add_child(this._dockCell);
         }
         for (const [place, zone] of Object.entries(zones)) {
             if (this._state.kind === 'dock') {
@@ -696,7 +712,7 @@ class Bar {
         if (this._state.kind !== 'dock') {
             for (const cell of this._cells)
                 if (cell)
-                    this._actor.add_child(cell);
+                    this._content.add_child(cell);
             if (this._cells.filter(Boolean).length === 3) {
                 const gap = () => {
                     const widget = new St.Widget({x_expand: false, y_expand: false, visible: false});
@@ -705,13 +721,12 @@ class Bar {
                 };
                 const before = gap();
                 const after = gap();
-                const centerAt = this._actor.get_children().indexOf(this._cells[1]);
-                this._actor.insert_child_at_index(before, Math.max(0, centerAt));
-                this._actor.insert_child_at_index(after, Math.max(0, centerAt) + 2);
+                const centerAt = this._content.get_children().indexOf(this._cells[1]);
+                this._content.insert_child_at_index(before, Math.max(0, centerAt));
+                this._content.insert_child_at_index(after, Math.max(0, centerAt) + 2);
                 this._zoneGaps = [before, after];
-                this._actor.spacing = 0;
-                this._baseStyle = this._baseStyle.replace(/spacing:\s*\d+(?:\.\d+)?px/, 'spacing: 0px');
-                this._actor.style = this._baseStyle;
+                this._content.spacing = 0;
+                this._content.style = this._content.style.replace(/spacing:\s*\d+(?:\.\d+)?px/, 'spacing: 0px');
             }
         }
         if (this._state.kind === 'dock' && !this._dockViewport.get_parent())
@@ -1005,9 +1020,7 @@ class Bar {
         const cell = new St.Widget({layout_manager: new Clutter.BinLayout(),
             x_expand: false, y_expand: false, clip_to_allocation: false});
         if (this._state.sections === 'pills') {
-            const plate = new St.DrawingArea({reactive: false, x_expand: true, y_expand: true});
-            plate.connect('repaint', () => this._paintSectionPill(plate, zone, place));
-            zone.connectObject('notify::allocation', () => plate.queue_repaint(), plate);
+            const plate = this._pillPlate(zone, place);
             cell.add_child(plate);
             cell._bezelPlate = plate;
         }
@@ -1157,7 +1170,7 @@ class Bar {
 
     _zone() {
         const zone = new St.BoxLayout({
-            orientation: this._actor.orientation,
+            orientation: this._content.orientation,
             x_align: Clutter.ActorAlign.CENTER,
             y_align: Clutter.ActorAlign.CENTER,
             style: this._zoneStyle(),
@@ -1177,12 +1190,76 @@ class Bar {
         return {along: 6 + Math.min(this._cornerInset(), 16), cross: 2};
     }
 
+    _shadowDepth() {
+        return barShadowDepth(this._state.barShadow, this._state.border);
+    }
+
+    _backdropPlate(paint) {
+        // A fixed child can extend beyond the cell without changing bar sizing
+        // or the input region. Only the app scroll view clips its contents.
+        // Size the plate from the actor after layout; a 0×0 holder with bind
+        // constraints can stay empty on a second bar (hybrid dock).
+        const holder = new St.Widget({layout_manager: new Clutter.FixedLayout(),
+            x_expand: true, y_expand: true,
+            reactive: false, clip_to_allocation: false});
+        const plate = new St.DrawingArea({reactive: false, clip_to_allocation: false});
+        holder.add_child(plate);
+        const sync = () => {
+            const source = holder.get_parent() ?? holder;
+            const depth = this._shadowDepth();
+            const width = Math.max(1, source.width || holder.width);
+            const height = Math.max(1, source.height || holder.height);
+            const nextW = width + depth * 2;
+            const nextH = height + depth * 2;
+            if (plate.x !== -depth || plate.y !== -depth || plate.width !== nextW || plate.height !== nextH) {
+                plate.set_position(-depth, -depth);
+                plate.set_size(nextW, nextH);
+            }
+            plate.queue_repaint();
+        };
+        holder._bezelSyncPlate = sync;
+        holder.queue_repaint = sync;
+        holder.connect('notify::allocation', () => sync());
+        this._actor.connectObject('notify::allocation', () => sync(), holder);
+        plate.connect('repaint', () => paint(plate));
+        return holder;
+    }
+
+    _pillPlate(zone, place) {
+        const holder = this._backdropPlate(area => this._paintSectionPill(area, zone, place));
+        zone.connectObject('notify::allocation', () => holder.queue_repaint(), holder);
+        return holder;
+    }
+
+    _paintBarBackdrop(area) {
+        let cr;
+        try {
+            cr = area.get_context();
+        } catch {
+            return;
+        }
+        if (!cr)
+            return;
+        try {
+            const [sw, sh] = area.get_surface_size();
+            const width = area.width;
+            const height = area.height;
+            if (width <= 0 || height <= 0) return;
+            if (sw > 0 && sh > 0)
+                cr.scale(sw / width, sh / height);
+            const depth = this._shadowDepth();
+            const radius = this._state.kind === 'dock' || this._state.margin || this._state.length < 100
+                ? this._state.rounding : 0;
+            paintPillBackdrop(cr, {x: depth, y: depth,
+                w: Math.max(1, width - depth * 2), h: Math.max(1, height - depth * 2)},
+            radius, this._theme.bg, this._state.barOpacity / 100, depth);
+        } finally {
+            cr.$dispose();
+        }
+    }
+
     _sectionPill(scroll, zone, place) {
-        const plate = new St.DrawingArea({
-            reactive: false, x_expand: true, y_expand: true,
-        });
-        plate.connect('repaint', () => this._paintSectionPill(plate, zone, place));
-        zone.connectObject('notify::allocation', () => plate.queue_repaint(), plate);
+        const plate = this._pillPlate(zone, place);
         scroll.clip_to_allocation = false;
         scroll.x_expand = true;
         scroll.y_expand = true;
@@ -1198,7 +1275,14 @@ class Bar {
     }
 
     _paintSectionPill(area, zone, place) {
-        const cr = area.get_context();
+        let cr;
+        try {
+            cr = area.get_context();
+        } catch {
+            return;
+        }
+        if (!cr)
+            return;
         try {
             if (this._state.barOpacity === 0) return;
             const [sw, sh] = area.get_surface_size();
@@ -1223,16 +1307,16 @@ class Bar {
             });
             if (!bounds.length)
                 return;
-            const inset = 2;
+            const inset = 2 + this._shadowDepth();
             const offset = Math.max(inset, Math.min(...bounds.map(b => b[0])) - 6);
             const end = Math.min(along - inset, Math.max(...bounds.map(b => b[1])) + 6);
             const span = Math.max(1, end - offset);
-            const shadowInset = Math.max(inset, (Number(this._state.shadow) || 0) / 4 + 1);
+            const shadowInset = inset;
             const rect = vertical
                 ? {x: inset, y: offset, w: Math.max(1, width - inset - shadowInset), h: span}
                 : {x: offset, y: inset, w: span, h: Math.max(1, height - inset - shadowInset)};
             paintPillBackdrop(cr, rect, Math.min(18, rect.w / 2, rect.h / 2), this._theme.bg,
-                (this._state.barOpacity ?? 100) / 100, this._state.shadow);
+                (this._state.barOpacity ?? 100) / 100, this._shadowDepth());
         } finally {
             cr.$dispose();
         }
@@ -1861,6 +1945,7 @@ class Bar {
         this._box = {x: px, y: py, width: w, height: h};
         this._actor.set_position(px, py);
         this._actor.set_size(w, h);
+        this._backdrop?._bezelSyncPlate?.();
         if (this._dockContent)
             this._dockContent.set_size(Math.max(1, w - 12), Math.max(1, h - 12));
         else
@@ -2491,7 +2576,7 @@ class Bar {
         if (!this._overlay._settings.get_boolean('panel-indicators'))
             return null;
         const box = new St.BoxLayout({
-            orientation: this._actor.orientation,
+            orientation: this._content.orientation,
             x_align: Clutter.ActorAlign.CENTER,
             y_align: Clutter.ActorAlign.CENTER,
             style: `spacing: ${this._overlay._settings.get_int('indicator-spacing')}px;`,
@@ -2686,7 +2771,7 @@ class Bar {
         if (faces.length === 1)
             return faces[0];
         const box = new St.BoxLayout({
-            orientation: this._actor.orientation,
+            orientation: this._content.orientation,
             x_align: Clutter.ActorAlign.CENTER, style: 'spacing: 6px;',
         });
         for (const face of faces) {
@@ -2697,7 +2782,7 @@ class Bar {
     }
 
     _customGroupFace(members, group, icon) {
-        const box = new St.BoxLayout({orientation: this._actor.orientation, style: 'spacing: 6px;',
+        const box = new St.BoxLayout({orientation: this._content.orientation, style: 'spacing: 6px;',
             x_align: Clutter.ActorAlign.CENTER});
         const ids = group.face === 'single' ? [null] : members.map(item => item.id);
         for (const id of ids) {
@@ -2810,7 +2895,7 @@ class Bar {
         if (['volume', 'network', 'battery'].includes(id)) {
             if (id !== ids.find(item => ['volume', 'network', 'battery'].includes(item)))
                 return null;
-            const row = new St.BoxLayout({orientation: this._actor.orientation, style: 'spacing: 10px;'});
+            const row = new St.BoxLayout({orientation: this._content.orientation, style: 'spacing: 10px;'});
             const button = new St.Button({child: row, track_hover: true, accessible_name: 'Quick controls'});
             this._fillStatusIcons(row, button, ids.filter(item => ['volume', 'network', 'battery'].includes(item)), icon);
             button.connect('scroll-event', (_actor, event) => {
@@ -2946,7 +3031,7 @@ class Bar {
 
     _workspaces(_size) {
         const box = new St.BoxLayout({
-            orientation: this._actor.orientation,
+            orientation: this._content.orientation,
             x_align: Clutter.ActorAlign.CENTER,
             style: 'spacing: 4px;',
         });
@@ -3056,7 +3141,7 @@ class Bar {
 
     _apps(size) {
         const box = new St.BoxLayout({
-            orientation: this._actor.orientation,
+            orientation: this._content.orientation,
             reactive: false,
             x_expand: false,
             y_expand: false,
@@ -3320,7 +3405,7 @@ class Bar {
 
     _statusGroup(size, ids = null) {
         const wanted = ids ?? this._state.modules.map(item => item.id).filter(id => ['volume', 'network', 'battery'].includes(id));
-        const box = new St.BoxLayout({orientation: this._actor.orientation, style: 'spacing: 10px;'});
+        const box = new St.BoxLayout({orientation: this._content.orientation, style: 'spacing: 10px;'});
         const button = new St.Button({child: box, track_hover: true, accessible_name: 'Quick controls'});
         const icons = {};
         const values = {};
