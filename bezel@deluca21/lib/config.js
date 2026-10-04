@@ -193,7 +193,7 @@ export function adoptIndicators(settings) {
         return false;
     const bars = readBars(settings);
     const next = {...config, indicatorsPlaced: true};
-    if (settings.get_boolean('panel-indicators') && bars.length && !bars.some(bar => bar.modules.some(item => item.id === 'indicators'))) {
+    if (settings.get_boolean('panel-indicators') && bars.length && !bars.some(bar => bar.modules.some(item => moduleType(item.id) === 'indicators'))) {
         const selected = settings.get_int('indicator-bar');
         let index = selected > 0 ? selected - 1 : bars.findIndex(bar => bar.edge !== 'left' && bar.edge !== 'right' && bar.kind !== 'dock');
         if (index < 0 || index >= bars.length)
@@ -356,6 +356,7 @@ export function readBars(settings) {
 }
 
 export function normalizeBars(bars) {
+    let indicatorsKept = false;
     return bars.slice(0, 4).map(value => {
         const bar = value && typeof value === 'object' ? value : {};
         const modules = normalizeModules(bar.modules);
@@ -401,6 +402,18 @@ export function normalizeBars(bars) {
             pinned: [...new Set((Array.isArray(bar.pinned) ? bar.pinned : [])
                 .filter(id => typeof id === 'string' && id.startsWith('app:') && id.length > 4))],
         };
+    }).map(bar => {
+        const modules = bar.modules.filter(item => {
+            if (moduleType(item.id) !== 'indicators')
+                return true;
+            if (indicatorsKept)
+                return false;
+            indicatorsKept = true;
+            return true;
+        });
+        if (modules.length === bar.modules.length)
+            return bar;
+        return {...bar, modules, groups: barGroups({...bar, modules})};
     });
 }
 
@@ -557,7 +570,7 @@ function barsForPreset(settings, id, favorites = []) {
     const bars = readBars(settings);
     const pins = [...new Set(bars.flatMap(bar => bar.pinned))];
     const source = bars.find(bar => bar.modules.some(module => module.id === 'logo')) ?? bars[0];
-    const indicator = bars.flatMap(bar => bar.modules).find(module => module.id === 'indicators');
+    const indicator = bars.flatMap(bar => bar.modules).find(module => moduleType(module.id) === 'indicators');
     const next = presetBars(id, Array.isArray(config.bars) ? pins : favorites.map(app => `app:${app}`)).map((bar, index) => {
         const current = bars[index];
         const carried = current?.modules.some(module => module.id === 'apps') ? current.runningApps : source?.runningApps;

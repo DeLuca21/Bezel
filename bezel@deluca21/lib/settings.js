@@ -19,7 +19,8 @@ import {LOGOS} from './logos.js';
 import {MODULES, addBar, removeBar, addModule, removeModule, patchBar, setFloating, setKind,
     createGroup, deleteGroup, assignGroup, resizeSpacer, reorderModule, moveModule, undoPreset, setCustomColor, patchModule, patchGroup,
     shortcutLabel, acceleratorFromEvent, assignShortcut, useRecommendedShortcuts,
-    indicatorNames, setIndicatorShown, moveIndicator} from './settingsModel.js';
+    indicatorNames, setIndicatorShown, moveIndicator, indicatorsPlaced} from './settingsModel.js';
+import {displayLabel, listDisplays, preferredDisplay} from './displays.js';
 
 const MODULE_NOTES = {
     window: 'The app you are using right now. Clicking it on the bar focuses that window.',
@@ -888,7 +889,12 @@ export class SettingsWindow {
             finish(target);
         }));
         add('spacer', '↔ Empty space');
-        for (const [id, title] of MODULES) add(id, title);
+        const placed = indicatorsPlaced(readBars(this.settings));
+        for (const [id, title] of MODULES) {
+            if (id === 'indicators' && placed)
+                continue;
+            add(id, title);
+        }
         if (group) for (const item of bar.modules.filter(item => isSpacer(item.id) && item.group !== group))
             box.append(button(`Move ${spacerLabel(item.id)} · ${item.size} px`, () => {
                 this._write(() => assignGroup(this.settings, this.barIndex, item.id, group), false);
@@ -1535,7 +1541,39 @@ export class SettingsWindow {
     }
 
     _indicatorOptions(box) {
-        box.width_request = 320;
+        box.width_request = 340;
+        if (this.settings.settings_schema.has_key('indicator-monitor')) {
+            const displays = listDisplays(this.window.get_display());
+            if (displays.length) {
+                const selected = preferredDisplay(displays, this.settings.get_string('indicator-monitor'));
+                const row = horizontal(8);
+                row.append(label('Display', '', {hexpand: true}));
+                const dropdown = new Gtk.DropDown({
+                    model: Gtk.StringList.new(displays.map(item => displayLabel(item))),
+                    selected: Math.max(0, displays.findIndex(item => item.connector === selected?.connector)),
+                });
+                let ready = false;
+                dropdown.connect('notify::selected', () => {
+                    if (!ready)
+                        return;
+                    const next = displays[dropdown.selected];
+                    if (next)
+                        this._write(() => this.settings.set_string('indicator-monitor', next.connector), false);
+                });
+                row.append(dropdown);
+                box.append(row);
+                GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                    ready = true;
+                    return GLib.SOURCE_REMOVE;
+                });
+            }
+        }
+        if (this.settings.settings_schema.has_key('indicator-avoid-fullscreen')) {
+            box.append(label('Fullscreen', 'subheading'));
+            box.append(this._segments([['stay', 'Stay put'], ['move', 'Move aside']],
+                this.settings.get_boolean('indicator-avoid-fullscreen') ? 'move' : 'stay',
+                value => this.settings.set_boolean('indicator-avoid-fullscreen', value === 'move')));
+        }
         for (const [key, title, min, max] of [['indicator-icon-size', 'Icon size', 12, 40], ['indicator-spacing', 'Spacing', 0, 40]])
             box.append(this._step(title, this.settings.get_int(key), min, max, 1, value => {
                 this._write(() => this.settings.set_int(key, value), false);

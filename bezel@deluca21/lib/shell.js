@@ -42,7 +42,8 @@ import * as Config from 'resource:///org/gnome/shell/misc/config.js';
 import {allowsMotion, chromeOptions} from './compat.js';
 import {NotificationBridge, buildNotificationCenter} from './notifications.js';
 import {decorateScroll} from './overflow.js';
-import {MODULES, createGroup, deleteGroup, assignGroup, resizeSpacer, addBar, addModule, patchBar, patchModule, removeBar, removeModule, setFloating, setKind, nudgeUnit} from './settingsModel.js';
+import {MODULES, createGroup, deleteGroup, assignGroup, resizeSpacer, addBar, addModule, patchBar, patchModule, removeBar, removeModule, setFloating, setKind, nudgeUnit, indicatorsPlaced} from './settingsModel.js';
+import {listDisplays, preferredDisplay} from './displays.js';
 import {activateScreenshot, bindToggle, darkStyleControl, dndControl, moduleSection, nightLightControl, performanceMenu, screenshotFace, screenshotRecording, settingsMenu, vpnMenu, watchScreenshotRecording} from './tools.js';
 
 export class BezelOverlay {
@@ -86,6 +87,14 @@ export class BezelOverlay {
             }
             if (key === 'theme')
                 this._animateLayout = true;
+            if (key === 'indicator-monitor') {
+                this.queueRebuild();
+                return;
+            }
+            if (key === 'indicator-avoid-fullscreen') {
+                this._placeIndicators();
+                return;
+            }
             if (!['known-indicators', 'saved-layouts', 'previous-layout', 'layout-baseline', 'shortcut-overrides', 'show-settings', 'preferences-bar'].includes(key)) this.queueRebuild();
         });
         this._monitors = Main.layoutManager.connect('monitors-changed', () => this.queueRebuild());
@@ -98,6 +107,7 @@ export class BezelOverlay {
                 if (global.display.get_monitor_in_fullscreen(bar._monitor.index))
                     bar._close();
             }
+            this._placeIndicators();
             this._notifications?.restyle();
         });
         this._rebuildId = 0;
@@ -182,10 +192,6 @@ export class BezelOverlay {
                     const loc = ['top-left', 'top-right', 'bottom-left', 'bottom-right'].includes(at) ? at : 'top-right';
                     this._edgeHotspot(monitor, theme, loc.startsWith('bottom') ? 'bottom' : 'top', side, true, loc);
                 }
-                if (monitor.index === Main.layoutManager.primaryIndex) {
-                    const target = this._bars.find(bar => bar._monitor.index === monitor.index && bar._indicatorSlot);
-                    if (target) this._indicators = new IndicatorBridge(target);
-                }
                 if (monitor.index === Main.layoutManager.primaryIndex && this._settings.get_boolean('frame-notifications')) {
                     const frame = this._frames.get(monitor.index);
                     this._notifications = new NotificationBridge(physicalMonitor, side, theme, state.border, state.radius, frame, this._settings);
@@ -196,7 +202,12 @@ export class BezelOverlay {
                 }
                 if (state.editMode)
                     this._addEdgeHandle(physicalMonitor, theme, state);
-                const measuredState = {...state, bars: this._bars.filter(bar => bar._monitor.index === monitor.index)
+            }
+            this._placeIndicators();
+            for (const physicalMonitor of Main.layoutManager.monitors) {
+                const topInset = !this._settings.get_boolean('hide-gnome-panel') && physicalMonitor.index === Main.layoutManager.primaryIndex
+                    ? Main.layoutManager.panelBox.height : 0;
+                const measuredState = {...state, bars: this._bars.filter(bar => bar._monitor.index === physicalMonitor.index)
                     .map(bar => ({...bar._state, thickness: bar._vertical ? bar._box.width : bar._box.height}))};
                 const reserved = reservedWidths(measuredState);
                 for (const [edge, width] of Object.entries(reserved)) {
@@ -210,6 +221,69 @@ export class BezelOverlay {
         } catch (error) {
             this._clear();
             throw error;
+        }
+    }
+
+    _preferredMonitorIndex() {
+        const connector = this._settings.settings_schema.has_key('indicator-monitor')
+            ? this._settings.get_string('indicator-monitor') : '';
+        if (connector) {
+            try {
+                const index = global.backend.get_monitor_manager()?.get_monitor_for_connector?.(connector);
+                if (Number.isInteger(index) && index >= 0)
+                    return index;
+            } catch {}
+            const match = preferredDisplay(listDisplays(), connector);
+            const found = match && Main.layoutManager.monitors.find(monitor => monitor.x === match.x && monitor.y === match.y);
+            if (found)
+                return found.index;
+        }
+        return Main.layoutManager.primaryIndex ?? 0;
+    }
+
+    _indicatorHost() {
+        const slots = this._bars.filter(bar => bar._indicatorSlot);
+        if (!slots.length)
+            return null;
+        const preferred = this._preferredMonitorIndex();
+        const avoid = this._avoidFullscreen();
+        const hasSlot = index => slots.some(bar => bar._monitor.index === index);
+        const free = index => hasSlot(index) && !global.display.get_monitor_in_fullscreen(index);
+        let index = preferred;
+        if (avoid && !free(preferred)) {
+            const fallback = Main.layoutManager.monitors.find(monitor => monitor.index !== preferred && free(monitor.index));
+            if (fallback)
+                index = fallback.index;
+        }
+        return slots.find(bar => bar._monitor.index === index)
+            ?? slots.find(bar => bar._monitor.index === preferred)
+            ?? slots[0];
+    }
+
+    _avoidFullscreen() {
+        return !this._settings.settings_schema.has_key('indicator-avoid-fullscreen')
+            || this._settings.get_boolean('indicator-avoid-fullscreen');
+    }
+
+    _placeIndicators() {
+        const target = this._indicatorHost();
+        const reserve = this._avoidFullscreen();
+        for (const bar of this._bars) {
+            if (bar._indicatorSlot && bar !== target)
+                bar._indicatorSlot.visible = reserve;
+        }
+        if (!target) {
+            this._indicators?.destroy();
+            this._indicators = null;
+        } else if (this._indicators?.bar !== target) {
+            if (this._indicators)
+                this._indicators.reattach(target);
+            else
+                this._indicators = new IndicatorBridge(target);
+        }
+        for (const bar of this._bars) {
+            if (bar._indicatorSlot)
+                bar._place();
         }
     }
 
@@ -977,7 +1051,10 @@ class Bar {
         for (const group of barGroups(bar))
             box.add_child(this._action(`Remove group: ${group.name} · keep contents`, 'edit-clear-symbolic', () => deleteGroup(settings, this._index, group.id)));
         box.add_child(this._action('Empty space', 'content-loading-symbolic', () => addModule(settings, this._index, 'spacer', place)));
+        const taken = indicatorsPlaced(readBars(settings));
         for (const [id, title] of MODULES) {
+            if (id === 'indicators' && taken)
+                continue;
             if (!used.has(id))
                 box.add_child(this._action(title, 'list-add-symbolic', () => addModule(settings, this._index, id, place)));
         }
@@ -2652,6 +2729,7 @@ class Bar {
             orientation: this._content.orientation,
             x_align: Clutter.ActorAlign.CENTER,
             y_align: Clutter.ActorAlign.CENTER,
+            visible: false,
             style: `spacing: ${this._overlay._settings.get_int('indicator-spacing')}px;`,
         });
         this._indicatorSlot = box;

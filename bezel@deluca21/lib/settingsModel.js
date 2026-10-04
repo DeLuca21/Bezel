@@ -1,4 +1,4 @@
-import {nextModuleId} from './moduleIdentity.js';
+import {moduleType, nextModuleId} from './moduleIdentity.js';
 import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
 import Gtk from 'gi://Gtk';
@@ -81,10 +81,16 @@ export function setShowLogo(settings, index, shown) {
     saveBars(settings, bars);
 }
 
+export function indicatorsPlaced(bars) {
+    return (bars ?? []).some(bar => (bar.modules ?? []).some(item => moduleType(item.id) === 'indicators'));
+}
+
 export function addModule(settings, index, id, place) {
     const bars = readBars(settings);
     const bar = bars[index];
     if (!bar)
+        return false;
+    if (id === 'indicators' && indicatorsPlaced(bars))
         return false;
     const spot = ['start', 'center', 'end'].includes(place) ? place : 'center';
     if (id === 'spacer') {

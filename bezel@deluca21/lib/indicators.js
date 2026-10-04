@@ -36,17 +36,7 @@ export class IndicatorBridge {
             style: `color: ${bar._theme.fg};`, x_align: Clutter.ActorAlign.CENTER,
         });
         this._ownsHost = !bar._indicatorSlot;
-        this.host.connect('destroy', () => {
-            this.destroyed = true;
-            if (this.pending) GLib.source_remove(this.pending);
-            this.pending = 0;
-            if (this.layoutPending) GLib.source_remove(this.layoutPending);
-            this.layoutPending = 0;
-        });
-        // Descendant labels and icons can change their natural size without
-        // adding an indicator. Allocation notifications are too late: the bar
-        // may still constrain the host to its previous size.
-        this.signals.push([this.host, this.host.connect('queue-relayout', () => this.queueLayout())]);
+        this._bindHost();
         if (this._ownsHost) {
             const parent = bar._zones.end;
             if (bar._state.kind === 'dock')
@@ -61,6 +51,61 @@ export class IndicatorBridge {
                 this.signals.push([box, box.connect(signal, () => this.queueSync())]);
         }
         this.sync();
+    }
+
+    _bindHost() {
+        this._hostDestroy = this.host.connect('destroy', () => {
+            this.destroyed = true;
+            if (this.pending) GLib.source_remove(this.pending);
+            this.pending = 0;
+            if (this.layoutPending) GLib.source_remove(this.layoutPending);
+            this.layoutPending = 0;
+        });
+        // Descendant labels and icons can change their natural size without
+        // adding an indicator. Allocation notifications are too late: the bar
+        // may still constrain the host to its previous size.
+        this._hostRelayout = this.host.connect('queue-relayout', () => this.queueLayout());
+    }
+
+    _unbindHost() {
+        if (this._hostDestroy) {
+            this.host.disconnect(this._hostDestroy);
+            this._hostDestroy = 0;
+        }
+        if (this._hostRelayout) {
+            this.host.disconnect(this._hostRelayout);
+            this._hostRelayout = 0;
+        }
+    }
+
+    reattach(bar) {
+        if (this.destroyed || !bar?._indicatorSlot || this.bar === bar)
+            return;
+        for (const record of this.records.values())
+            record.menu?.close();
+        if (this.bar)
+            this.bar._indicatorMenuOpen = false;
+        const previous = this.bar;
+        const next = bar._indicatorSlot;
+        this._unbindHost();
+        for (const child of this.host.get_children()) {
+            this.host.remove_child(child);
+            next.add_child(child);
+        }
+        this.bar = bar;
+        this.host = next;
+        this._ownsHost = false;
+        this._bindHost();
+        if (this.host.get_parent())
+            this._placeHost(this.host.get_parent());
+        this.host.set_style(`color: ${bar._theme.fg};`);
+        this.spaceChildren();
+        this.host.visible = this.records.size > 0;
+        for (const [indicator, record] of this.records)
+            this.configureMenu(indicator, record);
+        previous?._place();
+        this.bar._place();
+        this.queueLayout();
     }
 
     gap() {
@@ -288,6 +333,7 @@ export class IndicatorBridge {
         this.pending = 0;
         if (this.layoutPending) GLib.source_remove(this.layoutPending);
         this.layoutPending = 0;
+        this._unbindHost();
         for (const [object, id] of this.signals) object.disconnect(id);
         for (const [actor, ids] of this.containers)
             for (const id of ids) actor.disconnect(id);
