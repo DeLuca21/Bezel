@@ -67,6 +67,15 @@ const stringValue = text => {
 const scroller = child => new Gtk.ScrolledWindow({child, hscrollbar_policy: Gtk.PolicyType.NEVER,
     vscrollbar_policy: Gtk.PolicyType.AUTOMATIC, hexpand: true, vexpand: true});
 const REMOTE_METADATA = 'https://raw.githubusercontent.com/DeLuca21/Bezel/master/bezel@deluca21/metadata.json';
+const UPDATE_COMMANDS = [
+    'rm -rf /tmp/bezel-install',
+    'git clone --depth 1 https://github.com/DeLuca21/Bezel.git /tmp/bezel-install',
+    'mkdir -p ~/.local/share/gnome-shell/extensions',
+    'rm -rf ~/.local/share/gnome-shell/extensions/bezel@deluca21',
+    'cp -a /tmp/bezel-install/bezel@deluca21 ~/.local/share/gnome-shell/extensions/',
+    'glib-compile-schemas --strict ~/.local/share/gnome-shell/extensions/bezel@deluca21/schemas',
+    'rm -rf /tmp/bezel-install',
+];
 const textOf = contents => new TextDecoder().decode(contents instanceof Uint8Array ? contents
     : typeof contents.toArray === 'function' ? contents.toArray() : contents.get_data());
 const versionParts = value => String(value || '').split('.').map(part => {
@@ -1579,13 +1588,17 @@ export class SettingsWindow {
         const update = label(this._updateText(), 'muted', {halign: Gtk.Align.CENTER});
         this.aboutUpdate = update;
         body.append(update);
+        const updateButton = button('Update', () => this._confirmUpdate(), 'suggested-action', {halign: Gtk.Align.CENTER});
+        this.aboutUpdateButton = updateButton;
+        body.append(updateButton);
+        this._applyVersion();
         if (meta.url) {
             const link = new Gtk.LinkButton({label: 'GitHub', uri: meta.url, halign: Gtk.Align.CENTER});
             body.append(link);
         }
         dialog.set_child(body);
         this.about = dialog;
-        dialog.connect('close-request', () => { this.aboutUpdate = null; this.about = null; return false; });
+        dialog.connect('close-request', () => { this.aboutUpdate = null; this.aboutUpdateButton = null; this.about = null; return false; });
         dialog.present();
     }
 
@@ -1610,6 +1623,77 @@ export class SettingsWindow {
             else this.versionButton.remove_css_class('has-update');
         }
         if (this.aboutUpdate) this.aboutUpdate.label = this._updateText();
+        if (this.aboutUpdateButton) {
+            this.aboutUpdateButton.visible = available && !this.updateInstalling;
+            this.aboutUpdateButton.sensitive = !this.updateInstalling;
+        }
+    }
+
+    _confirmUpdate() {
+        const remote = this.updateRemote;
+        const dialog = new Gtk.Window({title: `Update to ${remote}?`, transient_for: this.about || this.window, modal: true, destroy_with_parent: true});
+        dialog.add_css_class('bezel-settings');
+        dialog.set_titlebar(new Adw.HeaderBar({show_title: false}));
+        const body = vertical(12, {margin_top: 8, margin_bottom: 18, margin_start: 20, margin_end: 20, width_request: 640});
+        body.append(label(`Replace the installed extension with ${remote}. Saved bars and palettes stay.`, '', {hexpand: true}));
+        const commands = new Gtk.Label({label: UPDATE_COMMANDS.join('\n'), selectable: true, wrap: true, xalign: 0});
+        commands.add_css_class('monospace');
+        commands.add_css_class('caption');
+        body.append(commands);
+        const actions = horizontal(8, {halign: Gtk.Align.END});
+        actions.append(button('Cancel', () => dialog.close()));
+        actions.append(button('Update', () => { dialog.close(); this._runUpdate(); }, 'suggested-action'));
+        body.append(actions);
+        dialog.set_child(body);
+        dialog.present();
+    }
+
+    _runUpdate() {
+        if (this.updateInstalling) return;
+        this.updateInstalling = true;
+        this._applyVersion();
+        if (this.aboutUpdate) this.aboutUpdate.label = 'Updating…';
+        let proc;
+        try {
+            proc = Gio.Subprocess.new(['bash', '-lc', ['set -euo pipefail', ...UPDATE_COMMANDS].join('\n')],
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE);
+        } catch (error) {
+            this.updateInstalling = false;
+            this._applyVersion();
+            this._notice('Update failed', error.message);
+            return;
+        }
+        proc.communicate_utf8_async(null, null, (source, result) => {
+            this.updateInstalling = false;
+            let output = '';
+            let ok = false;
+            try {
+                const [, stdout] = source.communicate_utf8_finish(result);
+                output = (stdout || '').trim();
+                ok = source.get_successful();
+            } catch (error) {
+                output = error.message;
+            }
+            if (!ok) {
+                this._applyVersion();
+                if (this.aboutUpdate) this.aboutUpdate.label = 'Update failed';
+                this._notice('Update failed', output.slice(0, 1200) || 'The update commands did not finish.');
+                return;
+            }
+            if (this.aboutUpdateButton) this.aboutUpdateButton.visible = false;
+            if (this.aboutUpdate) this.aboutUpdate.label = 'Installed. Log out and back in to finish.';
+            if (this.versionButton) {
+                this.versionButton.label = this._metadata()['version-name'] || 'About';
+                this.versionButton.remove_css_class('has-update');
+            }
+            this._notice('Log out and back in', 'Bezel is updated. Log out and back in to load the new version.');
+        });
+    }
+
+    _notice(title, body) {
+        const dialog = new Adw.AlertDialog({heading: title, body});
+        dialog.add_response('close', 'Close');
+        dialog.present(this.about || this.window);
     }
 
     _checkVersion() {

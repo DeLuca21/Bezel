@@ -93,7 +93,7 @@ glib-compile-schemas --strict ~/.local/share/gnome-shell/extensions/bezel@deluca
 rm -rf /tmp/bezel-install
 ```
 
-Log out and back in. The first time, enable **Bezel** in Extensions. Wayland loads extension JavaScript at login, so an update needs that logout too.
+Log out and back in. The first time, enable **Bezel** in Extensions. Wayland loads extension JavaScript at login, so an update needs that logout too. About in Bezel settings can run these commands after showing them for confirmation.
 
 ---
 
