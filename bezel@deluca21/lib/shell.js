@@ -186,8 +186,14 @@ export class BezelOverlay {
                     const target = this._bars.find(bar => bar._monitor.index === monitor.index && bar._indicatorSlot);
                     if (target) this._indicators = new IndicatorBridge(target);
                 }
-                if (monitor.index === Main.layoutManager.primaryIndex && this._settings.get_boolean('frame-notifications'))
-                    this._notifications = new NotificationBridge(physicalMonitor, side, theme, state.border, state.radius, this._frames.get(monitor.index), this._settings);
+                if (monitor.index === Main.layoutManager.primaryIndex && this._settings.get_boolean('frame-notifications')) {
+                    const frame = this._frames.get(monitor.index);
+                    this._notifications = new NotificationBridge(physicalMonitor, side, theme, state.border, state.radius, frame, this._settings);
+                    if (frame) {
+                        frame.onJoinChange = () => this._notifications?.restyle();
+                        frame.onSidesChange = () => this._notifications?.position();
+                    }
+                }
                 if (state.editMode)
                     this._addEdgeHandle(physicalMonitor, theme, state);
                 const measuredState = {...state, bars: this._bars.filter(bar => bar._monitor.index === monitor.index)
@@ -364,6 +370,8 @@ export class BezelOverlay {
                 bar._placePopup();
             }
         }
+        if (this._notifications?.monitor?.index === monitorIndex)
+            this._notifications.position();
     }
 
     destroy() {

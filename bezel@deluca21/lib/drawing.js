@@ -1,4 +1,5 @@
 import Cairo from 'cairo';
+import {notificationJoinsFrame} from './frame-regions.js';
 
 // Paint the area OUTSIDE a quarter circle. GJS Cairo uses camelCase methods,
 // unlike Python Cairo; keep this shared with the actual Cairo regression test.
@@ -26,15 +27,91 @@ function source(cr, hex, alpha = 1) {
     cr.setSourceRGBA(rgb[0], rgb[1], rgb[2], alpha);
 }
 
+function openingPathCuts(cr, width, height, sides, radius, items) {
+    const x = sides.left;
+    const y = sides.top;
+    const w = Math.max(1, width - x - sides.right);
+    const h = Math.max(1, height - y - sides.bottom);
+    const r = Math.max(0, Math.min(radius, w / 2, h / 2));
+    const cuts = {};
+    for (const item of items) {
+        if (!item?.corner || !(item.progress > 0))
+            continue;
+        cuts[item.corner] = {
+            width: Math.min(w - r * 2, item.width),
+            depth: Math.min(h - r * 2, item.height * item.progress),
+        };
+    }
+    const edges = [
+        {ox: x, oy: y, rotation: 0, length: w, start: 'top-left', end: 'top-right', mx: x + r, my: y},
+        {ox: x + w, oy: y, rotation: Math.PI / 2, length: h, start: 'top-right', end: 'bottom-right', mx: x + w, my: y + r},
+        {ox: x + w, oy: y + h, rotation: Math.PI, length: w, start: 'bottom-right', end: 'bottom-left', mx: x + w - r, my: y + h},
+        {ox: x, oy: y + h, rotation: Math.PI * 1.5, length: h, start: 'bottom-left', end: 'top-left', mx: x, my: y + h - r},
+    ];
+    let offset = 0;
+    for (let i = 0; i < 4; i++) {
+        if (!cuts[edges[i].start]) {
+            offset = i;
+            break;
+        }
+    }
+    cr.newPath();
+    cr.moveTo(edges[offset].mx, edges[offset].my);
+    for (let n = 0; n < 4; n++) {
+        const {ox, oy, rotation, length, end} = edges[(offset + n) % 4];
+        const horizontal = end === 'top-right' || end === 'bottom-left';
+        const cut = cuts[end];
+        cr.save();
+        cr.translate(ox, oy);
+        cr.rotate(rotation);
+        if (cut) {
+            const span = horizontal ? cut.width : cut.depth;
+            const inset = horizontal ? cut.depth : cut.width;
+            const start = length - span;
+            const round = Math.min(r, inset / 2, span / 2);
+            cr.lineTo(start - round, 0);
+            if (round > 0)
+                cr.arc(start - round, round, round, -Math.PI / 2, 0);
+            cr.lineTo(start, inset - round);
+            if (round > 0)
+                cr.arcNegative(start + round, inset - round, round, Math.PI, Math.PI / 2);
+            cr.lineTo(length - r, inset);
+            if (r > 0)
+                cr.arc(length - r, inset + r, r, -Math.PI / 2, 0);
+            cr.restore();
+            continue;
+        }
+        cr.lineTo(length - r, 0);
+        if (r > 0)
+            cr.arc(length - r, r, r, -Math.PI / 2, 0);
+        cr.restore();
+    }
+    cr.closePath();
+}
+
 // The desktop opening is one path. A drawer is an indentation in that path,
 // not a second rounded rectangle placed over it. Thus joins and shadows match.
 export function openingPath(cr, width, height, sides, radius, popup = null, notification = null) {
+    const drawer = popup && !popup.corner ? popup : null;
+    const extra = popup?.corner ? popup : null;
+    const openingWidth = Math.max(1, width - sides.left - sides.right);
+    const openingHeight = Math.max(1, height - sides.top - sides.bottom);
+    const banner = notification && !notificationJoinsFrame(popup, notification, {w: openingWidth, h: openingHeight, sides})
+        ? null : notification;
+    if (extra?.progress > 0 && banner?.corner && banner.progress > 0) {
+        openingPathCuts(cr, width, height, sides, radius, [extra, banner]);
+        return;
+    }
+    openingPathSingle(cr, width, height, sides, radius, drawer, extra ?? banner);
+}
+
+function openingPathSingle(cr, width, height, sides, radius, popup, notification) {
     // Mirror the corner path so every anchored corner reuses the top-right cut.
     if (notification?.corner === 'bottom-left') {
         cr.save();
         cr.translate(0, height);
         cr.scale(1, -1);
-        openingPath(cr, width, height, {...sides, top: sides.bottom, bottom: sides.top}, radius, popup ? {...popup, y: height - popup.y - popup.height,
+        openingPathSingle(cr, width, height, {...sides, top: sides.bottom, bottom: sides.top}, radius, popup ? {...popup, y: height - popup.y - popup.height,
                 edge: ({top: 'bottom', bottom: 'top'})[popup.edge] ?? popup.edge} : null,
             {...notification, corner: 'top-left', edge: 'top'});
         cr.restore();
@@ -44,7 +121,7 @@ export function openingPath(cr, width, height, sides, radius, popup = null, noti
         cr.save();
         cr.translate(width, 0);
         cr.scale(-1, 1);
-        openingPath(cr, width, height, {...sides, left: sides.right, right: sides.left}, radius, popup ? {...popup, x: width - popup.x - popup.width,
+        openingPathSingle(cr, width, height, {...sides, left: sides.right, right: sides.left}, radius, popup ? {...popup, x: width - popup.x - popup.width,
                 edge: ({left: 'right', right: 'left'})[popup.edge] ?? popup.edge} : null,
             {...notification, corner: notification.corner === 'top-left' ? 'top-right' : 'bottom-left'});
         cr.restore();

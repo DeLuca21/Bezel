@@ -6,6 +6,7 @@ export class DesktopFrame {
     constructor(monitor, theme, sides, state) {
         this.monitor = monitor;
         this.popup = null;
+        this.notification = null;
         this.sides = sides;
         this.baseSides = {...sides};
         this.reveals = new Map();
@@ -25,8 +26,9 @@ export class DesktopFrame {
     repaint() {
         if (this.destroyed) return;
         const {width, height} = this.monitor;
-        const popup = this.popup?.corner ? null : this.popup;
-        const notification = this.popup?.corner ? this.popup : this.popup ? null : this.notification;
+        // Both holes belong on the same opening; dropping one leaves a
+        // transparent banner sitting on the wallpaper.
+        const {popup, notification} = this;
         const regions = frameRegions(width, height, this.sides, this.padding, popup, notification);
         const retained = new Map();
         this.lastDirty = [];
@@ -50,8 +52,7 @@ export class DesktopFrame {
                             bottom: this.sides.bottom * spread, left: this.sides.left * spread,
                         };
                         paintFrame(cr, width, height, sides, this.state.radius * spread, this.theme.bg,
-                            this.state.shadow * spread, this.popup?.corner ? null : this.popup,
-                            this.popup?.corner ? this.popup : this.popup ? null : this.notification);
+                            this.state.shadow * spread, this.popup, this.notification);
                     } finally { cr.$dispose(); }
                 });
             }
@@ -103,12 +104,14 @@ export class DesktopFrame {
             this.sides[item.edge] = Math.max(this.sides[item.edge], base + (item.thickness - base) * item.progress);
         }
         this.repaint();
+        this.onSidesChange?.();
     }
 
     setNotification(notification) {
         if (JSON.stringify(this.notification) === JSON.stringify(notification)) return;
         this.notification = notification;
         this.repaint();
+        this.onJoinChange?.();
     }
 
     setPopup(popup) {
@@ -116,5 +119,6 @@ export class DesktopFrame {
         if (JSON.stringify(this.popup) === JSON.stringify(next)) return;
         this.popup = next;
         this.repaint();
+        this.onJoinChange?.();
     }
 }

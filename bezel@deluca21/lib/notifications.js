@@ -4,6 +4,7 @@ import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as MessageList from 'resource:///org/gnome/shell/ui/messageList.js';
 import {settingChoice} from './config.js';
+import {notificationJoinsFrame} from './frame-regions.js';
 
 // Keep GNOME's notification lifecycle, close button, actions, DND and history.
 // Only presentation is changed; no notification is copied or consumed here.
@@ -76,6 +77,12 @@ export class NotificationBridge {
         return ['top-left', 'top-right', 'bottom-left', 'bottom-right'].includes(value) ? value : 'top-right';
     }
 
+    // Joined autohide grows the frame opening; follow those live sides the
+    // same way popouts use `_opening()`.
+    _opening() {
+        return this.frame?.sides ?? this.sides;
+    }
+
     position() {
         if (!this.bin || this.positioning) return;
         this.positioning = true;
@@ -89,12 +96,13 @@ export class NotificationBridge {
             const gap = this.framed ? 0 : 12;
             const left = corner.endsWith('left');
             const bottom = corner.startsWith('bottom');
+            const sides = this._opening();
             const x = left
-                ? this.monitor.x + this.sides.left + gap
-                : this.monitor.x + this.monitor.width - this.sides.right - gap - width;
+                ? this.monitor.x + sides.left + gap
+                : this.monitor.x + this.monitor.width - sides.right - gap - width;
             const y = bottom
-                ? this.monitor.y + this.monitor.height - this.sides.bottom - gap - height - this.bin.y
-                : this.monitor.y + this.sides.top + gap + this.bin.y;
+                ? this.monitor.y + this.monitor.height - sides.bottom - gap - height - this.bin.y
+                : this.monitor.y + sides.top + gap + this.bin.y;
             this.tray.bannerAlignment = left ? Clutter.ActorAlign.START : Clutter.ActorAlign.END;
             this.bin.translation_x += x - bx;
             this.bin.translation_y += y - by;
@@ -140,15 +148,22 @@ export class NotificationBridge {
     }
 
     // The frame actor is hidden while a monitor is fullscreen, so a banner
-    // joined to that frame would have nothing behind it.
+    // joined to that frame would have nothing behind it. A second joined
+    // drawer can also own that hole; then the banner paints its own card.
     _frameOpen() {
         const actor = this.frame?.actor;
         if (!this.framed || !actor?.visible)
             return false;
         const index = this.monitor?.index;
-        if (index == null)
-            return true;
-        return !global.display.get_monitor_in_fullscreen(index);
+        if (index != null && global.display.get_monitor_in_fullscreen(index))
+            return false;
+        const sides = this._opening();
+        const opening = {
+            w: Math.max(1, (this.monitor?.width ?? 0) - sides.left - sides.right),
+            h: Math.max(1, (this.monitor?.height ?? 0) - sides.top - sides.bottom),
+            sides,
+        };
+        return notificationJoinsFrame(this.frame.popup, this.frame.notification, opening);
     }
 
     _bannerStyle(banner, record, radii = null) {
@@ -164,8 +179,15 @@ export class NotificationBridge {
     }
 
     restyle() {
-        for (const [banner, record] of this.records)
-            this._bannerStyle(banner, record);
+        if (this._restyling)
+            return;
+        this._restyling = true;
+        try {
+            for (const [banner, record] of this.records)
+                this._bannerStyle(banner, record);
+        } finally {
+            this._restyling = false;
+        }
     }
 
     setHistoryOpen(open) {
