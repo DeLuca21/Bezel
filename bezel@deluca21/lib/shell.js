@@ -1202,6 +1202,71 @@ class Bar {
         return barShadowDepth(this._state.barShadow, this._state.border);
     }
 
+    _popupShadowDepth(attached) {
+        if (attached)
+            return 0;
+        return Math.max(0, Number(this._state.shadow) || 0);
+    }
+
+    _popupCardStyle(radii) {
+        const chrome = this._popupChromeStyle;
+        const bg = this._popupPlate ? 'transparent' : chrome.bg;
+        return `background-color: ${bg}; color: ${chrome.fg}; border-radius: ${radii}; padding: ${chrome.pad};`;
+    }
+
+    _popupBackdropPlate() {
+        const holder = new St.Widget({
+            layout_manager: new Clutter.FixedLayout(),
+            x_expand: true, y_expand: true,
+            reactive: false, clip_to_allocation: false,
+        });
+        const plate = new St.DrawingArea({reactive: false, clip_to_allocation: false});
+        holder.add_child(plate);
+        const sync = () => {
+            const source = this._popout ?? holder;
+            const depth = this._popupShadow ?? 0;
+            const width = Math.max(1, source.width || holder.width);
+            const height = Math.max(1, source.height || holder.height);
+            const nextW = width + depth * 2;
+            const nextH = height + depth * 2;
+            if (plate.x !== -depth || plate.y !== -depth || plate.width !== nextW || plate.height !== nextH) {
+                plate.set_position(-depth, -depth);
+                plate.set_size(nextW, nextH);
+            }
+            plate.queue_repaint();
+        };
+        holder._bezelSyncPlate = sync;
+        holder.connect('notify::allocation', () => sync());
+        plate.connect('repaint', () => {
+            let cr;
+            try {
+                cr = plate.get_context();
+            } catch {
+                return;
+            }
+            if (!cr)
+                return;
+            try {
+                const [sw, sh] = plate.get_surface_size();
+                const width = plate.width;
+                const height = plate.height;
+                if (width <= 0 || height <= 0)
+                    return;
+                if (sw > 0 && sh > 0)
+                    cr.scale(sw / width, sh / height);
+                const depth = this._popupShadow ?? 0;
+                paintPillBackdrop(cr, {
+                    x: depth, y: depth,
+                    w: Math.max(1, width - depth * 2),
+                    h: Math.max(1, height - depth * 2),
+                }, this._popupPaintRadius ?? this._state.radius, this._theme.bg, 1, depth);
+            } finally {
+                cr.$dispose();
+            }
+        });
+        return holder;
+    }
+
     _backdropPlate(paint) {
         // A fixed child can extend beyond the cell without changing bar sizing
         // or the input region. Only the app scroll view clips its contents.
@@ -3593,21 +3658,31 @@ class Bar {
         this._popupCleanups = [];
         this._popupAuxActors = new Set();
         this._popupCloseOutside = true;
+        this._popupShadow = this._popupShadowDepth(attached);
+        this._popupPaintRadius = radius;
         this._popupChromeStyle = {
             bg: this._theme.bg, fg: this._theme.fg, attached, edge, location, radius,
             pad: osd || rail ? '12px 10px' : '18px',
-            shadow: attached ? '' : 'box-shadow: 0 3px 10px rgba(0,0,0,0.24);',
         };
-        this._popout = new St.BoxLayout({
-            orientation: Clutter.Orientation.VERTICAL, reactive: true, track_hover: true,
-            can_focus: true, width,
-            style: `background-color: ${this._theme.bg}; color: ${this._theme.fg}; border-radius: ${attached ? joined : `${radius}px`}; padding: ${osd || rail ? '12px 10px' : '18px'}; ${attached ? '' : 'box-shadow: 0 3px 10px rgba(0,0,0,0.24);'}`,
+        this._popout = new St.Widget({
+            layout_manager: new Clutter.BinLayout(),
+            reactive: true, track_hover: true, can_focus: true, width,
+            clip_to_allocation: false,
         });
+        this._popupPlate = this._popupShadow > 0 ? this._popupBackdropPlate() : null;
+        if (this._popupPlate)
+            this._popout.add_child(this._popupPlate);
+        this._popupBox = new St.BoxLayout({
+            orientation: Clutter.Orientation.VERTICAL, reactive: true, track_hover: true,
+            can_focus: true, x_expand: true, y_expand: true,
+            style: this._popupCardStyle(attached ? joined : `${radius}px`),
+        });
+        this._popout.add_child(this._popupBox);
         this._popupLockedHeight = false;
         const content = build();
         this._popupChrome = content._bezelHeader ?? null;
         if (this._popupChrome)
-            this._popout.add_child(this._popupChrome);
+            this._popupBox.add_child(this._popupChrome);
         const scroll = new St.ScrollView({
             style_class: 'bezel-popout-scroll', overlay_scrollbars: true,
             hscrollbar_policy: St.PolicyType.NEVER,
@@ -3617,21 +3692,25 @@ class Bar {
         const menu = this._menuPopup(id);
         scroll.clip_to_allocation = true;
         scroll.set_child(content);
-        this._popout.add_child(decorateScroll(scroll, this._theme, !menu));
+        this._popupBox.add_child(decorateScroll(scroll, this._theme, !menu));
         this._popupFooter = content._bezelFooter ?? null;
-        if (this._popupFooter) this._popout.add_child(this._popupFooter);
+        if (this._popupFooter) this._popupBox.add_child(this._popupFooter);
         this._popupScroll = scroll;
         this._popupContent = content;
-        this._popout.connect('notify::hover', () => {
-            if (this._popout.hover)
+        const linger = () => {
+            if (this._popout.hover || this._popupBox.hover)
                 this._cancel('_closeTimer');
             else
                 this._closeSoon();
-        });
-        this._popout.connect('button-press-event', () => {
+        };
+        this._popout.connect('notify::hover', linger);
+        this._popupBox.connect('notify::hover', linger);
+        const persist = () => {
             this._persistPopup();
             return Clutter.EVENT_PROPAGATE;
-        });
+        };
+        this._popout.connect('button-press-event', persist);
+        this._popupBox.connect('button-press-event', persist);
         // Capture, not bubble. The scroll view sits under the pointer and, with
         // no scrollbar, eats Wayland smooth-scroll before a parent handler runs.
         this._popout.connect('captured-event', (_actor, event) => {
@@ -3715,7 +3794,7 @@ class Bar {
         });
         if (!hover) {
             this._persistPopup();
-            this._popout.grab_key_focus();
+            (this._popupBox ?? this._popout).grab_key_focus();
         }
         else
             this._watchHoverPopup();
@@ -3856,6 +3935,7 @@ class Bar {
         // Resize the frame and viewport together. Animating only the outer actor
         // leaves its placement and clip behind the new content allocation.
         this._popout.height = height;
+        this._popupPlate?._bezelSyncPlate?.();
         const scrolling = this._popupScrolls();
         if (scrolling && this._popupScroll) {
             const innerWidth = Math.max(1, this._popout.width - 36);
@@ -3969,10 +4049,11 @@ class Bar {
         const horizontal = edge === 'left' || edge === 'right';
         const depth = (horizontal ? width : height) * progress;
         const attach = Boolean(this._popupFrame);
-        this._popout.set_clip(edge === 'right' ? width - depth : 0,
-            edge === 'bottom' ? height - depth : 0,
-            Math.max(0, horizontal ? depth : width),
-            Math.max(0, horizontal ? height : depth));
+        const pad = this._popupPlate ? (this._popupShadow ?? 0) : 0;
+        this._popout.set_clip((edge === 'right' ? width - depth : 0) - pad,
+            (edge === 'bottom' ? height - depth : 0) - pad,
+            Math.max(0, horizontal ? depth : width) + pad * 2,
+            Math.max(0, horizontal ? height : depth) + pad * 2);
         if (attach && (progress <= 0 || progress >= 1))
             this._applyPopupJoin(this._state.radius, progress >= 1);
         if (progress <= 0) {
@@ -4007,15 +4088,17 @@ class Bar {
             left: `0 ${Math.round(join)}px ${Math.round(join)}px 0`,
             right: `${Math.round(join)}px 0 0 ${Math.round(join)}px`,
         }[chrome.edge] ?? `${chrome.radius}px`);
-        const next = `background-color: ${chrome.bg}; color: ${chrome.fg}; border-radius: ${radii}; padding: ${chrome.pad}; ${chrome.shadow}`;
-        if (this._popout.get_style() !== next)
-            this._popout.set_style(next);
+        const card = this._popupBox ?? this._popout;
+        const next = this._popupCardStyle(radii);
+        if (card.get_style() !== next)
+            card.set_style(next);
+        this._popupPlate?._bezelSyncPlate?.();
     }
 
     _containsPointer() {
         if (!this._popout)
             return false;
-        if (this._popout.hover || this._anchor?.hover)
+        if (this._popout.hover || this._popupBox?.hover || this._anchor?.hover)
             return true;
         const [x, y] = global.get_pointer();
         return inside(this._popout, x, y, 24) || inside(this._anchor, x, y, 12) || this._insideGeometry(x, y, 24);
@@ -4126,6 +4209,8 @@ class Bar {
         this._popupInputHole = false;
         drop(this._popout);
         this._popout = null;
+        this._popupBox = null;
+        this._popupPlate = null;
         this._popupContent = null;
         this._popupAuxActors = null;
         this._popupChrome = null;

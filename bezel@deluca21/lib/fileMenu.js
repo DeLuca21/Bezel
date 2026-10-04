@@ -4,10 +4,10 @@ import * as Config from 'resource:///org/gnome/shell/misc/config.js';
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {chromeOptions} from './compat.js';
+import {paintPillBackdrop} from './drawing.js';
 import {menuPosition} from './geometry.js';
 
 const MENU_WIDTH = 220;
-const SHADOW_PAD = 14;
 
 function pointerCoords(event) {
     const raw = event?.get_coords?.();
@@ -19,17 +19,20 @@ function pointerCoords(event) {
 
 export function popupChromeMenu(bar, x, y, entries) {
     const theme = bar._theme;
+    const depth = Math.max(0, Number(bar._state?.shadow) || 0);
     const wrap = new St.Widget({
         reactive: true, x_expand: false, y_expand: false,
         layout_manager: new Clutter.BinLayout(),
         accessible_name: 'File menu',
-        style: `padding: ${SHADOW_PAD}px;`,
     });
+    const plate = depth > 0 ? new St.DrawingArea({reactive: false}) : null;
     const box = new St.BoxLayout({
         orientation: Clutter.Orientation.VERTICAL, reactive: true,
         x_expand: false, y_expand: false, width: MENU_WIDTH,
-        style: `spacing: 0; padding: 5px; border-radius: 10px; background-color: ${theme.bg}; border: 1px solid ${theme.surface}; box-shadow: 0 4px 14px rgba(0,0,0,0.32);`,
+        style: `spacing: 0; padding: 5px; border-radius: 10px; background-color: ${theme.bg}; border: 1px solid ${theme.surface};`,
     });
+    if (plate)
+        wrap.add_child(plate);
     wrap.add_child(box);
     const shade = new St.Widget({reactive: true, x: 0, y: 0});
     shade.add_constraint(new Clutter.BindConstraint({source: global.stage, coordinate: Clutter.BindCoordinate.SIZE}));
@@ -76,8 +79,33 @@ export function popupChromeMenu(bar, x, y, entries) {
         return Clutter.EVENT_STOP;
     });
     const [, height] = box.get_preferred_height(MENU_WIDTH);
-    wrap.set_size(MENU_WIDTH + SHADOW_PAD * 2, height + SHADOW_PAD * 2);
-    wrap.set_position(...menuPosition(bar._monitor, x, y, MENU_WIDTH, height, SHADOW_PAD));
+    wrap.set_size(MENU_WIDTH + depth * 2, height + depth * 2);
+    box.set_position(depth, depth);
+    box.set_size(MENU_WIDTH, height);
+    if (plate) {
+        plate.set_size(MENU_WIDTH + depth * 2, height + depth * 2);
+        plate.connect('repaint', () => {
+            const cr = plate.get_context();
+            try {
+                const [sw, sh] = plate.get_surface_size();
+                const width = plate.width;
+                const tall = plate.height;
+                if (width <= 0 || tall <= 0)
+                    return;
+                if (sw > 0 && sh > 0)
+                    cr.scale(sw / width, sh / tall);
+                paintPillBackdrop(cr, {
+                    x: depth, y: depth,
+                    w: Math.max(1, width - depth * 2),
+                    h: Math.max(1, tall - depth * 2),
+                }, 10, theme.bg, 1, depth);
+            } finally {
+                cr.$dispose();
+            }
+        });
+        plate.queue_repaint();
+    }
+    wrap.set_position(...menuPosition(bar._monitor, x, y, MENU_WIDTH, height, Math.max(depth, 4)));
     press = global.stage.connect('captured-event', (_stage, event) => {
         if (closed) return Clutter.EVENT_PROPAGATE;
         if (event.type() !== Clutter.EventType.BUTTON_PRESS && event.type() !== Clutter.EventType.TOUCH_BEGIN)
