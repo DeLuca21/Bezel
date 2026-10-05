@@ -17,6 +17,7 @@ parser.add_argument('--session-only', action='store_true', help='Only check lock
 parser.add_argument('--overflow-only', action='store_true', help='Only check scroll decoration alignment')
 parser.add_argument('--text-only', action='store_true', help='Only check text container pixel alignment')
 parser.add_argument('--startup-only', action='store_true', help='Only check late-loading bar icons')
+parser.add_argument('--theme-only', action='store_true', help='Only check live palette transitions')
 args = parser.parse_args()
 repo = Path(__file__).resolve().parent.parent
 root = Path(tempfile.mkdtemp(prefix="bezel-motion-shell-"))
@@ -50,6 +51,8 @@ hook = """
                         try { await new Shell.Screenshot().screenshot(false, stream); }
                         finally { stream.close(null); }
                     };
+                    const themes = await import(THEME_URI);
+                    if (THEME_ONLY) return {themeChanges: await themes.run(this._overlay, capture)};
                     const textRendering = await import(TEXT_URI);
                     if (TEXT_ONLY) return {textLayouts: await textRendering.run(this._overlay, capture)};
                     const overflow = await import(OVERFLOW_URI);
@@ -69,6 +72,7 @@ hook = """
                     results.sidebarPicking = (await picking.run(this._overlay)).length;
                     results.textLayouts = await textRendering.run(this._overlay, capture);
                     results.startupLayouts = await startup.run(this._overlay);
+                    results.themeChanges = await themes.run(this._overlay, capture);
                     results.sessionAnimations = await sessions.run(this);
                     return results;
                 };
@@ -81,6 +85,8 @@ hook = """
             }
 """
 for key, value in {
+    "THEME_URI": (root / "tests/theme-transitions.js").as_uri(),
+    "THEME_ONLY": args.theme_only,
     "TEXT_URI": (root / "tests/text-rendering.js").as_uri(),
     "TEXT_ONLY": args.text_only,
     "OVERFLOW_URI": (root / "tests/overflow-layout.js").as_uri(),

@@ -216,3 +216,13 @@ odd-height popouts, settled scales, and the font used for vertical captions
 are checked. The original placement fails with a bar at 116.03 pixels.
 The isolated runner saves a native-resolution `text-rendering.png` for visual
 inspection and leaves desktop font and display settings untouched.
+
+# Live themes and layout presets
+
+Run `python3 tests/run-motion-shell.py --theme-only` to verify nine palette
+changes (including rapid replacements) and all six layout presets with Off,
+Retreat, and Fade transitions. It checks actual bar/frame colours, geometry,
+visibility, and transition cleanup on two monitors. The original regression
+called Clutter's boolean `has_clip` property as a function, preventing animated
+theme and layout changes from reaching the rebuild. The full Shell runner also
+includes this test.

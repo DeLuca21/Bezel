@@ -63,6 +63,7 @@ export class LayoutTransition {
     }
 
     _capture() {
+        // GJS exposes Clutter's has-clip as a boolean property, not a method.
         const items = [];
         for (const bar of this.overlay._bars) {
             const actor = bar._actor;
@@ -72,7 +73,7 @@ export class LayoutTransition {
             bar._revealTimeline?.stop();
             bar._revealTimeline = null;
             items.push({
-                kind: 'bar', actor, bar, resumeReveal, clip: actor.has_clip?.() ? actor.get_clip() : null, edge: bar._state.edge, box: barBox(bar),
+                kind: 'bar', actor, bar, resumeReveal, clip: actor.has_clip ? actor.get_clip() : null, edge: bar._state.edge, box: barBox(bar),
                 monitor: bar._monitor,
                 opacity: actor.opacity, clipToAllocation: actor.clip_to_allocation,
                 tx: actor.translation_x, ty: actor.translation_y,
@@ -83,7 +84,7 @@ export class LayoutTransition {
             if (!actor?.visible || global.display.get_monitor_in_fullscreen(index))
                 continue;
             items.push({
-                kind: 'frame', actor, frame, clip: actor.has_clip?.() ? actor.get_clip() : null, monitor: frame.monitor,
+                kind: 'frame', actor, frame, clip: actor.has_clip ? actor.get_clip() : null, monitor: frame.monitor,
                 opacity: actor.opacity, clipToAllocation: actor.clip_to_allocation,
                 tx: actor.translation_x, ty: actor.translation_y,
             });
@@ -125,13 +126,10 @@ export class LayoutTransition {
             clone.set_pivot_point(pivotX, pivotY);
             // Newly rebuilt bars can settle their indicator/content size on
             // the next allocation. Keep the visual copy aligned as they do.
-            const allocationId = actor.connect('notify::allocation', () => {
+            actor.connectObject('notify::allocation', () => {
                 clone.set_position(actor.x - monitor.x, actor.y - monitor.y);
                 clone.set_size(actor.width, actor.height);
-            });
-            clone.connect('destroy', () => {
-                if (clone.get_source()) actor.disconnect(allocationId);
-            });
+            }, clone);
             group.add_child(clone);
             Main.uiGroup.set_child_above_sibling(group, actor);
             actor.hide();

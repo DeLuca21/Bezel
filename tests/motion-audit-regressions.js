@@ -37,7 +37,7 @@ class Actor {
     get_parent() { return this.parent ?? stage; }
     get_transformed_position() { return [this.x, this.y]; }
     get_transformed_size() { return [this.width, this.height]; }
-    has_clip() { return Boolean(this.clip); }
+    get has_clip() { return Boolean(this.clip); }
     get_clip() { return [...this.clip]; }
     set_clip(...clip) { this.clip = clip; }
     remove_clip() { this.clip = null; }
