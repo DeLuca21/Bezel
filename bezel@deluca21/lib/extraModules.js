@@ -21,10 +21,10 @@ export function buildValueButton(bar, id, iconName, size, fallback) {
         style: `color: ${bar._theme.fg}; font-size: ${Math.max(11, Math.round(size * 0.5))}px; font-weight: 600;`,
     });
     text.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-    if (look.icon)
-        row.add_child(icon);
-    if (look.value)
-        row.add_child(text);
+    icon.visible = look.icon;
+    text.visible = look.value;
+    row.add_child(icon);
+    row.add_child(text);
     const button = new St.Button({reactive: true, can_focus: true, child: row, x_align: Clutter.ActorAlign.CENTER});
     button.accessible_name = fallback;
     if (id === 'performance')
@@ -59,19 +59,22 @@ export function buildMediaFace(bar, size) {
         title.width = 120;
         title.clutter_text.ellipsize = Pango.EllipsizeMode.END;
     }
-    if (look.art)
-        row.add_child(art);
-    if (look.icon)
-        row.add_child(icon);
-    if (look.value)
-        row.add_child(title);
+    art.visible = look.art;
+    icon.visible = look.icon;
+    title.visible = look.value;
+    row.add_child(art);
+    row.add_child(icon);
+    row.add_child(title);
     const button = new St.Button({reactive: true, can_focus: true, child: row, x_align: Clutter.ActorAlign.CENTER});
+    let paintedArt = null;
     const unsubscribe = services.subscribe(() => {
         const media = services.media;
         icon.icon_name = media?.playing ? 'media-playback-start-symbolic' : 'media-playback-pause-symbolic';
         title.text = media?.title ?? 'Nothing playing';
         button.accessible_name = media ? `${media.title}${media.artist ? ` · ${media.artist}` : ''}` : 'Nothing playing';
-        if (look.art) {
+        const artUrl = media?.artUrl?.startsWith('file://') ? media.artUrl : '';
+        if (look.art && artUrl !== paintedArt) {
+            paintedArt = artUrl;
             art.gicon = media?.artUrl?.startsWith('file://')
                 ? new Gio.FileIcon({file: Gio.File.new_for_uri(media.artUrl)})
                 : new Gio.ThemedIcon({name: 'audio-x-generic-symbolic'});
@@ -95,10 +98,10 @@ export function buildMicFace(bar, size) {
         text: '',
         style: `color: ${bar._theme.fg}; font-size: ${Math.max(11, Math.round(size * 0.5))}px; font-weight: 600;`,
     });
-    if (look.icon)
-        row.add_child(icon);
-    if (look.value)
-        row.add_child(text);
+    icon.visible = look.icon;
+    text.visible = look.value;
+    row.add_child(icon);
+    row.add_child(text);
     const button = new St.Button({reactive: true, can_focus: true, child: row, x_align: Clutter.ActorAlign.CENTER});
     const unsubscribe = services.subscribe(() => {
         icon.icon_name = services.micIcon;
@@ -160,8 +163,14 @@ export function buildClipboardPanel(bar) {
         style: `color: ${theme.fg};`,
     });
     const list = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 6px;'});
+    let paintedHistory = null;
+    let paintedQuery = null;
     const paint = () => {
         const query = entry.get_text().trim().toLowerCase();
+        const history = services.clipboard;
+        if (history === paintedHistory && query === paintedQuery) return;
+        paintedHistory = history;
+        paintedQuery = query;
         list.destroy_all_children();
         const items = services.clipboard.filter(item => !query || item.toLowerCase().includes(query));
         if (!items.length) {
@@ -316,35 +325,42 @@ function cycleLayout(step) {
 }
 
 function watchProfile(button, paint) {
-    let alive = true;
-    button.connect('destroy', () => { alive = false; });
+    const cancel = new Gio.Cancellable();
+    let proxy = null;
+    let changed = 0;
+    button.connect('destroy', () => {
+        cancel.cancel();
+        if (changed) proxy.disconnect(changed);
+        changed = 0;
+        proxy = null;
+    });
     const load = (name, path, iface) => {
         Gio.DBusProxy.new_for_bus(Gio.BusType.SYSTEM, Gio.DBusProxyFlags.NONE, null,
-            name, path, iface, null, (_source, result) => {
-                let proxy;
+            name, path, iface, cancel, (_source, result) => {
+                let candidate;
                 try {
-                    proxy = Gio.DBusProxy.new_for_bus_finish(result);
-                    if (!proxy.get_name_owner())
+                    candidate = Gio.DBusProxy.new_for_bus_finish(result);
+                    if (!candidate.get_name_owner())
                         throw new Error('no owner');
                 } catch {
-                    if (name !== 'net.hadess.PowerProfiles')
+                    if (!cancel.is_cancelled() && name !== 'net.hadess.PowerProfiles')
                         load('net.hadess.PowerProfiles', '/net/hadess/PowerProfiles', 'net.hadess.PowerProfiles');
                     return;
                 }
+                if (cancel.is_cancelled()) return;
+                proxy = candidate;
                 const names = {
                     'power-saver': ['Power Saver', 'power-profile-power-saver-symbolic'],
                     balanced: ['Balanced', 'power-profile-balanced-symbolic'],
                     performance: ['Performance', 'power-profile-performance-symbolic'],
                 };
                 const sync = () => {
-                    if (!alive)
-                        return;
+                    if (cancel.is_cancelled()) return;
                     const active = proxy.get_cached_property('ActiveProfile')?.unpack() ?? '';
                     const [label, icon] = names[active] ?? [active || 'Performance', 'power-profile-balanced-symbolic'];
                     paint(label, icon);
                 };
-                const changed = proxy.connect('g-properties-changed', sync);
-                button.connect('destroy', () => proxy.disconnect(changed));
+                changed = proxy.connect('g-properties-changed', sync);
                 sync();
             });
     };
@@ -352,9 +368,10 @@ function watchProfile(button, paint) {
 }
 
 function watchVpn(button, paint) {
-    let alive = true;
+    const cancel = new Gio.Cancellable();
+    let pending = null;
     const refresh = () => {
-        if (!alive)
+        if (cancel.is_cancelled() || pending)
             return;
         let subprocess;
         try {
@@ -363,15 +380,18 @@ function watchVpn(button, paint) {
             paint('');
             return;
         }
-        subprocess.communicate_utf8_async(null, null, (_proc, result) => {
+        pending = subprocess;
+        subprocess.communicate_utf8_async(null, cancel, (_proc, result) => {
             try {
                 const [, text] = subprocess.communicate_utf8_finish(result);
                 const active = text.split('\n').map(line => line.split(':')).find(([, type, device]) => /vpn|wireguard|tun/i.test(type ?? '') && device && device !== '--');
-                if (alive)
+                if (!cancel.is_cancelled())
                     paint(active?.[0] ?? '');
             } catch {
-                if (alive)
+                if (!cancel.is_cancelled())
                     paint('');
+            } finally {
+                pending = null;
             }
         });
     };
@@ -380,5 +400,12 @@ function watchVpn(button, paint) {
         refresh();
         return GLib.SOURCE_CONTINUE;
     });
-    button.connect('destroy', () => { alive = false; GLib.source_remove(timer); });
+    button.connect('destroy', () => {
+        cancel.cancel();
+        GLib.source_remove(timer);
+        if (pending) {
+            try { pending.force_exit(); } catch {}
+            pending = null;
+        }
+    });
 }

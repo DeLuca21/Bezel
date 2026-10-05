@@ -4,6 +4,9 @@ import St from 'gi://St';
 import * as Volume from 'resource:///org/gnome/shell/ui/status/volume.js';
 import {clamp} from './config.js';
 
+// Skip oversized clipboard payloads rather than retaining or truncating them.
+const MAX_CLIPBOARD_CHARS = 64 * 1024;
+
 // One shared connection per extension, never synchronous D-Bus in the UI thread.
 export class Services {
     constructor() {
@@ -47,6 +50,9 @@ export class Services {
         this._history = [];
         this._clipLast = '';
         this._awakeCookie = 0;
+        this._awakeWanted = false;
+        this._awakePending = false;
+        this._clipPending = false;
         this._clipTimer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
             this._pollClipboard();
             return GLib.SOURCE_CONTINUE;
@@ -119,18 +125,25 @@ export class Services {
     }
 
     _pollClipboard() {
+        if (this._clipPending || this._cancellable.is_cancelled())
+            return;
+        this._clipPending = true;
         try {
             St.Clipboard.get_default().get_text(St.ClipboardType.CLIPBOARD, (_clip, text) => {
+                this._clipPending = false;
                 if (!this._cancellable.is_cancelled())
                     this._rememberClip(text);
             });
         } catch (error) {
             if (!this._cancellable.is_cancelled())
                 console.warn(`Bezel: clipboard unavailable: ${error.message}`);
+            this._clipPending = false;
         }
     }
 
     _rememberClip(text) {
+        if (typeof text !== 'string' || text.length > MAX_CLIPBOARD_CHARS)
+            return;
         const value = String(text ?? '').replace(/\s+/g, ' ').trim();
         if (!value || value === this._clipLast)
             return;
@@ -206,32 +219,43 @@ export class Services {
     }
 
     get awake() {
-        return this._awakeCookie > 0;
+        return this._awakeWanted || this._awakeCookie > 0;
     }
 
     setAwake(on) {
-        if (on && !this._awakeCookie) {
+        if (this._cancellable.is_cancelled())
+            return;
+        this._awakeWanted = Boolean(on);
+        if (!on) {
+            this._releaseAwake();
+            this._emit();
+            return;
+        }
+        if (!this._awakeCookie && !this._awakePending) {
+            this._awakePending = true;
             Gio.DBus.session.call('org.gnome.SessionManager', '/org/gnome/SessionManager',
                 'org.gnome.SessionManager', 'Inhibit',
                 new GLib.Variant('(susu)', ['bezel@deluca21', 0, 'Keep the computer awake', 8]),
-                new GLib.VariantType('(u)'), Gio.DBusCallFlags.NONE, 3000, this._cancellable,
+                // Finish even after disable so a late inhibitor cookie can be released.
+                new GLib.VariantType('(u)'), Gio.DBusCallFlags.NONE, 3000, null,
                 (bus, result) => {
+                    this._awakePending = false;
                     try {
                         const [cookie] = bus.call_finish(result).deepUnpack();
                         this._awakeCookie = cookie;
-                        if (this._cancellable.is_cancelled())
+                        if (!this._awakeWanted || this._cancellable.is_cancelled())
                             this._releaseAwake();
                         else
                             this._emit();
                     } catch (error) {
                         if (!this._cancellable.is_cancelled())
                             console.warn(`Bezel: could not keep the computer awake: ${error.message}`);
+                        this._awakeWanted = false;
+                        this._emit();
                     }
                 });
-            return;
         }
-        if (!on && this._awakeCookie)
-            this._releaseAwake();
+        this._emit();
     }
 
     _releaseAwake() {
@@ -241,7 +265,9 @@ export class Services {
         this._awakeCookie = 0;
         Gio.DBus.session.call('org.gnome.SessionManager', '/org/gnome/SessionManager',
             'org.gnome.SessionManager', 'Uninhibit',
-            new GLib.Variant('(u)', [cookie]), null, Gio.DBusCallFlags.NONE, 3000, null, () => {});
+            new GLib.Variant('(u)', [cookie]), null, Gio.DBusCallFlags.NONE, 3000, null, (bus, result) => {
+                try { bus.call_finish(result); } catch {}
+            });
         this._emit();
     }
 
@@ -282,13 +308,15 @@ export class Services {
             ? property(this.network, 'PrimaryConnection', '/') : property(this.network, 'ActiveConnections', [])[0] ?? '/';
         if (path === this._connectionPath) return;
         this._connectionPath = path;
+        const request = {};
+        this._connectionRequest = request;
         if (this._connectionSignal) this.connection.disconnect(this._connectionSignal);
         this._connectionSignal = 0;
         this.connection = null;
         if (path === '/') return;
         this._proxy(Gio.BusType.SYSTEM, 'org.freedesktop.NetworkManager', path,
             'org.freedesktop.NetworkManager.Connection.Active', proxy => {
-                if (this._connectionPath !== path) return;
+                if (this._connectionRequest !== request) return;
                 this.connection = proxy;
                 this._connectionSignal = proxy.connect('g-properties-changed', () => this._emit());
                 this._emit();
@@ -395,6 +423,10 @@ export class Services {
         if (this._clipTimer)
             GLib.source_remove(this._clipTimer);
         this._clipTimer = 0;
+        this._history = [];
+        this._clipLast = '';
+        this._awakeWanted = false;
+        this._listeners.clear();
         this._releaseAwake();
         if (this._connectionSignal) this.connection.disconnect(this._connectionSignal);
         this._connectionSignal = 0;

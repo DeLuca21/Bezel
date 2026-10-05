@@ -1,4 +1,5 @@
 import Clutter from 'gi://Clutter';
+import GObject from 'gi://GObject';
 import St from 'gi://St';
 
 // St's overlay scrollbars paint under opaque children and show on 1px overflow.
@@ -32,15 +33,20 @@ export function decorateScroll(scroll, theme, showThumb = true) {
     });
     overlay.add_child(fadeTop);
     overlay.add_child(fadeBottom);
-    if (showThumb)
-        overlay.add_child(thumb);
+    thumb.visible = showThumb;
+    overlay.add_child(thumb);
     overlay.visible = false;
-    overlay.opacity = 0;
     stack.add_child(scroll);
     stack.add_child(overlay);
     const adj = scroll.vadjustment;
     let dead = false;
-    scroll.connect('destroy', () => { dead = true; });
+    // ScrollView can dispose its adjustment before emitting destroy. A native
+    // signal group handles either destruction order without touching that object.
+    const signals = GObject.SignalGroup.new(St.Adjustment);
+    scroll.connect('destroy', () => {
+        dead = true;
+        signals.set_target(null);
+    });
     const sync = () => {
         if (dead)
             return;
@@ -62,7 +68,8 @@ export function decorateScroll(scroll, theme, showThumb = true) {
             thumb.translation_y = shift;
     };
     for (const signal of ['notify::value', 'notify::upper', 'notify::page-size'])
-        adj.connect(signal, sync);
+        signals.connect_data(signal, sync, 0);
+    signals.set_target(adj);
     scroll.connect('notify::allocation', sync);
     overlay.connect('notify::allocation', sync);
     sync();
