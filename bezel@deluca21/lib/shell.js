@@ -29,6 +29,7 @@ import {sideWidths, reservedWidths, cornerRadius, zonePlacement} from './geometr
 import {paintCorner, paintPillBackdrop} from './drawing.js';
 import {Services} from './services.js';
 import {DesktopFrame} from './frame.js';
+import {LoginAnimation} from './loginAnimation.js';
 import {monthGrid, openCalendarDate} from './calendar.js';
 import {Weather, weatherWidget, railTemp} from './weather.js';
 import {buildMediaFace, buildMicFace, buildMicPanel, buildClipboardPanel, buildKeyboardFace, buildKeyboardPanel, buildAwakeFace, buildValueButton} from './extraModules.js';
@@ -60,6 +61,7 @@ export class BezelOverlay {
         this._bars = [];
         this.appIconGeometry = new AppIconGeometry();
         this._layoutTransition = new LayoutTransition(this);
+        this._loginPending = Main.layoutManager._startingUp && !Main.sessionMode.isGreeter && !Main.sessionMode.isLocked;
         this._id = settings.connect('changed', (_settings, key) => {
             if (key === 'layout-transition-request') {
                 this._animateLayout = true;
@@ -95,6 +97,20 @@ export class BezelOverlay {
                 this._placeIndicators();
                 return;
             }
+            if (key === 'preview-login-animation') {
+                this.previewLoginAnimation();
+                return;
+            }
+            if (key === 'login-animation') {
+                if (!settingFlag(this._settings, key)) {
+                    this._loginPending = false;
+                    this._loginAnimation?.destroy();
+                    this._loginAnimation = null;
+                }
+                return;
+            }
+            if (['login-animation-theme', 'login-animation-speed', 'lock-animation', 'unlock-animation'].includes(key))
+                return; // The next login animation or preview reads these values.
             if (!['known-indicators', 'saved-layouts', 'previous-layout', 'layout-baseline', 'shortcut-overrides', 'show-settings', 'preferences-bar'].includes(key)) this.queueRebuild();
         });
         this._monitors = Main.layoutManager.connect('monitors-changed', () => this.queueRebuild());
@@ -120,7 +136,7 @@ export class BezelOverlay {
     }
 
     queueRebuild() {
-        if (this._holdRebuild)
+        if (this._destroyed || this._holdRebuild)
             return;
         if (this._rebuildId)
             GLib.source_remove(this._rebuildId);
@@ -140,6 +156,7 @@ export class BezelOverlay {
     }
 
     skipRebuild(fn) {
+        if (this._destroyed) return;
         this._holdRebuild = true;
         if (this._rebuildId) {
             GLib.source_remove(this._rebuildId);
@@ -148,7 +165,9 @@ export class BezelOverlay {
         try {
             fn();
         } finally {
-            GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            if (this._holdRebuildId) GLib.source_remove(this._holdRebuildId);
+            this._holdRebuildId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                this._holdRebuildId = 0;
                 if (this._rebuildId) {
                     GLib.source_remove(this._rebuildId);
                     this._rebuildId = 0;
@@ -218,6 +237,12 @@ export class BezelOverlay {
             this._syncEditEscape();
             this._syncRecordingStop();
             if (this._groupPreview?.action === 'open') this._showGroupPreview();
+            if (this._loginPending && Main.layoutManager._startingUp && (this._bars.length || this._frames.size) &&
+                settingFlag(this._settings, 'login-animation') &&
+                allowsMotion(St.Settings.get(), St.ReducedMotion)) {
+                this._loginAnimation = new LoginAnimation(this._bars, this._frames, theme, state,
+                    () => { this._loginPending = false; });
+            }
         } catch (error) {
             this._clear();
             throw error;
@@ -306,6 +331,25 @@ export class BezelOverlay {
 
     openPreferences() {
         this.openSettings();
+    }
+
+    previewLoginAnimation() {
+        if (Main.layoutManager._startingUp || Main.sessionMode.isLocked || Main.sessionMode.isGreeter)
+            return;
+        if (this._rebuildId) {
+            GLib.source_remove(this._rebuildId);
+            this._rebuildId = 0;
+            this.rebuild();
+        }
+        this._loginAnimation?.destroy();
+        this._loginAnimation = null;
+        const state = readState(this._settings);
+        if ((!this._bars.length && !this._frames.size) || !allowsMotion(St.Settings.get(), St.ReducedMotion))
+            return;
+        Main.overview.hide();
+        for (const bar of this._bars) bar._close();
+        this._loginAnimation = new LoginAnimation(this._bars, this._frames,
+            resolveTheme(this._settings), state, undefined, false);
     }
 
     openSettings(options = {}) {
@@ -449,7 +493,12 @@ export class BezelOverlay {
     }
 
     destroy() {
+        if (this._destroyed) return;
+        this._destroyed = true;
         this._layoutTransition.cancel();
+        if (this._holdRebuildId)
+            GLib.source_remove(this._holdRebuildId);
+        this._holdRebuildId = 0;
         if (this._rebuildId)
             GLib.source_remove(this._rebuildId);
         if (this._id)
@@ -587,6 +636,8 @@ export class BezelOverlay {
     }
 
     _clear() {
+        this._loginAnimation?.destroy();
+        this._loginAnimation = null;
         this._editAdds = [];
         this._notifications?.destroy();
         this._notifications = null;
@@ -820,6 +871,11 @@ class Bar {
             this._actor = null;
         });
         this._place();
+        // Icon textures and service labels can acquire their natural size after
+        // the first login layout. Resize the fixed section viewports with them.
+        for (const zone of Object.values(zones))
+            this._signals.push([zone, zone.connect('queue-relayout', () => this._queueContentLayout())]);
+        this._queueContentLayout();
         this._ensureEditHandles();
         this._signals.push([this._actor, this._actor.connect('captured-event', (_actor, event) => this._barClick(event))]);
         this._signals.push([this._actor, this._actor.connect('captured-event', (_actor, event) => this._barScroll(event))]);
@@ -1664,7 +1720,7 @@ class Bar {
                 if (child && this._vertical) {
                     const inner = this._contentSpan(child, depth + 1, raw);
                     if (inner > 0)
-                        return inner;
+                        return Math.max(inner, this._longPreferred(actor)[1]);
                 }
                 const [, size] = this._longPreferred(actor);
                 return size || 0;
@@ -2025,6 +2081,24 @@ class Bar {
         }
     }
 
+    _queueContentLayout() {
+        if (this._destroyed || this._contentLayout || this._checkingContentLayout)
+            return;
+        this._later('_contentLayout', 0, () => {
+            if (!this._actor) return;
+            this._checkingContentLayout = true;
+            try {
+                const size = JSON.stringify([this._contentCross(), ...this._sectionSpans()]);
+                // Placement also queues relayout. Only new natural dimensions
+                // need another pass, so steady bars do not keep laying out.
+                if (size !== this._contentLayoutSize)
+                    this._place();
+            } finally {
+                this._checkingContentLayout = false;
+            }
+        });
+    }
+
     _place(overrides = null) {
         overrides ??= this._geomDrag?.pending;
         this._layoutApps = overrides && overrides.appsLength != null
@@ -2045,9 +2119,10 @@ class Bar {
         }
         const edge = this._state.edge;
         let span = overrides?.thickness ?? this._state.thickness;
+        const contentCross = this._contentCross();
         if (!this._vertical) {
             const crossPad = this._barPadding();
-            const needed = Math.ceil(this._contentCross() + crossPad.cross * 2 + 8);
+            const needed = Math.ceil(contentCross + crossPad.cross * 2 + 8);
             span = Math.max(span, Math.min(88, needed));
         }
         let px = x;
@@ -2069,6 +2144,7 @@ class Bar {
         const maxLength = (this._vertical ? height : width) - margin * 2;
         const configured = maxLength * (overrides?.length ?? this._state.length) / 100;
         const [startSize, centerSize, endSize] = this._sectionSpans();
+        this._contentLayoutSize = JSON.stringify([contentCross, startSize, centerSize, endSize]);
         const dockReal = this._dockContent?.get_children().filter(child => !child._bezelBalance && child.visible !== false) ?? [];
         const dockGaps = this._dockContent
             ? this._boxSpacing(this._dockContent) * Math.max(0, dockReal.length - 1) : 0;
@@ -2082,7 +2158,9 @@ class Bar {
             length = Math.max(span, overrides?.dockMinLength ?? this._state.dockMinLength, needed);
         else if (this._state.kind !== 'dock')
             length = Math.max(configured, needed);
-        length = Math.min(maxLength, length);
+        // Keep text-bearing containers on whole stage pixels. Percentage
+        // lengths and centering odd-sized packs otherwise filter every glyph.
+        length = Math.round(Math.min(maxLength, length));
         if (this._vertical) {
             py = y + (height - length) / 2;
             h = length;
@@ -2092,6 +2170,10 @@ class Bar {
             w = length;
             py += edge === 'top' ? margin : -margin;
         }
+        px = Math.round(px);
+        py = Math.round(py);
+        w = Math.round(w);
+        h = Math.round(h);
         this._box = {x: px, y: py, width: w, height: h};
         this._actor.set_position(px, py);
         this._actor.set_size(w, h);
@@ -2103,7 +2185,7 @@ class Bar {
         const pad = this._barPadding();
         const innerAlong = Math.max(1, (this._vertical ? h : w) - pad.along * 2);
         const innerCross = Math.max(1, (this._vertical ? w : h) - pad.cross * 2);
-        this._fitDock(innerAlong, innerCross);
+        this._fitDock(this._vertical ? innerCross : innerAlong, this._vertical ? innerAlong : innerCross);
         const placed = zonePlacement(innerAlong, [startSize, centerSize, endSize]);
         const sizes = placed.sizes.map(value => Math.max(0, Math.round(value)));
         let before = Math.max(0, Math.round(placed.before));
@@ -2541,6 +2623,7 @@ class Bar {
         this._shown = show;
         if (this._joinedAutohide) {
             this._revealTimeline?.stop();
+            this._revealTimeline = null;
             const from = this._revealProgress ?? 0;
             const target = show ? 1 : 0;
             const frame = this._overlay._frames.get(this._monitor.index);
@@ -2587,7 +2670,7 @@ class Bar {
         const scaleY = !this._vertical && !show ? 0 : 1;
         this._actor.remove_all_transitions();
         this._actor.show();
-        if (!animate || !allowsMotion(St.Settings.get(), St.ReducedMotion)) {
+        if (!animate || !this._state.animationDuration || !allowsMotion(St.Settings.get(), St.ReducedMotion)) {
             this._actor.set_scale(scaleX, scaleY);
             this._actor.opacity = show ? 255 : 0;
             this._overlay.relayoutPopups(this._monitor.index, true);
@@ -2595,8 +2678,10 @@ class Bar {
         }
         this._actor.ease({
             scale_x: scaleX, scale_y: scaleY, opacity: show ? 255 : 0,
-            duration: 220, mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
-            onComplete: () => this._overlay.relayoutPopups(this._monitor.index, true),
+            duration: this._state.animationDuration, mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
+            onComplete: () => {
+                if (!this._destroyed) this._overlay.relayoutPopups(this._monitor.index, true);
+            },
         });
         this._overlay.relayoutPopups(this._monitor.index);
     }
@@ -2771,11 +2856,17 @@ class Bar {
         }
         const probe = new St.Label({
             text: next,
+            visible: false,
             style: `font-size: ${font}px; font-weight: 600;`,
         });
+        // St needs a stage to resolve the theme font and preferred size.
+        Main.uiGroup.add_child(probe);
         probe.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
         const [, natW] = probe.get_preferred_width(-1);
         const [, natH] = probe.get_preferred_height(-1);
+        // Measure and paint with the same Shell font.
+        // A separate hardcoded Sans face can differ from the user's UI font.
+        area._bezelFontDescription = probe.get_theme_node().get_font().copy();
         probe.destroy();
         const limit = Math.max(font * 7, 128);
         const pixels = Math.ceil(natW || next.length * font * 0.62);
@@ -2802,10 +2893,7 @@ class Bar {
                 cr.scale(sw / width, sh / height);
             const layout = PangoCairo.create_layout(cr);
             const font = area._bezelFont || 13;
-            const description = new Pango.FontDescription();
-            description.set_family('Sans');
-            description.set_absolute_size(font * Pango.SCALE);
-            description.set_weight(Pango.Weight.SEMIBOLD);
+            const description = area._bezelFontDescription;
             layout.set_font_description(description);
             layout.set_text(text, -1);
             if (area._bezelLimit) {
@@ -2819,11 +2907,12 @@ class Bar {
             cr.setSourceRGB(rgb[0] || 1, rgb[1] || 1, rgb[2] || 1);
             const [, textHeight] = layout.get_pixel_size();
             const glyph = textHeight || font;
-            const offset = Math.max(0, (width - glyph) / 2);
+            const offset = Math.max(0, Math.round((width - glyph) / 2));
             // Start the string at the icon and run downward, so the slot
             // is only as long as the text and there is no gap above it.
             cr.translate(offset + glyph, 0);
             cr.rotate(Math.PI / 2);
+            PangoCairo.update_layout(cr, layout);
             PangoCairo.show_layout(cr, layout);
         } finally {
             cr.$dispose();
@@ -2919,8 +3008,10 @@ class Bar {
             }
             faces.push(face);
         }
-        if (faces.length === 1)
+        if (faces.length === 1) {
+            this._wire(faces[0]);
             return faces[0];
+        }
         const box = new St.BoxLayout({
             orientation: this._content.orientation,
             x_align: Clutter.ActorAlign.CENTER, style: 'spacing: 6px;',
@@ -3001,8 +3092,10 @@ class Bar {
             const seconds = (sharedClock ? sharedClock.showSeconds : item.options?.showSeconds) ?? clockBar?.clockSeconds === true;
             const update = () => { value.text = GLib.DateTime.new_now_local().format(id === 'date' ? DATE_FORMATS[barDateFormat(clockBar, this._overlay._settings)].format : timePattern(twelve, seconds)) || ''; return GLib.SOURCE_CONTINUE; };
             update();
-            const timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, update);
-            this._popupCleanups.push(() => GLib.source_remove(timer));
+            let timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, update);
+            const stop = () => { if (timer) GLib.source_remove(timer); timer = 0; };
+            this._popupCleanups.push(stop);
+            root.connect('destroy', stop);
             return root;
         }
         if (id === 'calendar') return this._monthGrid(features);
@@ -3258,8 +3351,15 @@ class Bar {
             child: row,
             x_align: Clutter.ActorAlign.CENTER,
         });
+        let watchedWindow = null;
+        let titleSignal = 0;
         const paint = () => {
             const win = global.display.focus_window;
+            if (watchedWindow !== win) {
+                if (titleSignal) watchedWindow.disconnect(titleSignal);
+                watchedWindow = win;
+                titleSignal = win?.connect('notify::title', paint) ?? 0;
+            }
             const app = win ? Shell.WindowTracker.get_default().get_window_app(win) : null;
             icon.gicon = app?.get_app_info()?.get_icon() ?? null;
             const text = win?.get_title() ?? '';
@@ -3272,6 +3372,11 @@ class Bar {
         };
         paint();
         this._signals.push([global.display, global.display.connect('notify::focus-window', paint)]);
+        button.connect('destroy', () => {
+            if (titleSignal) watchedWindow.disconnect(titleSignal);
+            titleSignal = 0;
+            watchedWindow = null;
+        });
         button._activate = () => global.display.focus_window?.activate(global.get_current_time());
         button.connect('button-press-event', (_actor, event) => {
             if (event.get_button() !== 3)
@@ -3306,18 +3411,33 @@ class Bar {
         const refresh = () => {
             if (this._popoutId?.startsWith('app:'))
                 this._close();
-            box.destroy_all_children();
-            const ids = [...this._state.pinned];
+            const ids = [...new Set(this._state.pinned)];
             if (this._state.runningApps) {
                 for (const app of system.get_running()) {
                     if (app.get_id() && !ids.includes(`app:${app.get_id()}`))
                         ids.push(`app:${app.get_id()}`);
                 }
             }
-            for (const id of ids) {
+            const existing = new Map(box.get_children().map(button => [button._bezelAppId, button]));
+            const wanted = new Set(ids);
+            let changed = false;
+            for (const [id, button] of existing) {
+                if (!wanted.has(id)) { button.destroy(); changed = true; }
+            }
+            for (const [index, id] of ids.entries()) {
+                const retained = existing.get(id);
+                if (retained) {
+                    if (box.get_child_at_index(index) !== retained) {
+                        box.set_child_at_index(retained, index);
+                        changed = true;
+                    }
+                    retained._bezelRefreshAppFeedback?.();
+                    continue;
+                }
                 const button = this._app(id, size);
+                changed = true;
                 this._wire(button);
-                box.add_child(button);
+                box.insert_child_at_index(button, index);
                 button._bezelAppId = id;
                 this._dragItem(button, () => box.get_children(), ordered => {
                     const bars = readState(this._overlay._settings).bars;
@@ -3327,7 +3447,7 @@ class Bar {
                     saveBars(this._overlay._settings, bars);
                 });
             }
-            if (this._box)
+            if (changed && this._box)
                 this._place();
         };
         refresh();
@@ -3364,7 +3484,14 @@ class Bar {
         };
         const tracker = Shell.WindowTracker.get_default();
         const focusSignal = tracker.connect('notify::focus-app', updateFeedback);
-        button.connect('destroy', () => tracker.disconnect(focusSignal));
+        button._bezelRefreshAppFeedback = updateFeedback;
+        button.connect('destroy', () => {
+            tracker.disconnect(focusSignal);
+            if (this._appHoverActor === button) {
+                this._cancel('_appHover');
+                this._appHoverActor = null;
+            }
+        });
         button.connect('notify::hover', updateFeedback);
         button.connect('notify::pressed', () => {
             if (!this._state.appPress || !allowsMotion(St.Settings.get(), St.ReducedMotion)) return;
@@ -3392,9 +3519,14 @@ class Bar {
         });
         button.connect('notify::hover', () => {
             this._cancel('_appHover');
-            if (button.hover && !this._state.editMode && this._hoverFor('apps'))
-                this._later('_appHover', this._state.hoverDelay + 150, () => this._open(id, button, () => this._appMenu(id, app), null, true));
-            else
+            this._appHoverActor = null;
+            if (button.hover && !this._state.editMode && this._hoverFor('apps')) {
+                this._appHoverActor = button;
+                this._later('_appHover', this._state.hoverDelay + 150, () => {
+                    this._appHoverActor = null;
+                    this._open(id, button, () => this._appMenu(id, app), null, true);
+                });
+            } else
                 this._closeSoon();
         });
         return button;
@@ -3469,24 +3601,27 @@ class Bar {
                 column.add_child(actor);
         const names = {clock: '', date: ''};
         const clockSettings = new Gio.Settings({schema_id: 'org.gnome.desktop.interface'});
+        // Configuration changes rebuild the bar; do not parse every saved bar each tick.
+        const bar = readBars(this._overlay._settings)[this._index];
+        let lastAppearance = null;
         const paint = () => {
-            const bar = readBars(this._overlay._settings)[this._index];
+            const timestamp = GLib.DateTime.new_now_local();
             const twelve = barTimeFormat(bar, clockSettings.get_string('clock-format')) === '12h';
             const seconds = bar?.modules.find(item => item.id === (this._moduleInstance || 'clock'))?.showSeconds ?? bar?.clockSeconds === true;
             if (ids.includes('clock')) {
-                const shown = (GLib.DateTime.new_now_local().format(timePattern(twelve, seconds)) ?? '').replace(/^0/, '');
-                const hour = (GLib.DateTime.new_now_local().format(twelve ? '%I' : '%H') ?? '').replace(/^0/, '');
+                const shown = (timestamp.format(timePattern(twelve, seconds)) ?? '').replace(/^0/, '');
+                const hour = (timestamp.format(twelve ? '%I' : '%H') ?? '').replace(/^0/, '');
                 time.text = this._vertical ? hour : shown;
-                minute.text = seconds ? `${now('%M')}:${now('%S')}` : now('%M');
+                minute.text = timestamp.format(seconds ? '%M:%S' : '%M') ?? '';
                 minute.visible = this._vertical;
-                ampm.text = twelve ? now('%p').toLowerCase() : '';
+                ampm.text = twelve ? (timestamp.format('%p') ?? '').toLowerCase() : '';
                 ampm.visible = twelve && this._vertical;
                 names.clock = shown;
             }
             if (ids.includes('date')) {
                 const key = barDateFormat(bar, this._overlay._settings);
                 const spec = DATE_FORMATS[key]?.format ?? DATE_FORMATS.medium.format;
-                const text = (GLib.DateTime.new_now_local().format(spec) ?? '').replace(/\s+/g, ' ').trim();
+                const text = (timestamp.format(spec) ?? '').replace(/\s+/g, ' ').trim();
                 if (this._vertical) {
                     const parts = text.split(' ');
                     datePrimary.text = parts[0] ?? '';
@@ -3499,7 +3634,11 @@ class Bar {
                 names.date = text;
             }
             button.accessible_name = [names.clock, names.date].filter(Boolean).join(' · ') || 'Clock';
-            if (this._box) this._place();
+            const appearance = `${names.clock}|${names.date}|${twelve}`;
+            if (appearance !== lastAppearance) {
+                lastAppearance = appearance;
+                if (this._box) this._place();
+            }
         };
         paint();
         if (ids.includes('clock'))
@@ -3586,7 +3725,10 @@ class Bar {
                 icons.battery.visible = services.batteryInfo.present || !values.battery;
             }
         }));
-        const layout = sliderLayout(this._state.modules.find(item => item.id === 'volume'), this._overlay._settings);
+        // Only volume controls use the edge OSD. A standalone Wi-Fi or battery
+        // button must keep its own sidebar anchor and a full-width drawer.
+        const layout = wanted.includes('volume')
+            ? sliderLayout(this._state.modules.find(item => item.id === 'volume'), this._overlay._settings) : 'drawer';
         const openId = layout === 'edge' ? 'osd' : 'status';
         const build = () => {
             if (wanted.length === 1 && (wanted[0] !== 'volume' || layout === 'drawer'))
@@ -3703,7 +3845,7 @@ class Bar {
             location = `bottom-${this._state.edge}`;
         const radius = Math.max(12, this._state.radius);
         const frame = this._overlay._frames.get(monitor.index);
-        if (location === 'icon' && frame)
+        if (location === 'icon' && frame && id !== 'status')
             location = this._snapPopupLocation(monitor, frame.sides, anchor) ?? location;
         edge = location === 'icon' ? (edge ?? this._state.edge) : location.split('-')[0];
         if (!['top', 'bottom', 'left', 'right'].includes(edge)) edge = this._state.edge;
@@ -4009,9 +4151,10 @@ class Bar {
         const side = edge === 'left' || edge === 'right';
         const join = side ? Math.max(24, radius + 10) : Math.max(16, radius);
         const maxHeight = this._monitor.height - opening.top - opening.bottom - join * 2;
-        const height = Math.min(Math.max(64, next), maxHeight);
+        const height = Math.round(Math.min(Math.max(64, next), maxHeight));
         // Resize the frame and viewport together. Animating only the outer actor
         // leaves its placement and clip behind the new content allocation.
+        this._popout.remove_transition('height');
         this._popout.height = height;
         this._popupPlate?._bezelSyncPlate?.();
         const scrolling = this._popupScrolls();
@@ -4110,6 +4253,8 @@ class Bar {
         x = clamp(x, monitor.x + opening.left, monitor.x + monitor.width - opening.right - width);
         y = clamp(y, monitor.y + opening.top + join,
             monitor.y + monitor.height - opening.bottom - this._popout.height - join);
+        x = Math.round(x);
+        y = Math.round(y);
         const geometry = {x, y, width, height: this._popout.height, edge,
             corner: ['top-right', 'top-left', 'bottom-right', 'bottom-left'].includes(location) ? location : false};
         if (this._popupGeometry && ['x', 'y', 'width', 'height'].every(key => Math.abs(this._popupGeometry[key] - geometry[key]) < 1))
@@ -4209,6 +4354,7 @@ class Bar {
 
     _animatePopup(target, complete = null) {
         this._popupTimeline?.stop();
+        this._popupTimeline = null;
         this._popupTarget = target;
         const from = this._popupProgress;
         const duration = allowsMotion(St.Settings.get(), St.ReducedMotion)
@@ -4253,6 +4399,7 @@ class Bar {
         this._popupFrame = null;
         this._popupGeometry = null;
         this._cancel('_appHover');
+        this._appHoverActor = null;
         this._cancel('_hoverWatch');
         this._outsideSince = 0;
         this._cancel('_closeTimer');
@@ -4296,6 +4443,7 @@ class Bar {
         this._popupScroll = null;
         this._launcherEntry = null;
         this._launcherWidget = null;
+        this._dashboardWidget = null;
         if (this._state.autohide)
             this._slideLater();
     }
@@ -4310,7 +4458,7 @@ class Bar {
         return monthGrid(this._theme, date => { if (openCalendarDate(date)) this._close(); }, options);
     }
 
-    _mediaCard(artwork = false, artSize = 84, options = moduleFeatures(this, 'media')) {
+    _mediaCard(artwork = false, artSize = 84, options = moduleFeatures(this, 'media'), cleanups = this._popupCleanups) {
         const services = this._overlay.services;
         const box = card(this._theme);
         const art = new St.Icon({icon_name: 'audio-x-generic-symbolic', icon_size: artSize,
@@ -4391,7 +4539,7 @@ class Bar {
                     button.child.icon_size = Math.max(16, Math.round(22 * factor));
             }
         };
-        this._popupCleanups.push(services.subscribe(() => {
+        const unsubscribe = services.subscribe(() => {
             const media = services.media;
             if (artwork) {
                 art.gicon = media?.artUrl?.startsWith('file://') ? new Gio.FileIcon({file: Gio.File.new_for_uri(media.artUrl)}) : new Gio.ThemedIcon({name: 'audio-x-generic-symbolic'});
@@ -4403,7 +4551,9 @@ class Bar {
             buttons.PlayPause.reactive = Boolean(media?.playing ? media.canPause : media?.canPlay);
             buttons.Previous.reactive = Boolean(media?.canPrevious);
             buttons.Next.reactive = Boolean(media?.canNext);
-        }));
+        });
+        cleanups.push(unsubscribe);
+        box.connect('destroy', unsubscribe);
         return box;
     }
 

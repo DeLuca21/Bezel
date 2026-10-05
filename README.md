@@ -95,11 +95,23 @@ rm -rf /tmp/bezel-install
 
 Log out and back in. The first time, enable **Bezel** in Extensions. Wayland loads extension JavaScript at login, so an update needs that logout too. About in Bezel settings can run these commands after showing them for confirmation.
 
+To install changes from this checkout into your local extension, run:
+
+```sh
+python3 scripts/install-local.py
+```
+
+The installer backs up the previous extension under `.backups/`, compiles schemas,
+and verifies that the installed files match the workspace. Saved GNOME settings
+are preserved. On Wayland, log out and back in to load the updated JavaScript.
+
 ---
 
 ## 🔧 Preferences
 
 Bezel settings open in a dedicated custom app, from the dashboard, launcher, Extensions app, or a bar’s right-click menu. Its palette, rounded cards and visual editor match Bezel. It runs as a real window with normal stacking, resizing and Super-dragging.
+
+In **Opening & motion > Session animations**, enable login, lock, and unlock independently. All three share the selected animation style and speed. Lock uses a temporary decorative frame over GNOME’s lock screen; unlock reveals the desktop and bars after the lock screen disappears. The new lock and unlock options default to off and respect reduced motion.
 
 In **Opening & motion**, Off, Fade, or Retreat runs for layout, preset, and palette changes. New installs use Retreat at 500 ms. Transitions respect GNOME’s reduced-motion preference.
 

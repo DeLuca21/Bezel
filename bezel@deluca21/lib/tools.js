@@ -275,35 +275,52 @@ const PROFILES = [
     ['performance', 'Performance', 'power-profile-performance-symbolic'],
 ];
 
+function popupRequest(bar, actor) {
+    const cancellable = new Gio.Cancellable();
+    const cleanups = [];
+    let active = true;
+    const close = () => {
+        if (!active) return;
+        active = false;
+        cancellable.cancel();
+        for (const cleanup of cleanups) cleanup();
+        cleanups.length = 0;
+    };
+    actor.connect('destroy', close);
+    bar._popupCleanups.push(close);
+    return {cancellable, cleanups, get active() { return active; }};
+}
+
 export function performanceMenu(bar) {
     const theme = bar._theme;
     const box = new St.BoxLayout({orientation: 1, style: 'spacing: 8px;'});
-    let disposed = false;
-    const cleanup = [];
-    box.connect('destroy', () => { disposed = true; cleanup.splice(0).forEach(fn => fn()); });
     const status = new St.Label({text: 'Reading power profiles…', style: `color: ${theme.muted}; padding: 8px;`});
     box.add_child(status);
+    const request = popupRequest(bar, box);
     Gio.DBusProxy.new_for_bus(Gio.BusType.SYSTEM, Gio.DBusProxyFlags.NONE, null,
         'org.freedesktop.UPower.PowerProfiles', '/org/freedesktop/UPower/PowerProfiles', 'org.freedesktop.UPower.PowerProfiles',
-        null, (_source, result) => {
+        request.cancellable, (_source, result) => {
             let proxy;
             let iface = 'org.freedesktop.UPower.PowerProfiles';
             try {
                 proxy = Gio.DBusProxy.new_for_bus_finish(result);
+                if (!request.active) return;
                 if (!proxy.get_name_owner())
                     throw new Error('no owner');
             } catch {
+                if (!request.active) return;
                 Gio.DBusProxy.new_for_bus(Gio.BusType.SYSTEM, Gio.DBusProxyFlags.NONE, null,
                     'net.hadess.PowerProfiles', '/net/hadess/PowerProfiles', 'net.hadess.PowerProfiles',
-                    null, (_source2, result2) => {
+                    request.cancellable, (_source2, result2) => {
                         try {
                             proxy = Gio.DBusProxy.new_for_bus_finish(result2);
+                            if (!request.active) return;
                             iface = 'net.hadess.PowerProfiles';
                             if (!proxy.get_name_owner())
                                 throw new Error('no owner');
                             showProfiles(proxy, iface);
                         } catch {
-                            if (!disposed) status.text = 'Power profiles are not available';
+                            if (request.active) status.text = 'Power profiles are not available';
                         }
                     });
                 return;
@@ -311,8 +328,9 @@ export function performanceMenu(bar) {
             showProfiles(proxy, iface);
         });
     const showProfiles = (proxy, iface) => {
-        if (disposed) return;
+        if (!request.active) return;
         const paint = () => {
+            if (!request.active) return;
             box.destroy_all_children();
             const active = proxy.get_cached_property('ActiveProfile')?.unpack() ?? '';
             for (const [id, title, icon] of PROFILES) {
@@ -328,7 +346,7 @@ export function performanceMenu(bar) {
             }
         };
         const changed = proxy.connect('g-properties-changed', paint);
-        cleanup.push(() => proxy.disconnect(changed));
+        request.cleanups.push(() => proxy.disconnect(changed));
         paint();
     };
     return box;
@@ -360,21 +378,26 @@ export function vpnMenu(bar) {
     const box = new St.BoxLayout({orientation: 1, style: 'spacing: 8px;'});
     const status = new St.Label({text: 'Reading VPN connections…', style: `color: ${theme.muted}; padding: 8px;`});
     box.add_child(status);
+    const request = popupRequest(bar, box);
     let subprocess;
+    let finished = false;
     try {
         subprocess = Gio.Subprocess.new(['nmcli', '-t', '-f', 'NAME,TYPE,DEVICE', 'connection', 'show'], Gio.SubprocessFlags.STDOUT_PIPE);
     } catch (error) {
         status.text = 'NetworkManager is not available';
         return box;
     }
-    subprocess.communicate_utf8_async(null, null, (_proc, result) => {
+    request.cleanups.push(() => { if (!finished) subprocess.force_exit(); });
+    subprocess.communicate_utf8_async(null, request.cancellable, (_proc, result) => {
         let text = '';
         try {
             [, text] = subprocess.communicate_utf8_finish(result);
+            finished = true;
         } catch (error) {
-            status.text = 'Could not list VPN connections';
+            if (request.active) status.text = 'Could not list VPN connections';
             return;
         }
+        if (!request.active) return;
         const vpns = text.split('\n').map(splitNmcli).filter(([, type]) => /vpn|wireguard|tun/i.test(type ?? ''));
         box.destroy_all_children();
         if (!vpns.length)

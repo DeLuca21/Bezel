@@ -16,11 +16,14 @@ export class AppIconGeometry {
         if (!app) return () => {};
         const entry = {button, app, bar};
         this.entries.add(entry);
-        button.connect('destroy', () => {
+        entry.destroySignal = button.connect('destroy', () => {
             this.entries.delete(entry);
             if (this.preferred.get(app) === entry) this.preferred.delete(app);
         });
-        return () => { this.preferred.set(app, entry); this.sync(true); };
+        return () => {
+            if (!this.entries.has(entry)) return;
+            this.preferred.set(app, entry); this.sync(true);
+        };
     }
 
     rect(entry) {
@@ -38,15 +41,22 @@ export class AppIconGeometry {
         }
         width = Math.max(1, Math.min(width, right - left)); height = Math.max(1, Math.min(height, bottom - top));
         x = Math.max(left, Math.min(x, right - width)); y = Math.max(top, Math.min(y, bottom - height));
-        return new Mtk.Rectangle({x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height)});
+        // Most stage paints leave this unchanged. Allocate the native boxed
+        // rectangle only when a window actually needs a new target.
+        return {x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height)};
     }
 
     sync(force = false) {
+        if (!this.entries.size && !this.windows.size) return;
         const candidates = new Map();
+        const appWindows = new Map();
         for (const entry of this.entries) {
+            if (!appWindows.has(entry.app)) appWindows.set(entry.app, entry.app.get_windows());
+            const windows = appWindows.get(entry.app);
+            if (!windows.length) continue;
             const rect = this.rect(entry);
             if (!rect) continue;
-            for (const win of entry.app.get_windows()) {
+            for (const win of windows) {
                 const score = (this.preferred.get(entry.app) === entry ? 4 : 0) + (win.get_monitor() === entry.bar._monitor.index ? 2 : 0);
                 if (!candidates.has(win) || score > candidates.get(win).score) candidates.set(win, {entry, rect, score});
             }
@@ -59,7 +69,7 @@ export class AppIconGeometry {
                 record = {previous: has ? previous : null, written: null, signal: win.connect('unmanaged', () => this.windows.delete(win))};
                 this.windows.set(win, record);
             }
-            if (force || !sameRect(record.written, rect)) { win.set_icon_geometry(rect); record.written = rect; }
+            if (force || !sameRect(record.written, rect)) { win.set_icon_geometry(new Mtk.Rectangle(rect)); record.written = rect; }
         }
     }
 
@@ -72,7 +82,9 @@ export class AppIconGeometry {
     }
 
     destroy() {
-        global.stage.disconnect(this.paint);
+        if (this.paint) global.stage.disconnect(this.paint);
+        this.paint = 0;
+        for (const entry of this.entries) entry.button.disconnect(entry.destroySignal);
         for (const [win, record] of this.windows) this.release(win, record);
         this.entries.clear(); this.preferred.clear();
     }

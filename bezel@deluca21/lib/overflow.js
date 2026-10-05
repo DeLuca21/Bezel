@@ -1,5 +1,7 @@
 import Clutter from 'gi://Clutter';
+import GObject from 'gi://GObject';
 import St from 'gi://St';
+import {hexToRgba} from './theme.js';
 
 // St's overlay scrollbars paint under opaque children and show on 1px overflow.
 // Hide them and put a fade + thumb on top so you can still tell the list moves.
@@ -14,15 +16,19 @@ export function decorateScroll(scroll, theme, showThumb = true) {
         x_expand: true,
         y_expand: true,
     });
+    // Keep the RGB channels constant so the fade cannot create a black band.
+    const transparent = hexToRgba(theme.bg, 0);
+    // BinLayout uses actor alignment only on axes where the child expands.
+    // Expand the allocation, then align the fixed-size decorations to its edges.
     const fade = (end) => new St.Widget({
-        reactive: false, x_expand: true, height: 28,
+        reactive: false, x_expand: true, y_expand: true, height: 28,
         y_align: end ? Clutter.ActorAlign.END : Clutter.ActorAlign.START,
-        style: `background-gradient-direction: vertical; background-gradient-start: ${end ? 'rgba(0,0,0,0)' : theme.bg}; background-gradient-end: ${end ? theme.bg : 'rgba(0,0,0,0)'};`,
+        style: `background-gradient-direction: vertical; background-gradient-start: ${end ? transparent : theme.bg}; background-gradient-end: ${end ? theme.bg : transparent};`,
     });
     const fadeTop = fade(false);
     const fadeBottom = fade(true);
     const thumb = new St.Widget({
-        reactive: false, width: 3, height: 36,
+        reactive: false, x_expand: true, y_expand: true, width: 3, height: 36,
         x_align: Clutter.ActorAlign.END, y_align: Clutter.ActorAlign.START,
         style: `background-color: ${theme.muted}; border-radius: 99px; margin-right: 5px;`,
     });
@@ -32,15 +38,20 @@ export function decorateScroll(scroll, theme, showThumb = true) {
     });
     overlay.add_child(fadeTop);
     overlay.add_child(fadeBottom);
-    if (showThumb)
-        overlay.add_child(thumb);
+    thumb.visible = showThumb;
+    overlay.add_child(thumb);
     overlay.visible = false;
-    overlay.opacity = 0;
     stack.add_child(scroll);
     stack.add_child(overlay);
     const adj = scroll.vadjustment;
     let dead = false;
-    scroll.connect('destroy', () => { dead = true; });
+    // ScrollView can dispose its adjustment before emitting destroy. A native
+    // signal group handles either destruction order without touching that object.
+    const signals = GObject.SignalGroup.new(St.Adjustment);
+    scroll.connect('destroy', () => {
+        dead = true;
+        signals.set_target(null);
+    });
     const sync = () => {
         if (dead)
             return;
@@ -62,7 +73,8 @@ export function decorateScroll(scroll, theme, showThumb = true) {
             thumb.translation_y = shift;
     };
     for (const signal of ['notify::value', 'notify::upper', 'notify::page-size'])
-        adj.connect(signal, sync);
+        signals.connect_data(signal, sync, 0);
+    signals.set_target(adj);
     scroll.connect('notify::allocation', sync);
     overlay.connect('notify::allocation', sync);
     sync();

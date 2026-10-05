@@ -14,8 +14,9 @@ import Soup from 'gi://Soup?version=3.0';
 import {readBars, saveBars, barGroups, groupAppearance, barAppearancePreset, isSpacer, spacerLabel, applyPreset, presetBars, EDGES, DATE_FORMATS, barDateFormat, barTimeFormat, settingChoice, settingFlag, MODULE_SWITCHES, switchOn, hoverEnabled, sliderLayout, powerLayout, powerDim, PANEL_MODULES, hexColor} from './config.js';
 import {PRESETS, resolveTheme} from './theme.js';
 import {layoutPreview} from './layoutPreview.js';
-import {savedLayouts, saveLayout, restoreLayout, deleteLayout, matchingLayout, layoutIsClean, captureCleanLayout, rememberLayout, noteRevertedLayout} from './profiles.js';
+import {savedLayouts, saveLayout, restoreLayout, deleteLayout, matchingLayout, nextLayoutName, layoutIsClean, captureCleanLayout, rememberLayout, noteRevertedLayout} from './profiles.js';
 import {LOGOS} from './logos.js';
+import {LOGIN_THEMES} from './loginMotion.js';
 import {MODULES, addBar, removeBar, addModule, removeModule, patchBar, setFloating, setKind,
     createGroup, deleteGroup, assignGroup, resizeSpacer, reorderModule, moveModule, undoPreset, setCustomColor, patchModule, patchGroup,
     shortcutLabel, acceleratorFromEvent, assignShortcut, useRecommendedShortcuts,
@@ -121,7 +122,7 @@ export class SettingsWindow {
         Gtk.StyleContext.add_provider_for_display(this.window.get_display(), this.css, Gtk.STYLE_PROVIDER_PRIORITY_USER + 1);
         this._build();
         this.changed = settings.connect('changed', (_settings, key) => {
-            if (this.writing) return;
+            if (this.writing || key === 'preview-login-animation') return;
             if (key === 'group-preview' || key === 'layout-baseline') return;
             if (key === 'preferences-group') { this.groupId = settings.get_string(key) || null; this.mode = 'bar'; }
             if (key === 'preferences-bar') {
@@ -131,6 +132,8 @@ export class SettingsWindow {
             this._queueRefresh();
         });
         this.window.connect('close-request', () => {
+            this._closed = true;
+            this._cancelScrollHold();
             this._closeItemPopover();
             settings.disconnect(this.changed);
             settings.set_int('preferences-bar', -1);
@@ -350,6 +353,8 @@ export class SettingsWindow {
             .bezel-settings .group-title { color: ${theme.accent}; font-size: 12px; font-weight: 700; }
             .bezel-settings .segment { background: ${theme.bg}; padding: 4px; border-radius: 16px; }
             .bezel-settings .segment button { padding: 7px 10px; }
+            .bezel-settings .login-settings { background: alpha(${theme.bg}, 0.5); margin: 4px 0 8px; }
+            .bezel-settings .login-settings switch:checked { background: ${theme.accent}; }
             .bezel-settings entry, .bezel-settings spinbutton, .bezel-settings dropdown > button { background: ${theme.bg}; color: ${theme.fg}; border-radius: 12px; border: none; box-shadow: none; }
             .bezel-settings entry { padding: 7px 10px; }
             .bezel-settings spinbutton button { padding: 5px 9px; }
@@ -407,25 +412,29 @@ export class SettingsWindow {
         this._holdScroll(position, false);
     }
 
+    _cancelScrollHold() {
+        if (this._scrollIdle) GLib.source_remove(this._scrollIdle);
+        this._scrollIdle = 0;
+        if (this._scrollWatch) this.editorScroll.vadjustment.disconnect(this._scrollWatch);
+        this._scrollWatch = 0;
+    }
+
     _holdScroll(position, revealEnd) {
+        this._cancelScrollHold();
+        if (this._closed) return;
         const adjustment = this.editorScroll.vadjustment;
-        if (this._scrollWatch) {
-            adjustment.disconnect(this._scrollWatch);
-            this._scrollWatch = 0;
-        }
         const apply = () => {
             const max = Math.max(0, adjustment.upper - adjustment.page_size);
             adjustment.value = revealEnd ? max : Math.min(position, max);
         };
         this._scrollWatch = adjustment.connect('notify::upper', apply);
-        GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+        this._scrollIdle = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            this._scrollIdle = 0;
             apply();
-            GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            this._scrollIdle = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                this._scrollIdle = 0;
                 apply();
-                if (this._scrollWatch) {
-                    adjustment.disconnect(this._scrollWatch);
-                    this._scrollWatch = 0;
-                }
+                this._cancelScrollHold();
                 return GLib.SOURCE_REMOVE;
             });
             return GLib.SOURCE_REMOVE;
@@ -1524,10 +1533,70 @@ export class SettingsWindow {
 
     _openingCard() {
         this._heading('Opening & motion', 'Choose what the screen edges open, and how motion feels.');
+        const login = vertical(12);
+        login.add_css_class('login-settings');
+        login.add_css_class('inset');
+        login.append(label('Session animations', 'subheading'));
+        const triggers = [
+            ['login-animation', 'Animate login'],
+            ['lock-animation', 'Animate lock'],
+            ['unlock-animation', 'Animate unlock'],
+        ];
+        const options = vertical(10, {visible: triggers.some(([key]) => this.settings.get_boolean(key))});
+        for (const [key, title] of triggers) {
+            const row = horizontal(12);
+            row.append(label(title, '', {hexpand: true}));
+            const enabled = new Gtk.Switch({active: this.settings.get_boolean(key),
+                valign: Gtk.Align.CENTER, tooltip_text: title});
+            enabled.connect('notify::active', () => this._write(() => {
+                this.settings.set_boolean(key, enabled.active);
+                options.visible = triggers.some(([trigger]) => this.settings.get_boolean(trigger));
+            }, false));
+            row.append(enabled);
+            login.append(row);
+        }
+        options.append(label('Style and speed apply to login, lock and unlock.', '', {wrap: true, xalign: 0}));
+        options.append(label('Animation style'));
+        const style = new Gtk.DropDown({model: Gtk.StringList.new(LOGIN_THEMES.map(([, name]) => name)),
+            selected: Math.max(0, LOGIN_THEMES.findIndex(([id]) => id === this.settings.get_string('login-animation-theme'))),
+            tooltip_text: 'Session animation style'});
+        const description = label(LOGIN_THEMES[style.selected][2], '', {wrap: true, xalign: 0});
+        style.connect('notify::selected', () => this._write(() => {
+            const choice = LOGIN_THEMES[style.selected];
+            if (!choice) return;
+            this.settings.set_string('login-animation-theme', choice[0]);
+            description.label = choice[2];
+        }, false));
+        options.append(style);
+        options.append(description);
+        const speedRow = horizontal(12);
+        speedRow.append(label('Speed'));
+        const speed = new Gtk.Scale({orientation: Gtk.Orientation.HORIZONTAL, hexpand: true,
+            draw_value: false, digits: 0, tooltip_text: 'Session animation speed',
+            adjustment: new Gtk.Adjustment({lower: 25, upper: 200,
+                value: this.settings.get_int('login-animation-speed'), step_increment: 5, page_increment: 25})});
+        speed.add_mark(100, Gtk.PositionType.BOTTOM, null);
+        const speedValue = label(`${(speed.get_value() / 100).toFixed(2)}×`, '', {width_chars: 5, xalign: 1});
+        speed.connect('value-changed', () => this._write(() => {
+            const value = Math.round(speed.get_value());
+            speedValue.label = `${(value / 100).toFixed(2)}×`;
+            this.settings.set_int('login-animation-speed', value);
+        }, false));
+        speedRow.append(speed);
+        speedRow.append(speedValue);
+        options.append(speedRow);
+        login.append(options);
+        login.append(button('Preview animation', () => {
+            const key = 'preview-login-animation';
+            this.settings.set_int(key, (this.settings.get_int(key) + 1) % 2147483647);
+        }));
+        this.card.append(login);
+        this.card.append(new Gtk.Separator({orientation: Gtk.Orientation.HORIZONTAL}));
+        this.card.append(label('Hover & drawers', 'subheading'));
         for (const [key, title] of [['edge-panels', 'Top edge opens dashboard'], ['power-hover', 'Bottom edge opens power']])
             this.card.append(this._toggle(title, this.settings.get_boolean(key), value => this.settings.set_boolean(key, value)));
         this.card.append(this._step('Hover delay (ms)', this.settings.get_int('hover-delay'), 100, 1000, 50, value => this.settings.set_int('hover-delay', value)));
-        this.card.append(this._step('Animation (ms)', this.settings.get_int('animation-duration'), 0, 800, 20, value => this.settings.set_int('animation-duration', value)));
+        this.card.append(this._step('Drawer & autohide duration (ms)', this.settings.get_int('animation-duration'), 0, 800, 20, value => this.settings.set_int('animation-duration', value)));
         const motion = this.settings.get_string('layout-transition');
         this.card.append(this._segments([['none', 'Off'], ['fade', 'Fade'], ['retreat', 'Retreat']], ['none', 'fade', 'retreat'].includes(motion) ? motion : 'fade', value => this.settings.set_string('layout-transition', value)));
         this.card.append(this._step('Layout transition (ms)', this.settings.get_int('layout-transition-duration'), 0, 1600, 40, value => this.settings.set_int('layout-transition-duration', value)));
@@ -1828,8 +1897,7 @@ export class SettingsWindow {
         this._captureCleanLayout();
         if (layoutIsClean(this.settings)) { action(); return; }
         const dialog = new Adw.AlertDialog({heading: 'Keep your layout changes?', body: 'Save your current layout before switching, or discard the unsaved changes.'});
-        let n = 1; while (savedLayouts(this.settings).some(profile => profile.name === `Layout ${n}`)) n++;
-        const entry = new Gtk.Entry({text: `Layout ${n}`, max_length: 80}); dialog.extra_child = entry;
+        const entry = new Gtk.Entry({text: nextLayoutName(this.settings), max_length: 80}); dialog.extra_child = entry;
         dialog.add_response('cancel', 'Cancel'); dialog.add_response('discard', 'Discard changes'); dialog.add_response('save', 'Save and switch');
         dialog.close_response = 'cancel'; dialog.default_response = 'save';
         dialog.set_response_appearance('discard', Adw.ResponseAppearance.DESTRUCTIVE); dialog.set_response_appearance('save', Adw.ResponseAppearance.SUGGESTED);

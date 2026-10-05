@@ -145,10 +145,16 @@ function edgeLevel(bar, icon, getValue, setValue, iconName, thickness = 8, showI
         mute.connect('clicked', onIcon);
         column.add_child(mute);
     }
+    let lastRatio;
     const unsubscribe = bar._overlay.services.subscribe(() => {
         glyph.icon_name = iconName();
         reading.text = valueText();
-        track.queue_repaint();
+        const ratio = clamp(getValue(), 0, 1);
+        // Media, clipboard and other service updates do not change this meter.
+        if (ratio !== lastRatio) {
+            lastRatio = ratio;
+            track.queue_repaint();
+        }
     });
     column.connect('destroy', unsubscribe);
     return column;
