@@ -47,13 +47,15 @@ export class LayoutTransition {
                 actor.opacity = item.opacity;
                 actor.translation_x = item.tx;
                 actor.translation_y = item.ty;
-                actor.remove_clip();
+                if (item.clip) actor.set_clip(...item.clip);
+                else actor.remove_clip();
                 actor.clip_to_allocation = item.clipToAllocation ?? false;
                 actor.show();
                 if (item.kind === 'frame') {
                     item.frame.setSpread(1);
                     item.frame.setFade(1);
                 }
+                if (item.resumeReveal) item.bar._slide(item.bar._shown, true);
             } catch {
                 /* Actor already left the stage. */
             }
@@ -61,15 +63,17 @@ export class LayoutTransition {
     }
 
     _capture() {
+        // GJS exposes Clutter's has-clip as a boolean property, not a method.
         const items = [];
         for (const bar of this.overlay._bars) {
             const actor = bar._actor;
             if (!actor?.visible || !actor.get_stage?.() || global.display.get_monitor_in_fullscreen(bar._monitor.index))
                 continue;
+            const resumeReveal = Boolean(bar._revealTimeline);
             bar._revealTimeline?.stop();
             bar._revealTimeline = null;
             items.push({
-                kind: 'bar', actor, edge: bar._state.edge, box: barBox(bar),
+                kind: 'bar', actor, bar, resumeReveal, clip: actor.has_clip ? actor.get_clip() : null, edge: bar._state.edge, box: barBox(bar),
                 monitor: bar._monitor,
                 opacity: actor.opacity, clipToAllocation: actor.clip_to_allocation,
                 tx: actor.translation_x, ty: actor.translation_y,
@@ -80,7 +84,7 @@ export class LayoutTransition {
             if (!actor?.visible || global.display.get_monitor_in_fullscreen(index))
                 continue;
             items.push({
-                kind: 'frame', actor, frame, monitor: frame.monitor,
+                kind: 'frame', actor, frame, clip: actor.has_clip ? actor.get_clip() : null, monitor: frame.monitor,
                 opacity: actor.opacity, clipToAllocation: actor.clip_to_allocation,
                 tx: actor.translation_x, ty: actor.translation_y,
             });
@@ -122,13 +126,10 @@ export class LayoutTransition {
             clone.set_pivot_point(pivotX, pivotY);
             // Newly rebuilt bars can settle their indicator/content size on
             // the next allocation. Keep the visual copy aligned as they do.
-            const allocationId = actor.connect('notify::allocation', () => {
+            actor.connectObject('notify::allocation', () => {
                 clone.set_position(actor.x - monitor.x, actor.y - monitor.y);
                 clone.set_size(actor.width, actor.height);
-            });
-            clone.connect('destroy', () => {
-                if (clone.get_source()) actor.disconnect(allocationId);
-            });
+            }, clone);
             group.add_child(clone);
             Main.uiGroup.set_child_above_sibling(group, actor);
             actor.hide();

@@ -9,6 +9,11 @@ export class DesktopFrame {
         this.notification = null;
         this.sides = sides;
         this.baseSides = {...sides};
+        this.regionSides = {...sides};
+        for (const bar of state.bars ?? []) {
+            if (bar.autohide && bar.kind !== 'dock' && !bar.margin && (bar.length ?? 100) === 100)
+                this.regionSides[bar.edge] = Math.max(this.regionSides[bar.edge], bar.thickness);
+        }
         this.reveals = new Map();
         this.padding = state.radius + state.shadow + 2;
         this.state = state;
@@ -29,10 +34,14 @@ export class DesktopFrame {
         // Both holes belong on the same opening; dropping one leaves a
         // transparent banner sitting on the wallpaper.
         const {popup, notification} = this;
-        const regions = frameRegions(width, height, this.sides, this.padding, popup, notification);
+        const regions = frameRegions(width, height, this.regionSides, this.padding, popup, notification);
+        const cramped = width - this.sides.left - this.sides.right < this.state.radius * 2
+            || height - this.sides.top - this.sides.bottom < this.state.radius * 2
+            || width <= this.regionSides.left + this.regionSides.right + this.padding * 2
+            || height <= this.regionSides.top + this.regionSides.bottom + this.padding * 2;
         const retained = new Map();
         this.lastDirty = [];
-        for (const {rect, dynamic} of regions) {
+        for (const {rect, dynamic, edges} of regions) {
             const key = JSON.stringify(rect);
             let area = this.surfaces.get(key);
             if (!area) {
@@ -57,7 +66,8 @@ export class DesktopFrame {
                 });
             }
             area.opacity = Math.round((this.fade ?? 1) * 255);
-            const content = JSON.stringify([this.sides, this.spread, dynamic ? popup : null, dynamic ? notification : null]);
+            const content = JSON.stringify([dynamic || cramped ? this.sides : edges.map(edge => this.sides[edge]),
+                this.spread, dynamic ? popup : null, dynamic ? notification : null, cramped]);
             if (area._frameContent !== content) {
                 area._frameContent = content;
                 area.queue_repaint();
@@ -97,6 +107,7 @@ export class DesktopFrame {
         const previous = this.reveals.get(id);
         if (previous && previous.edge === edge && previous.thickness === thickness && previous.progress === progress)
             return;
+        this.regionSides[edge] = Math.max(this.regionSides[edge], thickness);
         this.reveals.set(id, {edge, thickness, progress});
         Object.assign(this.sides, this.baseSides);
         for (const item of this.reveals.values()) {

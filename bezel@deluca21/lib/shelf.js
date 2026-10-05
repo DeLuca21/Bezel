@@ -4,6 +4,7 @@ import {FILE_LIST_GAP, FILE_LIST_ICON, FILE_TILE_GAP, FILE_TILE_ICON, FILE_TILE_
 import {loadFileView, loadShelfFiles, mergeShelfFiles, parseFileUris, saveFileView, saveShelfFiles, shelfStoragePath} from './shelfStore.js';
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
+import GObject from 'gi://GObject';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Pango from 'gi://Pango';
@@ -43,7 +44,7 @@ function readDndUris(cancel, done) {
 const HELPER_TITLE = 'Bezel shelf input';
 const helper = {
     proc: null, window: null, actor: null, created: 0, mapped: 0,
-    animate: null, writing: false, queued: null, onMessage: null, target: null, aux: null,
+    cancel: null, animate: null, writing: false, queued: null, onMessage: null, target: null, aux: null,
 };
 
 const ownsHelper = win => helper.proc && win && win.get_pid() === Number(helper.proc.get_identifier());
@@ -104,9 +105,11 @@ function writeHelper(state) {
     helper.queued = JSON.stringify(state) + '\n';
     const write = () => {
         if (helper.writing || !helper.queued || !helper.proc) return;
+        const proc = helper.proc;
         const data = helper.queued; helper.queued = null; helper.writing = true;
-        helper.proc.get_stdin_pipe().write_all_async(new TextEncoder().encode(data), GLib.PRIORITY_DEFAULT, null, (stream, result) => {
+        proc.get_stdin_pipe().write_all_async(new TextEncoder().encode(data), GLib.PRIORITY_DEFAULT, helper.cancel, (stream, result) => {
             try { stream.write_all_finish(result); } catch {}
+            if (helper.proc !== proc) return;
             helper.writing = false; write();
         });
     };
@@ -125,7 +128,9 @@ function bindHelperWindow() {
     helper.window = actor.meta_window;
     helper.actor = actor;
     try { helper.window.hide_from_window_list(); } catch {}
-    helper.window.connect('unmanaged', () => {
+    const window = helper.window;
+    window.connect('unmanaged', () => {
+        if (helper.window !== window) return;
         helper.aux?.delete(helper.actor);
         helper.window = null;
         helper.actor = null;
@@ -147,22 +152,28 @@ export function retainShelfHelper(action = 'copy') {
         const launcher = new Gio.SubprocessLauncher({flags: Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE});
         launcher.setenv('GDK_BACKEND', GLib.getenv('WAYLAND_DISPLAY') ? 'wayland' : 'x11', true);
         helper.proc = launcher.spawnv(['gjs', '-m', dragScript(), JSON.stringify({title: HELPER_TITLE, action})]);
-        helper.proc.wait_async(null, (proc, result) => {
+        const proc = helper.proc;
+        helper.cancel = new Gio.Cancellable();
+        proc.wait_async(null, (proc, result) => {
             try { proc.wait_finish(result); } catch {}
             if (helper.proc === proc) {
-                helper.proc = null; helper.window = null; helper.actor = null;
+                helper.proc = null;
+                stopShelfHelper();
             }
         });
         const output = new Gio.DataInputStream({base_stream: helper.proc.get_stdout_pipe()});
-        const read = () => output.read_line_async(GLib.PRIORITY_DEFAULT, null, (stream, result) => {
+        const read = () => output.read_line_async(GLib.PRIORITY_DEFAULT, helper.cancel, (stream, result) => {
             let line;
             try { [line] = stream.read_line_finish_utf8(result); } catch { return; }
-            if (line === null) return;
+            if (line === null || helper.proc !== proc) return;
             try { helper.onMessage?.(JSON.parse(line)); } catch (error) { console.error(`Bezel shelf input: ${error}`); }
-            read();
+            if (helper.proc === proc) read();
         });
         read();
-    } catch (error) { console.error(`Bezel shelf input: ${error}`); }
+    } catch (error) {
+        stopShelfHelper();
+        console.error(`Bezel shelf input: ${error}`);
+    }
 }
 
 export function parkShelfHelper() {
@@ -183,7 +194,12 @@ export function stopShelfHelper() {
     if (typeof helper.animate === 'function') Main.wm._shouldAnimate = helper.animate;
     helper.animate = null;
     if (helper.proc) { try { helper.proc.force_exit(); } catch {} helper.proc = null; }
+    helper.cancel?.cancel();
+    helper.cancel = null;
+    helper.aux?.delete(helper.actor);
+    helper.aux = null;
     helper.window = null; helper.actor = null; helper.onMessage = null;
+    helper.writing = false; helper.queued = null; helper.target = null;
 }
 
 export function shelfView(bar, options = {}) {
@@ -227,7 +243,7 @@ export function shelfView(bar, options = {}) {
     const cancel = new Gio.Cancellable(), selected = new Set();
     let generation = 0, disposed = false, items = [], tiles = [], last = -1, menu = null, draggingOut = false;
     let lastCols = 0, lastLayout = '', refreshing = false, relayout = 0, empty = null, emptyHost = null;
-    let overDrop = false, liveDrop = false, covered = false, nativeSync = 0, nativeState = '', scrollSignal = 0;
+    let overDrop = false, liveDrop = false, covered = false, nativeSync = 0, nativeState = '', scrollSignals = null;
     const onMenu = actor => Boolean(menu && actor && (menu.actor === actor || menu.actor.contains(actor) || menu.box.contains(actor)));
     const closeMenu = () => { if (!menu) return; const closing = menu; menu = null; closing.close(); if (!disposed) area.grab_key_focus(); };
     let rubber = null, rubberTick = 0, rubberStage = 0;
@@ -470,7 +486,11 @@ export function shelfView(bar, options = {}) {
             }
         };
         const adj = bar._popupScroll?.vadjustment;
-        if (adj && !scrollSignal) scrollSignal = adj.connect('notify::value', () => syncNative());
+        if (adj && !scrollSignals) {
+            scrollSignals = GObject.SignalGroup.new(St.Adjustment);
+            scrollSignals.connect_data('notify::value', () => syncNative(), 0);
+            scrollSignals.set_target(adj);
+        }
         if (!nativeSync) nativeSync = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => { syncNative(); return GLib.SOURCE_CONTINUE; });
         syncNative();
     };
@@ -708,7 +728,8 @@ export function shelfView(bar, options = {}) {
         disposed = true; endRubber(); closeMenu(); generation++; cancel.cancel();
         if (relayout) GLib.source_remove(relayout);
         if (nativeSync) GLib.source_remove(nativeSync);
-        if (scrollSignal && bar._popupScroll?.vadjustment) bar._popupScroll.vadjustment.disconnect(scrollSignal);
+        scrollSignals?.set_target(null);
+        scrollSignals = null;
         if (helper.actor) bar._popupAuxActors?.delete(helper.actor);
         parkShelfHelper();
         tracker.disconnect(move); tracker.disconnect(leave);

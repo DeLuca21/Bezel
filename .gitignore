@@ -3,3 +3,5 @@ bezel@deluca21/schemas/gschemas.compiled
 OLD_VERSION/
 tests/
 docs/
+/scripts/install-local.py
+/AGENTS.md

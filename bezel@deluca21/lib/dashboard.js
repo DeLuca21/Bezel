@@ -43,9 +43,9 @@ export function buildDashboard(bar) {
     layout._pages = pages;
     const order = () => pages.map(page => page.id);
     let current = null;
-    let pendingCleanups = [];
     const reader = metricsReader();
     const disposeView = view => {
+        if (!view || view._dashDisposed) return;
         view?._dashCleanup?.();
         view?.remove_all_transitions();
         view?.destroy();
@@ -99,7 +99,7 @@ export function buildDashboard(bar) {
         bar._popupLockedHeight = false;
         bar._fitPopup();
     };
-    const fill = (id, host) => {
+    const fill = (id, host, updates, cleanups) => {
         host._dashPage = true;
         const rows = layout[id] ?? [];
         const cards = new Map();
@@ -269,7 +269,7 @@ export function buildDashboard(bar) {
             syncEdit();
             show(id, true);
         };
-        pendingCleanups.push(() => {
+        cleanups.push(() => {
             editor.cancel?.();
             closePicker();
             if (editor.later)
@@ -280,7 +280,7 @@ export function buildDashboard(bar) {
             for (const item of rowItems) {
                 if (!item.id || cards.has(item.id))
                     continue;
-                const widget = widgetFor(bar, item.id, theme, reader, pendingCleanups, toggleEdit, editing, {
+                const widget = widgetFor(bar, item.id, theme, updates, cleanups, toggleEdit, editing, {
                     slots: pageColumns(rows),
                 });
                 if (!widget)
@@ -354,20 +354,24 @@ export function buildDashboard(bar) {
             bar._persistPopup();
         for (const [key, button] of buttons)
             button.style = `padding: 10px 12px; border-radius: 12px; color: ${key === id ? theme.accent : theme.muted}; ${key === id ? `background-color: ${theme.surface};` : ''}`;
-        pendingCleanups = [];
+        for (const page of stage.get_children()) page._dashUpdates?.stop();
         const view = column();
-        fill(id, view);
-        const cleanups = pendingCleanups;
-        pendingCleanups = [];
+        const cleanups = [];
+        const updates = pageUpdates(bar, reader);
+        view._dashUpdates = updates;
+        fill(id, view, updates, cleanups);
         let disposed = false;
         view._dashCleanup = () => {
             if (disposed)
                 return;
             disposed = true;
+            view._dashDisposed = true;
+            updates.stop();
             for (const cleanup of cleanups)
                 cleanup();
         };
         view.connect('destroy', view._dashCleanup);
+        updates.start();
         while (stage.get_n_children() > 1)
             disposeView(stage.get_first_child());
         const previous = stage.get_first_child();
@@ -388,7 +392,10 @@ export function buildDashboard(bar) {
         sizePage(view, id);
         previous.ease({
             translation_x: -dir * width, duration: 240, mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
-            onComplete: () => { disposeView(previous); sizePage(view, id); },
+            onComplete: () => {
+                disposeView(previous);
+                if (!view._dashDisposed && current === id) sizePage(view, id);
+            },
         });
         view.ease({
             translation_x: 0, duration: 240, mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
@@ -433,15 +440,30 @@ export function buildDashboard(bar) {
     return root;
 }
 
-function widgetFor(bar, id, theme, reader, pendingCleanups, toggleEdit, editing, page = {}) {
-    const repeat = (callback, interval) => {
-        callback();
-        const timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, interval, () => {
-            callback();
-            return GLib.SOURCE_CONTINUE;
-        });
-        pendingCleanups.push(() => GLib.source_remove(timer));
+// One timer per visible page, with a single /proc sample for all due meters.
+function pageUpdates(bar, reader) {
+    const jobs = [];
+    let stopped = false;
+    const tick = () => {
+        if (stopped || !jobs.length) return;
+        const now = GLib.get_monotonic_time() / 1000;
+        let stats;
+        for (const job of jobs) {
+            if (job.next > now) continue;
+            job.update(job.metrics ? (stats ??= reader()) : undefined);
+            job.next = now + job.interval;
+        }
+        const delay = Math.max(1, Math.ceil(Math.min(...jobs.map(job => job.next)) - now));
+        bar._later('_dashboardTimer', delay, tick);
     };
+    return {
+        add(interval, update, metrics = false) { jobs.push({interval, update, metrics, next: 0}); },
+        start: tick,
+        stop() { if (!stopped) { stopped = true; bar._cancel('_dashboardTimer'); } },
+    };
+}
+
+function widgetFor(bar, id, theme, updates, cleanups, toggleEdit, editing, page = {}) {
     if (id === 'identity') {
         const identity = card(theme);
         const avatar = profileAvatar(theme, 64);
@@ -481,7 +503,7 @@ function widgetFor(bar, id, theme, reader, pendingCleanups, toggleEdit, editing,
             identity._dashFactor = height ? clamp(height / 210, 0.55, 1.9) : 1;
             update();
         };
-        repeat(update, 1000);
+        updates.add(settingFlag(bar._overlay._settings, 'dashboard-clock-seconds') ? 1000 : 10000, update);
         return identity;
     }
     if (id === 'calendar') {
@@ -495,10 +517,7 @@ function widgetFor(bar, id, theme, reader, pendingCleanups, toggleEdit, editing,
         return calendar;
     }
     if (id === 'media') {
-        const before = bar._popupCleanups.length;
-        const media = bar._mediaCard(true, 64);
-        pendingCleanups.push(...bar._popupCleanups.splice(before));
-        return media;
+        return bar._mediaCard(true, 64, undefined, cleanups);
     }
     if (id === 'actions') {
         const actions = new St.BoxLayout({
@@ -552,8 +571,7 @@ function widgetFor(bar, id, theme, reader, pendingCleanups, toggleEdit, editing,
         const meterSize = 104;
         const titles = {cpu: 'CPU usage', memory: 'Memory', temp: 'CPU temperature'};
         const meter = ring(theme, titles[id], meterSize);
-        const update = () => {
-            const stats = reader();
+        const update = stats => {
             if (id === 'cpu')
                 meter.update(stats.cpu, stats.cpu === null ? '…' : `${Math.round(stats.cpu * 100)}%`);
             else if (id === 'memory')
@@ -562,7 +580,7 @@ function widgetFor(bar, id, theme, reader, pendingCleanups, toggleEdit, editing,
                 meter.update(stats.temperature === null ? 0 : stats.temperature / 100,
                     stats.temperature === null ? 'N/A' : `${Math.round(stats.temperature)}°C`);
         };
-        repeat(update, 1500);
+        updates.add(1500, update, true);
         meter.actor._dashLayout = ({height}) => meter.layout(height);
         return meter.actor;
     }
@@ -571,14 +589,13 @@ function widgetFor(bar, id, theme, reader, pendingCleanups, toggleEdit, editing,
     if (id === 'gpu' || id === 'disk') {
         const titles = {gpu: 'GPU', disk: 'Disk'};
         const meter = ring(theme, titles[id], 104);
-        const update = () => {
-            const stats = reader();
+        const update = stats => {
             if (id === 'gpu')
                 meter.update(stats.gpu, stats.gpu === null ? 'No reading' : `${Math.round(stats.gpu * 100)}%`);
             else
                 meter.update(stats.diskRatio, stats.diskTotal ? `${stats.diskUsed.toFixed(0)} / ${stats.diskTotal.toFixed(0)} GiB` : 'No reading');
         };
-        repeat(update, 1500);
+        updates.add(1500, update, true);
         meter.actor._dashLayout = ({height}) => meter.layout(height);
         return meter.actor;
     }
@@ -589,12 +606,11 @@ function widgetFor(bar, id, theme, reader, pendingCleanups, toggleEdit, editing,
         actor.add_child(down);
         actor.add_child(up);
         actor.add_child(text(theme, 'Network', 13, true));
-        const update = () => {
-            const stats = reader();
+        const update = stats => {
             down.text = stats.netDown === null ? '…' : `↓ ${formatRate(stats.netDown)}`;
             up.text = stats.netUp === null ? '…' : `↑ ${formatRate(stats.netUp)}`;
         };
-        repeat(update, 1500);
+        updates.add(1500, update, true);
         actor._dashLayout = ({height}) => {
             const factor = height ? clamp(height / 110, 0.6, 2.4) : 1;
             down.style = `color: ${theme.fg}; font-size: ${Math.round(18 * factor)}px;`;

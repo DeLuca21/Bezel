@@ -8,6 +8,7 @@
     "50",
     "51"
   ],
+  "session-modes": ["user", "unlock-dialog"],
   "settings-schema": "org.gnome.shell.extensions.bezel",
   "url": "https://github.com/DeLuca21/Bezel",
   "version": 1,

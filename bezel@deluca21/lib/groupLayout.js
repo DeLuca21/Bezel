@@ -84,7 +84,7 @@ export function moveGroupCell(layout, id, rowId, beforeId = null) {
     const rows = groupRows(next);
     const source = rows.find(row => row.cells.some(cell => cell.id === id));
     const target = rows.find(row => row.id === rowId);
-    if (!source || !target || (target !== source && target.cells.length >= 4)) return next;
+    if (!source || !target || (source === target && beforeId === id) || (target !== source && target.cells.length >= 4)) return next;
     const cell = source.cells.find(item => item.id === id);
     source.cells = source.cells.filter(item => item.id !== id);
     const at = target.cells.findIndex(item => item.id === beforeId);

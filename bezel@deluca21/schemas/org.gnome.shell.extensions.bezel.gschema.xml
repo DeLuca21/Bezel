@@ -55,6 +55,35 @@
     <key name="status-hover" type="b"><default>true</default></key>
     <key name="hover-delay" type="i"><default>300</default><range min="100" max="1000"/></key>
     <key name="animation-duration" type="i"><default>320</default><range min="0" max="800"/></key>
+    <key name="login-animation" type="b">
+      <default>false</default>
+      <summary>Animate login</summary>
+      <description>Reveal the desktop and configured bars together when the session starts. Respects reduced motion and disabled animations.</description>
+    </key>
+    <key name="lock-animation" type="b">
+      <default>false</default>
+      <summary>Animate lock</summary>
+      <description>Play a decorative reveal over the lock screen using the selected animation style and speed. Respects reduced motion.</description>
+    </key>
+    <key name="unlock-animation" type="b">
+      <default>false</default>
+      <summary>Animate unlock</summary>
+      <description>Reveal the desktop and configured bars after the lock screen disappears. Uses the selected animation style and speed and respects reduced motion.</description>
+    </key>
+    <key name="preview-login-animation" type="i">
+      <default>0</default>
+      <summary>Increment to preview the login animation</summary>
+    </key>
+    <key name="login-animation-theme" type="s">
+      <default>'liquid'</default>
+      <choices><choice value="liquid"/><choice value="curtain"/><choice value="cascade"/><choice value="fade"/><choice value="glide"/><choice value="soft-fade"/></choices>
+      <summary>Session animation theme</summary>
+    </key>
+    <key name="login-animation-speed" type="i">
+      <default>100</default><range min="25" max="200"/>
+      <summary>Session animation speed as a percentage</summary>
+      <description>100 preserves the normal timing. Lower values slow down the animation; higher values speed it up. Applies to login, lock, unlock and previews.</description>
+    </key>
     <key name="frame-shadow" type="i"><default>8</default><range min="0" max="24"/></key>
     <key name="dashboard-width" type="i"><default>880</default><range min="480" max="1200"/></key>
 

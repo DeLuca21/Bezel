@@ -34,7 +34,8 @@ export function buildLauncher(bar) {
     root._footerHint = hint;
     const expanded = new Set();
     let selected = 0, matches = [], base = [], fileRows = [], timer = 0, cancel = null, generation = 0, dead = false;
-    let filesPending = false, selectionMoved = false;
+    let filesPending = false, selectionMoved = false, appCatalog = null;
+    let renderedRows = [], renderedStart = -1;
     const modeButtons = [];
     const openUri = uri => Gio.AppInfo.launch_default_for_uri(uri, global.create_app_launch_context(global.get_current_time(), -1));
     const actions = [
@@ -60,37 +61,46 @@ export function buildLauncher(bar) {
         const button = new St.Button({label: text, can_focus: true, style_class: 'bezel-action', style: `font-size: 11px; padding: 6px; border-radius: 8px; color: ${theme.fg};`});
         button.connect('clicked', run); return button;
     };
-    const paint = () => {
-        list.destroy_all_children();
+    const paint = (rebuild = true) => {
         selected = Math.max(0, Math.min(selected, matches.length - 1));
         let selectedRow = null;
-        const start = Math.max(0, Math.min(selected - 6, matches.length - 20));
-        for (const [offset, item] of matches.slice(start, start + 20).entries()) {
-            const index = start + offset;
-            const wrap = new St.BoxLayout({style: `spacing: 4px; ${item.parentApp ? 'padding-left: 26px;' : ''}`});
-            const row = new St.BoxLayout({x_expand: true, style: 'spacing: 12px;'});
-            row.add_child(item.app ? item.app.create_icon_texture(28) : new St.Icon({icon_name: item.icon, icon_size: 28}));
-            const labels = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, x_expand: true});
-            for (const [text, color, size] of [[item.name, theme.fg, 14], [item.detail, theme.muted, 11]]) {
-                const label = new St.Label({text: text || '', style: `color: ${color}; font-size: ${size}px;`, x_expand: true});
-                label.clutter_text.ellipsize = Pango.EllipsizeMode.END; labels.add_child(label);
+        const start = !rebuild && selected >= renderedStart && selected < renderedStart + renderedRows.length
+            ? renderedStart : Math.max(0, Math.min(selected - 6, matches.length - 20));
+        if (rebuild || renderedStart !== start) {
+            list.destroy_all_children(); renderedRows = []; renderedStart = start;
+            for (const [offset, item] of matches.slice(start, start + 20).entries()) {
+                const index = start + offset;
+                const wrap = new St.BoxLayout({style: `spacing: 4px; ${item.parentApp ? 'padding-left: 26px;' : ''}`});
+                const row = new St.BoxLayout({x_expand: true, style: 'spacing: 12px;'});
+                row.add_child(item.app ? item.app.create_icon_texture(28) : new St.Icon({icon_name: item.icon, icon_size: 28}));
+                const labels = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, x_expand: true});
+                for (const [text, color, size] of [[item.name, theme.fg, 14], [item.detail, theme.muted, 11]]) {
+                    const label = new St.Label({text: text || '', style: `color: ${color}; font-size: ${size}px;`, x_expand: true});
+                    label.clutter_text.ellipsize = Pango.EllipsizeMode.END; labels.add_child(label);
+                }
+                row.add_child(labels);
+                const button = new St.Button({child: row, can_focus: true, x_expand: true, x_align: Clutter.ActorAlign.FILL,
+                    style_class: 'bezel-action', style: `padding: 10px; border-radius: 14px; ${selected === index ? `background-color: ${theme.surface};` : ''}`});
+                button.connect('clicked', () => activate(index)); wrap.add_child(button);
+                if (item.alternate) wrap.add_child(smallButton(item.alternateLabel, () => activate(index, true)));
+                if (item.windows?.length > 1) wrap.add_child(smallButton(expanded.has(item.app.get_id()) ? 'Hide windows ▴' : `${item.windows.length} windows ▾`, () => {
+                    const id = item.app.get_id();
+                    if (expanded.has(id)) expanded.delete(id); else expanded.add(id);
+                    refreshFiles();
+                }));
+                renderedRows.push({index, wrap, button, selected: selected === index});
+                list.add_child(wrap);
             }
-            row.add_child(labels);
-            const button = new St.Button({child: row, can_focus: true, x_expand: true, x_align: Clutter.ActorAlign.FILL,
-                style_class: 'bezel-action', style: `padding: 10px; border-radius: 14px; ${selected === index ? `background-color: ${theme.surface};` : ''}`});
-            button.connect('clicked', () => activate(index)); wrap.add_child(button);
-            if (item.alternate) wrap.add_child(smallButton(item.alternateLabel, () => activate(index, true)));
-            if (item.windows?.length > 1) wrap.add_child(smallButton(expanded.has(item.app.get_id()) ? 'Hide windows ▴' : `${item.windows.length} windows ▾`, () => {
-                const id = item.app.get_id();
-                if (expanded.has(id)) expanded.delete(id); else expanded.add(id);
-                refreshFiles();
-            }));
-            if (index === selected) selectedRow = wrap;
-            list.add_child(wrap);
+            if (!matches.length) list.add_child(new St.Label({text: filesPending ? 'Searching files…' : 'No matching results', style: `color: ${theme.muted}; padding: 24px;`}));
+            root._matches = matches;
+            bar._popupLockedHeight = false; bar._fitPopup?.();
         }
-        if (!matches.length) list.add_child(new St.Label({text: filesPending ? 'Searching files…' : 'No matching results', style: `color: ${theme.muted}; padding: 24px;`}));
-        root._matches = matches;
-        bar._popupLockedHeight = false; bar._fitPopup?.();
+        for (const row of renderedRows) {
+            const {index, wrap, button} = row;
+            if (row.selected !== (selected === index)) button.style = `padding: 10px; border-radius: 14px; ${selected === index ? `background-color: ${theme.surface};` : ''}`;
+            row.selected = selected === index;
+            if (index === selected) selectedRow = wrap;
+        }
         bar._later('_launcherScroll', 30, () => {
             if (dead || !selectedRow?.get_stage()) return;
             const adjustment = bar._popupScroll?.vadjustment;
@@ -129,26 +139,33 @@ export function buildLauncher(bar) {
             : mode === '>' ? 'GNOME settings, logout and power, and Bezel'
             : '↑↓ select · Enter opens · Shift+Enter: secondary action · !g !yt !gh';
         for (const [button, prefix] of modeButtons) button.style = `font-size: 11px; padding: 6px 8px; border-radius: 10px; color: ${theme.fg}; ${mode === prefix ? `background-color: ${theme.surface};` : ''}`;
-        const apps = system.get_installed().map(info => system.lookup_app(info.get_id())).filter(app => app?.get_app_info()?.should_show()).map(app => {
-            const windows = appWindows(app);
-            return {app, windows, name: app.get_name(), detail: windows.length ? `Switch to app · ${windows.length} window${windows.length === 1 ? '' : 's'}` : 'Launch application',
+        // Application metadata is stable until installed-changed; window state is
+        // sampled for each all-mode search without reloading every desktop entry.
+        if (!mode && !appCatalog) appCatalog = system.get_installed()
+            .map(info => system.lookup_app(info.get_id())).filter(app => app?.get_app_info()?.should_show())
+            .map(app => ({app, name: app.get_name(),
                 keywords: `${app.get_app_info().get_keywords()?.join(' ') ?? ''} ${app.get_id()}`,
-                run: () => activateApp(app), alternate: () => activateApp(app, true), alternateLabel: 'New window'};
-        });
-        const session = SystemActions.getDefault();
-        const sessionActions = [
-            ['Log out', 'system-log-out-symbolic', 'logout log out sign out session', session.can_logout, () => session.activateLogout()],
-            ['Lock screen', 'system-lock-screen-symbolic', 'lock screen lockscreen', session.can_lock_screen, () => session.activateLockScreen()],
-            ['Suspend', 'system-suspend-symbolic', 'suspend sleep', session.can_suspend, () => session.activateSuspend()],
-            ['Hibernate', 'system-hibernate-symbolic', 'hibernate', session.can_hibernate, () => session.activateHibernate()],
-            ['Restart', 'system-reboot-symbolic', 'restart reboot', session.can_restart, () => session.activateRestart()],
-            ['Power off', 'system-shutdown-symbolic', 'power off shutdown poweroff turn off halt', session.can_power_off, () => session.activatePowerOff()],
-            ['Switch user', 'system-switch-user-symbolic', 'switch user', session.can_switch_user, () => session.activateSwitchUser()],
-        ].filter(([, , , allowed]) => allowed).map(([name, icon, keywords, , run]) => ({name, icon, keywords: `gnome session ${keywords}`, detail: 'Session', run}));
-        const options = [...actions, ...sessionActions, ...bezelResults(bar),
-            {name: 'GNOME Settings', icon: 'preferences-system-symbolic', detail: 'Open Settings', keywords: 'settings gnome control center preferences', run: () => openSettings()},
-            ...settingsPanels().map(panel => ({name: panel.name, icon: panel.icon, detail: 'GNOME Settings', keywords: panel.keywords, run: () => openSettings(panel.args)})),
-            ...toggles.map(item => ({...item, detail: item.control.active() ? 'On · Enter to turn off' : 'Off · Enter to turn on', run: () => item.control.toggle()}))];
+                run: () => activateApp(app), alternate: () => activateApp(app, true), alternateLabel: 'New window'}));
+        const apps = !mode ? appCatalog.map(item => {
+            const windows = appWindows(item.app);
+            return {...item, windows, detail: windows.length ? `Switch to app · ${windows.length} window${windows.length === 1 ? '' : 's'}` : 'Launch application'};
+        }) : [];
+        const options = (mode === '>' || (!mode && text)) ? (() => {
+            const session = SystemActions.getDefault();
+            const sessionActions = [
+                ['Log out', 'system-log-out-symbolic', 'logout log out sign out session', session.can_logout, () => session.activateLogout()],
+                ['Lock screen', 'system-lock-screen-symbolic', 'lock screen lockscreen', session.can_lock_screen, () => session.activateLockScreen()],
+                ['Suspend', 'system-suspend-symbolic', 'suspend sleep', session.can_suspend, () => session.activateSuspend()],
+                ['Hibernate', 'system-hibernate-symbolic', 'hibernate', session.can_hibernate, () => session.activateHibernate()],
+                ['Restart', 'system-reboot-symbolic', 'restart reboot', session.can_restart, () => session.activateRestart()],
+                ['Power off', 'system-shutdown-symbolic', 'power off shutdown poweroff turn off halt', session.can_power_off, () => session.activatePowerOff()],
+                ['Switch user', 'system-switch-user-symbolic', 'switch user', session.can_switch_user, () => session.activateSwitchUser()],
+            ].filter(([, , , allowed]) => allowed).map(([name, icon, keywords, , run]) => ({name, icon, keywords: `gnome session ${keywords}`, detail: 'Session', run}));
+            return [...actions, ...sessionActions, ...bezelResults(bar),
+                {name: 'GNOME Settings', icon: 'preferences-system-symbolic', detail: 'Open Settings', keywords: 'settings gnome control center preferences', run: () => openSettings()},
+                ...settingsPanels().map(panel => ({name: panel.name, icon: panel.icon, detail: 'GNOME Settings', keywords: panel.keywords, run: () => openSettings(panel.args)})),
+                ...toggles.map(item => ({...item, detail: item.control.active() ? 'On · Enter to turn off' : 'Off · Enter to turn on', run: () => item.control.toggle()}))];
+        })() : [];
         const windows = text && !mode ? system.get_running().flatMap(app => appWindows(app).map(win => ({
             name: win.get_title() || app.get_name(), keywords: app.get_name(), app, window: win,
             detail: `Switch to window · ${app.get_name()} · Workspace ${(win.get_workspace()?.index() ?? 0) + 1}`,
@@ -217,11 +234,11 @@ export function buildLauncher(bar) {
         if ((key === Clutter.KEY_Return || key === Clutter.KEY_KP_Enter) && (state & Clutter.ModifierType.SHIFT_MASK)) { activate(selected, true); return Clutter.EVENT_STOP; }
         if (key !== Clutter.KEY_Up && key !== Clutter.KEY_Down) return Clutter.EVENT_PROPAGATE;
         selectionMoved = true;
-        selected = Math.max(0, Math.min(matches.length - 1, selected + (key === Clutter.KEY_Up ? -1 : 1))); paint(); return Clutter.EVENT_STOP;
+        selected = Math.max(0, Math.min(matches.length - 1, selected + (key === Clutter.KEY_Up ? -1 : 1))); paint(false); return Clutter.EVENT_STOP;
     });
-    const changed = system.connect('installed-changed', search);
+    const changed = system.connect('installed-changed', () => { appCatalog = null; search(); });
     bar._popupCleanups.push(() => { dead = true; stopFiles(); bar._cancel('_launcherScroll'); system.disconnect(changed); });
-    bar._onPopupScroll = step => { if (!matches.length) return false; selectionMoved = true; selected = Math.max(0, Math.min(matches.length - 1, selected + step)); paint(); return true; };
+    bar._onPopupScroll = step => { if (!matches.length) return false; selectionMoved = true; selected = Math.max(0, Math.min(matches.length - 1, selected + step)); paint(false); return true; };
     bar._popupCleanups.push(() => { bar._onPopupScroll = null; });
     bar._launcherEntry = entry; bar._launcherWidget = root;
     search(); return root;

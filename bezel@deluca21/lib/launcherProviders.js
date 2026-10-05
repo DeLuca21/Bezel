@@ -1,6 +1,6 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
-import {filterMatches, scoreItem} from './search.js';
+import {createSearchScorer, compareSearchResults} from './search.js';
 import {PRESETS} from './theme.js';
 import {readBars, applyPreset} from './config.js';
 import {savedLayouts, restoreLayout, rememberLayout, layoutValues} from './profiles.js';
@@ -51,10 +51,11 @@ export async function searchFiles(query, roots, cancellable, onProgress = null) 
     const needle = isPath ? expanded.endsWith('/') ? '' : GLib.path_get_basename(expanded) : query;
     const queue = (isPath ? [expanded.endsWith('/') ? expanded : GLib.path_get_dirname(expanded)] : roots.map(root => root.replace(/^~(?=\/|$)/, GLib.get_home_dir())))
         .filter(root => root.startsWith('/')).map(path => [Gio.File.new_for_path(path), 0]);
-    const found = [], seen = new Set();
-    let visited = 0, published = 0, lastPublish = 0;
-    while (queue.length && visited < 15000 && !cancellable.is_cancelled()) {
-        const [directory, depth] = queue.shift();
+    const found = [], seen = new Set(), score = createSearchScorer(needle);
+    let visited = 0, revision = 0, published = 0, lastPublish = 0, head = 0;
+    while (head < queue.length && visited < 15000 && !cancellable.is_cancelled()) {
+        const [directory, depth] = queue[head];
+        queue[head++] = null;
         const path = directory.get_path();
         if (seen.has(path)) continue;
         seen.add(path);
@@ -74,20 +75,33 @@ export async function searchFiles(query, roots, cancellable, onProgress = null) 
                     if (name.startsWith('.')) continue;
                     const file = directory.get_child(name);
                     const folder = info.get_file_type() === Gio.FileType.DIRECTORY;
-                    if (Number.isFinite(scoreItem(needle, {name}))) found.push({name, file, folder, detail: file.get_path()});
+                    const item = {name, file, folder, detail: file.get_path()};
+                    item.score = score(item);
+                    // Keep only the best visible results, with stable tie-breaking.
+                    if (Number.isFinite(item.score) && (found.length < 60 || compareSearchResults(item, found[found.length - 1]) < 0)) {
+                        let low = 0, high = found.length;
+                        while (low < high) {
+                            const middle = (low + high) >> 1;
+                            if (compareSearchResults(item, found[middle]) < 0) high = middle;
+                            else low = middle + 1;
+                        }
+                        found.splice(low, 0, item);
+                        if (found.length > 60) found.pop();
+                        revision++;
+                    }
                     if (!isPath && folder && !info.get_is_symlink() && depth < 5 && !['node_modules', 'vendor'].includes(name)) queue.push([file, depth + 1]);
                 }
                 // Publish early hits while deeper folders are still being searched.
                 const now = GLib.get_monotonic_time();
-                if (onProgress && found.length !== published && now - lastPublish >= 100000 && !cancellable.is_cancelled()) {
-                    onProgress(filterMatches(needle, found).slice(0, 60));
-                    published = found.length; lastPublish = now;
+                if (onProgress && revision !== published && now - lastPublish >= 100000 && !cancellable.is_cancelled()) {
+                    onProgress(found.slice());
+                    published = revision; lastPublish = now;
                 }
             }
         } catch (error) { if (cancellable.is_cancelled()) return []; }
         finally { if (enumerator) enumerator.close_async(GLib.PRIORITY_DEFAULT, null, (source, res) => { try { source.close_finish(res); } catch {} }); }
     }
-    return filterMatches(needle, found).slice(0, 60);
+    return cancellable.is_cancelled() ? [] : found;
 }
 
 export function commandArgv(text) {

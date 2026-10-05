@@ -101,6 +101,8 @@ Log out and back in. The first time, enable **Bezel** in Extensions. Wayland loa
 
 Bezel settings open in a dedicated custom app, from the dashboard, launcher, Extensions app, or a bar’s right-click menu. Its palette, rounded cards and visual editor match Bezel. It runs as a real window with normal stacking, resizing and Super-dragging.
 
+In **Opening & motion > Session animations**, enable login, lock, and unlock independently. All three share the selected animation style and speed. Lock uses a temporary decorative frame over GNOME’s lock screen; unlock reveals the desktop and bars after the lock screen disappears. The new lock and unlock options default to off and respect reduced motion.
+
 In **Opening & motion**, Off, Fade, or Retreat runs for layout, preset, and palette changes. New installs use Retreat at 500 ms. Transitions respect GNOME’s reduced-motion preference.
 
 Preset cards and saved-layout chips sit above an interactive desktop preview and independently scrollable editor. Click a bar to select it, then use Contents, Size & space, or Apps & logo. Modules appear as chips inside sections and groups. Palettes show swatch cards; custom colours use GNOME’s picker. Switching layouts with unsaved changes offers Cancel, Discard, or Save and switch.

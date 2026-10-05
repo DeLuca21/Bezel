@@ -26,6 +26,7 @@ export class NotificationBridge {
         this.original = {clip: this.tray.clip_to_allocation, style: this.bin.get_style(), align: this.tray.bannerAlignment, x: this.bin.translation_x, y: this.bin.translation_y};
         this.tray.clip_to_allocation = false;
         this.records = new Map();
+        this.pendingStyles = new Map();
         this.layer = new Clutter.Actor({reactive: false, layout_manager: new Clutter.FixedLayout(),
             x_expand: true, y_expand: true, x_align: Clutter.ActorAlign.FILL, y_align: Clutter.ActorAlign.FILL});
         this.tray.add_child(this.layer);
@@ -115,13 +116,22 @@ export class NotificationBridge {
     }
 
     decorate(banner) {
-        if (!(banner instanceof St.Widget) || this.records.has(banner))
+        if (!this.bin || !(banner instanceof St.Widget) || this.records.has(banner) || this.pendingStyles.has(banner))
             return;
         if (!banner.has_style_class_name('notification-banner')) {
-            const id = banner.connect('notify::style-class', () => {
-                banner.disconnect(id);
+            const forget = () => {
+                const ids = this.pendingStyles.get(banner);
+                if (!ids) return;
+                this.pendingStyles.delete(banner);
+                ids.forEach(id => banner.disconnect(id));
+            };
+            const changed = banner.connect('notify::style-class', () => {
+                if (!banner.has_style_class_name('notification-banner')) return;
+                forget();
                 this.decorate(banner);
             });
+            const destroyed = banner.connect('destroy', forget);
+            this.pendingStyles.set(banner, [changed, destroyed]);
             return;
         }
         const record = {style: banner.get_style(), corners: [], parts: []};
@@ -210,6 +220,9 @@ export class NotificationBridge {
         this.deliveryTimers.clear();
         for (const [index, id] of this.signals.entries())
             (index === 2 ? this.tray : this.bin).disconnect(id);
+        for (const [banner, ids] of this.pendingStyles)
+            ids.forEach(id => banner.disconnect(id));
+        this.pendingStyles.clear();
         this.layer?.destroy();
         for (const [banner, record] of this.records) {
             banner.disconnect(record.destroy);
@@ -287,7 +300,8 @@ export function buildNotificationCenter(bar, embedded = false) {
         if (sources.has(source)) return;
         sources.add(source);
         source.notifications.forEach(add);
-        source.connectObject('notification-added', (_source, notification) => add(notification), box);
+        source.connectObject('notification-added', (_source, notification) => add(notification),
+            'destroy', () => sources.delete(source), box);
     };
     Main.messageTray.getSources().forEach(watch);
     Main.messageTray.connectObject('source-added', (_tray, source) => watch(source), box);

@@ -224,13 +224,58 @@ export function paintPillBackdrop(cr, rect, radius, color, opacity, shadow) {
     cr.fill();
 }
 
-export function paintFrame(cr, width, height, sides, radius, color, shadow, popup = null, notification = null, alpha = 1) {
-    const coverage = Math.max(0, Math.min(1, Number(alpha) || 0));
-    cr.setOperator(Cairo.Operator.CLEAR);
-    cr.paint();
-    cr.setOperator(Cairo.Operator.OVER);
-    openingPath(cr, width, height, sides, radius, popup, notification);
-    const opening = cr.copyPath();
+// Round the advancing ends, with enough overdraw to settle the screen corners
+// continuously before handing back to the static frame.
+function edgeClip(cr, width, height, motion, shadow) {
+    cr.newPath();
+    cr.setFillRule(Cairo.FillRule.WINDING);
+    for (const [edge, growth] of Object.entries(motion.edges)) {
+        if (growth <= 0) continue;
+        const vertical = edge === 'left' || edge === 'right';
+        const length = vertical ? height : width;
+        const thickness = Math.min(vertical ? width : height,
+            Math.max(0, motion.sides[edge] + motion.radius + shadow));
+        if (thickness === 0) continue;
+        const span = (length + 2 * thickness) * growth;
+        const x = vertical ? (edge === 'left' ? -thickness : width - thickness) : (width - span) / 2;
+        const y = vertical ? (height - span) / 2 : (edge === 'top' ? -thickness : height - thickness);
+        const w = vertical ? thickness * 2 : span;
+        const h = vertical ? span : thickness * 2;
+        const r = Math.min(thickness, w / 2, h / 2);
+        cr.newSubPath();
+        cr.moveTo(x + r, y);
+        cr.lineTo(x + w - r, y); cr.arc(x + w - r, y + r, r, -Math.PI / 2, 0);
+        cr.lineTo(x + w, y + h - r); cr.arc(x + w - r, y + h - r, r, 0, Math.PI / 2);
+        cr.lineTo(x + r, y + h); cr.arc(x + r, y + h - r, r, Math.PI / 2, Math.PI);
+        cr.lineTo(x, y + r); cr.arc(x + r, y + r, r, Math.PI, Math.PI * 1.5);
+        cr.closePath();
+    }
+    cr.clip();
+}
+
+export function paintLoginFrame(cr, width, height, motion, color, shadow, popup = null, notification = null) {
+    if (motion.solid) {
+        cr.setOperator(Cairo.Operator.SOURCE);
+        source(cr, color);
+        cr.paint();
+    } else if (motion.edges) {
+        cr.setOperator(Cairo.Operator.CLEAR);
+        cr.paint();
+        cr.setOperator(Cairo.Operator.OVER);
+        cr.save();
+        if (Object.values(motion.edges).some(growth => growth < 1))
+            edgeClip(cr, width, height, motion, shadow);
+        // Paint only the configured frame. The desktop opening stays fixed,
+        // while a soft front carries the frame outwards from each edge centre.
+        openingPath(cr, width, height, motion.sides, motion.radius, popup, notification);
+        paintOutside(cr, width, height, cr.copyPath(), color, shadow * motion.shadow);
+        cr.restore();
+    } else {
+        paintFrame(cr, width, height, motion.sides, motion.radius, color, shadow * motion.shadow, popup, notification);
+    }
+}
+
+function paintOutside(cr, width, height, opening, color, shadow, coverage = 1) {
     cr.newPath();
     cr.rectangle(0, 0, width, height);
     cr.appendPath(opening);
@@ -249,4 +294,13 @@ export function paintFrame(cr, width, height, sides, radius, color, shadow, popu
         }
         cr.restore();
     }
+}
+
+export function paintFrame(cr, width, height, sides, radius, color, shadow, popup = null, notification = null, alpha = 1) {
+    const coverage = Math.max(0, Math.min(1, Number(alpha) || 0));
+    cr.setOperator(Cairo.Operator.CLEAR);
+    cr.paint();
+    cr.setOperator(Cairo.Operator.OVER);
+    openingPath(cr, width, height, sides, radius, popup, notification);
+    paintOutside(cr, width, height, cr.copyPath(), color, shadow, coverage);
 }

@@ -2,7 +2,7 @@ import GLib from 'gi://GLib';
 
 import {builtInLayout, requestLayoutTransition} from './config.js';
 
-const EXCLUDED = new Set(['layout-transition', 'layout-transition-duration', 'layout-transition-request', 'preferences-target', 'launcher-layout-undo', 'saved-layouts', 'previous-layout', 'layout-baseline', 'shortcut-overrides', 'known-indicators', 'show-settings', 'preferences-bar', 'preferences-group', 'group-preview', 'edit-mode']);
+const EXCLUDED = new Set(['layout-transition', 'layout-transition-duration', 'layout-transition-request', 'preferences-target', 'launcher-layout-undo', 'saved-layouts', 'previous-layout', 'layout-baseline', 'shortcut-overrides', 'known-indicators', 'show-settings', 'preferences-bar', 'preferences-group', 'group-preview', 'edit-mode', 'preview-login-animation']);
 
 const hasBaseline = settings => Boolean(settings.settings_schema?.has_key?.('layout-baseline'));
 
@@ -58,6 +58,13 @@ export function savedLayouts(settings) {
         const list = JSON.parse(settings.get_string('saved-layouts'));
         return Array.isArray(list) ? list.filter(item => typeof item?.name === 'string' && item.values && typeof item.values === 'object') : [];
     } catch { return []; }
+}
+
+export function nextLayoutName(settings) {
+    const names = new Set(savedLayouts(settings).map(profile => profile.name));
+    let n = 1;
+    while (names.has(`Layout ${n}`)) n++;
+    return `Layout ${n}`;
 }
 
 export function layoutValues(settings) {

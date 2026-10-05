@@ -8,11 +8,33 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import {BezelOverlay} from './lib/shell.js';
+import {SessionMotion} from './lib/sessionMotion.js';
+import {playLockAnimation} from './lib/loginAnimation.js';
 import {launchSettings} from './lib/settingsLauncher.js';
 
 export default class BezelExtension extends Extension {
     enable() {
         this._settings = this.getSettings();
+        try {
+            this._sessionMotion = new SessionMotion(this._settings,
+                () => this._enableDesktop(), () => this._disableDesktop(),
+                () => this._overlay?.previewLoginAnimation(),
+                () => playLockAnimation(this._settings));
+        } catch (error) {
+            this.disable();
+            throw error;
+        }
+    }
+
+    disable() {
+        this._sessionMotion?.destroy();
+        this._sessionMotion = null;
+        this._disableDesktop();
+        this._settings = null;
+    }
+
+    _enableDesktop() {
+        if (this._overlay) return;
         this._settingsId = this._settings.connect('changed::hide-gnome-panel', () => {
             this._applyPanel();
         });
@@ -32,7 +54,8 @@ export default class BezelExtension extends Extension {
         }
     }
 
-    disable() {
+    _disableDesktop() {
+        if (!this._overlay && !this._settingsId) return;
         this._restoreOverviewDash();
         if (this._dashSetting) {
             this._settings.disconnect(this._dashSetting);
@@ -54,7 +77,6 @@ export default class BezelExtension extends Extension {
             this._settingsId = 0;
         }
         this._restorePanel();
-        this._settings = null;
     }
 
     _syncOverviewDash() {
