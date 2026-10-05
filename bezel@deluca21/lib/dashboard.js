@@ -31,11 +31,24 @@ export function buildDashboard(bar) {
     const root = column();
     const tabs = new St.BoxLayout({style: `spacing: 8px; border-bottom: 1px solid ${theme.border}; padding-bottom: 10px;`});
     const stage = new St.Widget({layout_manager: new Clutter.BinLayout(), x_expand: true});
-    const tabHeader = new St.BoxLayout({style: 'spacing: 8px;', x_expand: true});
-    const tabScroll = new St.ScrollView({hscrollbar_policy: St.PolicyType.AUTOMATIC,
-        vscrollbar_policy: St.PolicyType.NEVER, width: 1, x_expand: true});
+    const tabHeader = new St.BoxLayout({style: 'spacing: 8px;', x_expand: false, x_align: Clutter.ActorAlign.CENTER});
+    const tabScroll = new St.ScrollView({name: 'bezel-dashboard-tabs', hscrollbar_policy: St.PolicyType.AUTOMATIC,
+        vscrollbar_policy: St.PolicyType.NEVER, width: 1, x_expand: false});
     tabScroll.set_child(tabs);
-    tabHeader.add_child(tabScroll);
+    const tabLayer = new St.Widget({layout_manager: new Clutter.BinLayout(),
+        x_expand: false, clip_to_allocation: true});
+    const highlight = new St.Widget({name: 'bezel-dashboard-tab-highlight', reactive: false, x_align: Clutter.ActorAlign.START,
+        y_align: Clutter.ActorAlign.START, opacity: 0, width: 1, height: 1,
+        style: `background-color: ${theme.surface}; border-radius: 12px;`});
+    // A zero-sized overlay keeps the highlight out of preferred-size negotiation.
+    const highlightLayer = new St.Widget({width: 0, height: 0,
+        x_align: Clutter.ActorAlign.START, y_align: Clutter.ActorAlign.START});
+    highlightLayer.add_child(highlight);
+    tabLayer.add_child(highlightLayer);
+    tabLayer.add_child(tabScroll);
+    const headerBalance = new St.Widget({width: 30});
+    tabHeader.add_child(headerBalance);
+    tabHeader.add_child(tabLayer);
     root.add_child(tabHeader);
     root.add_child(stage);
     const buttons = new Map();
@@ -43,6 +56,66 @@ export function buildDashboard(bar) {
     layout._pages = pages;
     const order = () => pages.map(page => page.id);
     let current = null;
+    let highlightTimeline = null;
+    let highlightFrom = null;
+    let highlightProgress = 1;
+    let pageDuration = 0;
+    let pageTimeline = null;
+    let closed = false;
+    root._stopDashboardMotion = () => {
+        pageTimeline?.stop();
+        highlightTimeline?.stop();
+        pageTimeline = highlightTimeline = null;
+        pageDuration = 0;
+    };
+    const syncHighlight = () => {
+        if (closed) return;
+        const button = buttons.get(current);
+        if (!button?.get_stage() || button.width <= 0) return;
+        const [bx, by] = button.get_transformed_position();
+        const [lx, ly] = highlightLayer.get_transformed_position();
+        const target = [bx - lx, by - ly, button.width, button.height];
+        if (!target.every(Number.isFinite)) return;
+        const from = highlightFrom ?? target;
+        const values = target.map((value, i) => from[i] + (value - from[i]) * highlightProgress);
+        highlight.set_position(values[0], values[1]);
+        highlight.set_size(values[2], values[3]);
+        highlight.opacity = 255;
+    };
+    const moveHighlight = duration => {
+        highlightTimeline?.stop();
+        highlightTimeline = null;
+        highlightFrom = highlight.opacity ? [highlight.x, highlight.y, highlight.width, highlight.height] : null;
+        highlightProgress = duration ? 0 : 1;
+        syncHighlight();
+        if (!duration) return;
+        const timeline = new Clutter.Timeline({duration, actor: tabLayer});
+        highlightTimeline = timeline;
+        timeline.set_progress_mode(Clutter.AnimationMode.EASE_OUT_CUBIC);
+        timeline.connect('new-frame', () => { highlightProgress = timeline.get_progress(); syncHighlight(); });
+        timeline.connect('completed', () => {
+            highlightTimeline = null;
+            highlightProgress = 1;
+            highlightFrom = null;
+            syncHighlight();
+        });
+        timeline.start();
+    };
+    // ScrollView minimum sizes can exceed the animated viewport while two pages
+    // coexist. Anchor the header to the actual drawer, not that allocation.
+    const centerHeader = () => {
+        if (closed || !bar._popout || !tabHeader.get_stage() || tabHeader.width <= 0) return;
+        const [x] = tabScroll.get_transformed_position();
+        const desired = bar._popout.x + bar._popout.width / 2;
+        const offset = desired - (x + tabScroll.width / 2);
+        if (Number.isFinite(offset) && Math.abs(offset) > 0.01)
+            tabHeader.translation_x += offset;
+    };
+    root._syncDashboardHeader = centerHeader;
+    root.connect('notify::allocation', centerHeader);
+    tabHeader.connect('notify::allocation', centerHeader);
+    tabScroll.connect('notify::allocation', centerHeader);
+    tabScroll.hadjustment.connectObject('notify::value', syncHighlight, root);
     const reader = metricsReader();
     const disposeView = view => {
         if (!view || view._dashDisposed) return;
@@ -51,6 +124,11 @@ export function buildDashboard(bar) {
         view?.destroy();
     };
     const reset = () => {
+        closed = true;
+        pageTimeline?.stop();
+        pageTimeline = null;
+        highlightTimeline?.stop();
+        highlightTimeline = null;
         for (const view of stage.get_children())
             disposeView(view);
         // Cancelling a gesture can reflow once; cancel its tab-scroll callback
@@ -58,6 +136,7 @@ export function buildDashboard(bar) {
         bar._cancel('_dashboardTabScroll');
     };
     bar._popupCleanups.push(reset);
+    root.connect('destroy', () => { closed = true; pageTimeline?.stop(); highlightTimeline?.stop(); });
     const persist = () => bar._overlay.skipRebuild(() => saveDashboard(settings, layout));
     const pageWidth = slots => {
         const inner = slots * UNIT + Math.max(0, slots - 1) * GAP;
@@ -68,13 +147,21 @@ export function buildDashboard(bar) {
         const slots = view._dashColumns || pageColumns(layout[id] ?? []);
         const width = pageWidth(slots);
         bar._popupWidth = width;
-        if (bar._popout) {
-            bar._popout.width = width;
-            if (bar._popout.get_stage())
-                bar._placePopup?.();
-        }
-        const editWidth = edit?.get_stage() ? edit.get_preferred_width(-1)[1] : 30;
-        tabScroll.width = Math.max(96, width - 36 - editWidth - 8);
+        // Each page keeps its final layout while the surrounding viewport morphs.
+        view.width = width - 36;
+        view.x_expand = false;
+        view.x_align = Clutter.ActorAlign.CENTER;
+        view.y_expand = false;
+        view.y_align = Clutter.ActorAlign.START;
+        const headerWidth = Math.min(...pages.map(page => pageWidth(pageColumns(layout[page.id] ?? []))));
+        const editWidth = edit.get_stage() ? edit.get_preferred_width(-1)[1] : 30;
+        headerBalance.width = editWidth;
+        const naturalTabs = tabs.get_stage() ? tabs.get_preferred_width(-1)[1] : 1;
+        tabScroll.width = Math.min(naturalTabs, Math.max(96, headerWidth - 36 - editWidth * 2 - 16));
+        tabHeader.width = tabScroll.width + editWidth * 2 + 16;
+        // Building an incoming page must not resize the visible outgoing page.
+        if (!view.get_stage() || id !== current) return;
+        view._preparePage?.();
         bar._later('_dashboardTabScroll', 20, () => {
             const button = buttons.get(id);
             const adjustment = tabScroll.hadjustment;
@@ -87,17 +174,16 @@ export function buildDashboard(bar) {
             else if (right > adjustment.value + adjustment.page_size)
                 adjustment.value = Math.max(0, right - adjustment.page_size);
         });
-        const compact = width < 440;
-        for (const button of buttons.values()) {
-            if (button.child)
-                button.child.orientation = compact ? Clutter.Orientation.VERTICAL : Clutter.Orientation.HORIZONTAL;
-        }
         // Width is known from the rows. Height is measured once the popup
         // exists, not while this view is still being built.
         if (!view.get_stage() || !bar._popout?.get_stage?.() || !bar._popupContent)
             return;
+        const others = stage.get_children().filter(child => child !== view && child.visible);
+        for (const child of others) child.hide();
         bar._popupLockedHeight = false;
-        bar._fitPopup();
+        const height = bar._fitPopup(true, width);
+        for (const child of others) child.show();
+        if (Number.isFinite(height)) bar._setDashboardSize(width, height, pageDuration);
     };
     const fill = (id, host, updates, cleanups) => {
         host._dashPage = true;
@@ -235,9 +321,10 @@ export function buildDashboard(bar) {
                     host.insert_child_at_index(shell, rowIndex);
                     measuredRows.push(placed);
                 });
-                sizePage(host, id);
-                editor.later = global.compositor.get_laters().add(Meta.LaterType.IDLE, () => {
-                    editor.later = 0;
+                let prepared = false;
+                host._preparePage = () => {
+                    if (prepared || !host.get_stage()) return;
+                    prepared = true;
                     for (const placed of measuredRows) {
                         for (const item of placed) {
                             if (!item.entry.gap)
@@ -245,6 +332,11 @@ export function buildDashboard(bar) {
                         }
                         equalizeRow(placed);
                     }
+                };
+                sizePage(host, id);
+                editor.later = global.compositor.get_laters().add(Meta.LaterType.IDLE, () => {
+                    editor.later = 0;
+                    host._preparePage();
                     sizePage(host, id);
                     if (!animate || editor.floating || !allowsMotion(St.Settings.get(), St.ReducedMotion))
                         return GLib.SOURCE_REMOVE;
@@ -353,8 +445,10 @@ export function buildDashboard(bar) {
         if (current !== null)
             bar._persistPopup();
         for (const [key, button] of buttons)
-            button.style = `padding: 10px 12px; border-radius: 12px; color: ${key === id ? theme.accent : theme.muted}; ${key === id ? `background-color: ${theme.surface};` : ''}`;
+            button.style = `padding: 10px 12px; border-radius: 12px; color: ${key === id ? theme.accent : theme.muted}; `;
         for (const page of stage.get_children()) page._dashUpdates?.stop();
+        pageTimeline?.stop();
+        pageTimeline = null;
         const view = column();
         const cleanups = [];
         const updates = pageUpdates(bar, reader);
@@ -376,12 +470,15 @@ export function buildDashboard(bar) {
             disposeView(stage.get_first_child());
         const previous = stage.get_first_child();
         previous?.remove_all_transitions();
-        const motion = !instant && previous && allowsMotion(St.Settings.get(), St.ReducedMotion);
+        const motion = !instant && previous && bar._state.animationDuration > 0 && bar._popupProgress === 1
+            && allowsMotion(St.Settings.get(), St.ReducedMotion);
+        pageDuration = motion ? bar._state.animationDuration : 0;
         if (!motion) {
             disposeView(previous);
             stage.add_child(view);
             current = id;
             sizePage(view, id);
+            moveHighlight(0);
             return;
         }
         const dir = order().indexOf(id) >= order().indexOf(current) ? 1 : -1;
@@ -390,16 +487,25 @@ export function buildDashboard(bar) {
         stage.add_child(view);
         current = id;
         sizePage(view, id);
-        previous.ease({
-            translation_x: -dir * width, duration: 240, mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
-            onComplete: () => {
-                disposeView(previous);
-                if (!view._dashDisposed && current === id) sizePage(view, id);
-            },
+        moveHighlight(pageDuration);
+        const from = previous.translation_x;
+        const timeline = new Clutter.Timeline({duration: Math.max(1, pageDuration), actor: stage});
+        pageTimeline = timeline;
+        timeline.set_progress_mode(Clutter.AnimationMode.EASE_OUT_CUBIC);
+        timeline.connect('new-frame', () => {
+            const progress = timeline.get_progress();
+            previous.translation_x = from + (-dir * width - from) * progress;
+            view.translation_x = dir * width * (1 - progress);
         });
-        view.ease({
-            translation_x: 0, duration: 240, mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
+        timeline.connect('completed', () => {
+            pageTimeline = null;
+            view.translation_x = 0;
+            disposeView(previous);
+            pageDuration = 0;
+            if (!view._dashDisposed && current === id)
+                sizePage(view, id);
         });
+        timeline.start();
         current = id;
     };
     const syncTabs = () => {
@@ -412,8 +518,9 @@ export function buildDashboard(bar) {
                 performance: 'utilities-system-monitor-symbolic', workspaces: 'view-paged-symbolic'}[id] ?? 'view-grid-symbolic';
             content.add_child(new St.Icon({icon_name: icon, icon_size: 16}));
             content.add_child(new St.Label({text: title}));
-            const button = new St.Button({child: content, can_focus: true, x_expand: true, accessible_name: title});
+            const button = new St.Button({child: content, can_focus: true, x_expand: false, accessible_name: title});
             button.connect('clicked', () => show(id, editing));
+            button.connect('notify::allocation', syncHighlight);
             tabs.insert_child_at_index(button, index);
             buttons.set(id, button);
         }
@@ -435,7 +542,12 @@ export function buildDashboard(bar) {
     });
     tabHeader.add_child(edit);
     syncTabs();
-    root._selectTab = id => show(layout[id] ? id : pages[0].id, true);
+    root._preparePopup = () => {
+        const view = stage.get_last_child();
+        if (view) sizePage(view, current);
+        syncHighlight();
+    };
+    root._selectTab = (id, instant = true) => show(layout[id] ? id : pages[0].id, instant);
     show(pages[0].id, true);
     return root;
 }
