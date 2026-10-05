@@ -29,6 +29,7 @@ import {sideWidths, reservedWidths, cornerRadius, zonePlacement} from './geometr
 import {paintCorner, paintPillBackdrop} from './drawing.js';
 import {Services} from './services.js';
 import {DesktopFrame} from './frame.js';
+import {LoginAnimation} from './loginAnimation.js';
 import {monthGrid, openCalendarDate} from './calendar.js';
 import {Weather, weatherWidget, railTemp} from './weather.js';
 import {buildMediaFace, buildMicFace, buildMicPanel, buildClipboardPanel, buildKeyboardFace, buildKeyboardPanel, buildAwakeFace, buildValueButton} from './extraModules.js';
@@ -60,6 +61,7 @@ export class BezelOverlay {
         this._bars = [];
         this.appIconGeometry = new AppIconGeometry();
         this._layoutTransition = new LayoutTransition(this);
+        this._loginPending = Main.layoutManager._startingUp && !Main.sessionMode.isGreeter && !Main.sessionMode.isLocked;
         this._id = settings.connect('changed', (_settings, key) => {
             if (key === 'layout-transition-request') {
                 this._animateLayout = true;
@@ -95,6 +97,20 @@ export class BezelOverlay {
                 this._placeIndicators();
                 return;
             }
+            if (key === 'preview-login-animation') {
+                this.previewLoginAnimation();
+                return;
+            }
+            if (key === 'login-animation') {
+                if (!settingFlag(this._settings, key)) {
+                    this._loginPending = false;
+                    this._loginAnimation?.destroy();
+                    this._loginAnimation = null;
+                }
+                return;
+            }
+            if (['login-animation-theme', 'login-animation-speed', 'lock-animation', 'unlock-animation'].includes(key))
+                return; // The next login animation or preview reads these values.
             if (!['known-indicators', 'saved-layouts', 'previous-layout', 'layout-baseline', 'shortcut-overrides', 'show-settings', 'preferences-bar'].includes(key)) this.queueRebuild();
         });
         this._monitors = Main.layoutManager.connect('monitors-changed', () => this.queueRebuild());
@@ -218,6 +234,12 @@ export class BezelOverlay {
             this._syncEditEscape();
             this._syncRecordingStop();
             if (this._groupPreview?.action === 'open') this._showGroupPreview();
+            if (this._loginPending && Main.layoutManager._startingUp && (this._bars.length || this._frames.size) &&
+                settingFlag(this._settings, 'login-animation') &&
+                allowsMotion(St.Settings.get(), St.ReducedMotion)) {
+                this._loginAnimation = new LoginAnimation(this._bars, this._frames, theme, state,
+                    () => { this._loginPending = false; });
+            }
         } catch (error) {
             this._clear();
             throw error;
@@ -306,6 +328,25 @@ export class BezelOverlay {
 
     openPreferences() {
         this.openSettings();
+    }
+
+    previewLoginAnimation() {
+        if (Main.layoutManager._startingUp || Main.sessionMode.isLocked || Main.sessionMode.isGreeter)
+            return;
+        if (this._rebuildId) {
+            GLib.source_remove(this._rebuildId);
+            this._rebuildId = 0;
+            this.rebuild();
+        }
+        this._loginAnimation?.destroy();
+        this._loginAnimation = null;
+        const state = readState(this._settings);
+        if ((!this._bars.length && !this._frames.size) || !allowsMotion(St.Settings.get(), St.ReducedMotion))
+            return;
+        Main.overview.hide();
+        for (const bar of this._bars) bar._close();
+        this._loginAnimation = new LoginAnimation(this._bars, this._frames,
+            resolveTheme(this._settings), state, undefined, false);
     }
 
     openSettings(options = {}) {
@@ -587,6 +628,8 @@ export class BezelOverlay {
     }
 
     _clear() {
+        this._loginAnimation?.destroy();
+        this._loginAnimation = null;
         this._editAdds = [];
         this._notifications?.destroy();
         this._notifications = null;

@@ -2,6 +2,7 @@ import {moduleType} from './moduleIdentity.js';
 import {normalizeFeatures} from './moduleFeatures.js';
 import {normalizeGroupLayout} from './groupLayout.js';
 import {packRows, spanOf} from './dashboardGeometry.js';
+import {LOGIN_THEMES} from './loginMotion.js';
 
 // Shared by the shell and preferences. Never let a hand-edited config break enable().
 export const PLACES = {
@@ -434,6 +435,8 @@ export function readState(settings) {
         dashboardHover: settings.get_boolean('dashboard-hover'),
         hoverDelay: settings.get_int('hover-delay'),
         animationDuration: settings.get_int('animation-duration'),
+        loginAnimationTheme: settingChoice(settings, 'login-animation-theme', 'liquid', LOGIN_THEMES.map(([id]) => id)),
+        loginAnimationSpeed: settings.settings_schema.has_key('login-animation-speed') ? settings.get_int('login-animation-speed') : 100,
         shadow: settings.get_int('frame-shadow'),
         dashboardWidth: settings.get_int('dashboard-width'),
         launcherWidth: settings.get_int('launcher-width'),

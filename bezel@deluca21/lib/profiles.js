@@ -2,7 +2,7 @@ import GLib from 'gi://GLib';
 
 import {builtInLayout, requestLayoutTransition} from './config.js';
 
-const EXCLUDED = new Set(['layout-transition', 'layout-transition-duration', 'layout-transition-request', 'preferences-target', 'launcher-layout-undo', 'saved-layouts', 'previous-layout', 'layout-baseline', 'shortcut-overrides', 'known-indicators', 'show-settings', 'preferences-bar', 'preferences-group', 'group-preview', 'edit-mode']);
+const EXCLUDED = new Set(['layout-transition', 'layout-transition-duration', 'layout-transition-request', 'preferences-target', 'launcher-layout-undo', 'saved-layouts', 'previous-layout', 'layout-baseline', 'shortcut-overrides', 'known-indicators', 'show-settings', 'preferences-bar', 'preferences-group', 'group-preview', 'edit-mode', 'preview-login-animation']);
 
 const hasBaseline = settings => Boolean(settings.settings_schema?.has_key?.('layout-baseline'));
 
