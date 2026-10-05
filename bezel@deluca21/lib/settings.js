@@ -131,6 +131,8 @@ export class SettingsWindow {
             this._queueRefresh();
         });
         this.window.connect('close-request', () => {
+            this._closed = true;
+            this._cancelScrollHold();
             this._closeItemPopover();
             settings.disconnect(this.changed);
             settings.set_int('preferences-bar', -1);
@@ -407,25 +409,29 @@ export class SettingsWindow {
         this._holdScroll(position, false);
     }
 
+    _cancelScrollHold() {
+        if (this._scrollIdle) GLib.source_remove(this._scrollIdle);
+        this._scrollIdle = 0;
+        if (this._scrollWatch) this.editorScroll.vadjustment.disconnect(this._scrollWatch);
+        this._scrollWatch = 0;
+    }
+
     _holdScroll(position, revealEnd) {
+        this._cancelScrollHold();
+        if (this._closed) return;
         const adjustment = this.editorScroll.vadjustment;
-        if (this._scrollWatch) {
-            adjustment.disconnect(this._scrollWatch);
-            this._scrollWatch = 0;
-        }
         const apply = () => {
             const max = Math.max(0, adjustment.upper - adjustment.page_size);
             adjustment.value = revealEnd ? max : Math.min(position, max);
         };
         this._scrollWatch = adjustment.connect('notify::upper', apply);
-        GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+        this._scrollIdle = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            this._scrollIdle = 0;
             apply();
-            GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            this._scrollIdle = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                this._scrollIdle = 0;
                 apply();
-                if (this._scrollWatch) {
-                    adjustment.disconnect(this._scrollWatch);
-                    this._scrollWatch = 0;
-                }
+                this._cancelScrollHold();
                 return GLib.SOURCE_REMOVE;
             });
             return GLib.SOURCE_REMOVE;

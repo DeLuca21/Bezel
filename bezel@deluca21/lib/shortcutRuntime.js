@@ -17,7 +17,7 @@ function action(bar, name, run) {
     if (b.get_child() instanceof St.Label) b.get_child().clutter_text.ellipsize = Pango.EllipsizeMode.END;
     b.connect('clicked', run); return b;
 }
-const fileFor = path => Gio.File.new_for_path(path.startsWith('~/') ? `${GLib.get_home_dir()}/${path.slice(2)}` : path);
+const fileFor = path => Gio.File.new_for_path(path === '~' ? GLib.get_home_dir() : path.startsWith('~/') ? `${GLib.get_home_dir()}/${path.slice(2)}` : path);
 const launch = file => Gio.AppInfo.launch_default_for_uri(file.get_uri(), global.create_app_launch_context(global.get_current_time(), -1));
 function shortcutIcon(item, size) {
     const app = item?.type === 'app' ? Shell.AppSystem.get_default().lookup_app(item.target) : null;
@@ -95,7 +95,7 @@ export function liveFolder(bar, path) {
     const area = new St.Widget({layout_manager: new Clutter.BinLayout(), x_expand: true, reactive: true, can_focus: true}); area.add_child(scroll); root.add_child(area); root.add_child(status);
     const cancel = new Gio.Cancellable(), home = fileFor(path), history = [], selected = new Set();
     let current = home, monitor = null, queued = 0, generation = 0, disposed = false, pasting = false, items = [], tiles = [], last = -1, menu = null;
-    let lastLayout = '', relayout = 0;
+    let lastLayout = '', relayout = 0, refreshCancel = null;
     const onMenu = actor => Boolean(menu && actor && (menu.actor === actor || menu.actor.contains(actor) || menu.box.contains(actor)));
     const closeMenu = () => { if (!menu) return; const closing = menu; menu = null; closing.close(); if (!disposed) area.grab_key_focus(); };
     let viewMode = loadFileView('folder');
@@ -107,12 +107,13 @@ export function liveFolder(bar, path) {
         St.Clipboard.get_default().set_content(St.ClipboardType.CLIPBOARD, 'x-special/gnome-copied-files', new TextEncoder().encode(`copy\n${uris.join('\n')}`)); status.text = `${uris.length} copied`; };
     const paste = () => {
         if (pasting) return;
+        pasting = true;
         const destinationFolder = current;
         St.Clipboard.get_default().get_content(St.ClipboardType.CLIPBOARD, 'x-special/gnome-copied-files', async (_clipboard, bytes) => {
             if (disposed) return;
             const uris = (bytes ? new TextDecoder().decode(bytes.get_data?.() ?? bytes) : '').split('\n').slice(1).filter(uri => uri.startsWith('file:'));
-            if (!uris.length) { status.text = 'Copy a file or folder first'; return; }
-            pasting = true; status.text = 'Copying…';
+            if (!uris.length) { pasting = false; status.text = 'Copy a file or folder first'; return; }
+            status.text = 'Copying…';
             try { for (const uri of uris) { const source = Gio.File.new_for_uri(uri); const name = source.get_basename() + (source.get_parent()?.equal(destinationFolder) ? ' (copy)' : ''); await copyFileTree(source, destinationFolder.get_child(name), cancel); }
                 if (!disposed) { status.text = 'Copied'; refresh(); }
             } catch (error) { if (!disposed) status.text = `Copy failed: ${error.message}`; }
@@ -159,15 +160,19 @@ export function liveFolder(bar, path) {
     });
     toolbar.add_child(viewButton);
     const refresh = async () => {
+        refreshCancel?.cancel();
+        const requestCancel = new Gio.Cancellable(); refreshCancel = requestCancel;
         const ticket = ++generation, folder = current; let iterator;
+        const anchorName = items[last]?.get_name();
         const selectedNames = new Set([...selected].map(i => items[i]?.get_name()));
         try {
-            iterator = await enumerate(folder, cancel); const files = []; let batch;
-            while (files.length < 1000 && (batch = await next(iterator, cancel)).length) files.push(...batch);
+            iterator = await enumerate(folder, requestCancel); const files = []; let batch;
+            while (files.length < 1000 && (batch = await next(iterator, requestCancel)).length) files.push(...batch);
             if (disposed || ticket !== generation) return;
             const available = Math.max(100, area.width || root.width || (Number(bar._popupWidth) || 0) - 36 || 320);
             endSelection(); closeMenu(); list.destroy_all_children(); tiles = []; selected.clear();
             items = files.sort((a, b) => (b.get_file_type() === Gio.FileType.DIRECTORY) - (a.get_file_type() === Gio.FileType.DIRECTORY) || a.get_display_name().localeCompare(b.get_display_name())).slice(0, 1000);
+            last = anchorName === undefined ? -1 : items.findIndex(item => item.get_name() === anchorName);
             const listMode = viewMode === 'list';
             const columns = listMode ? 1 : fileGridColumns(available, 6);
             const tileWidth = listMode ? fileListTileWidth(available) : fileGridTileWidth(available, columns);
@@ -232,11 +237,18 @@ export function liveFolder(bar, path) {
             if (!items.length) list.add_child(text(bar, 'Empty folder')); paint();
 
             if (files.length >= 1000) status.text = 'Showing the first 1,000 items';
+            else if (status.text === 'Showing the first 1,000 items') status.text = '';
         } catch (error) { if (!disposed && ticket === generation) status.text = error.message; }
-        finally { iterator?.close_async(GLib.PRIORITY_DEFAULT, null, null); }
+        finally {
+            iterator?.close_async(GLib.PRIORITY_DEFAULT, null, null);
+            if (refreshCancel === requestCancel) refreshCancel = null;
+        }
     };
     const navigate = (file, remember = true) => {
         if (remember && !file.equal(current)) history.push(current);
+        // Old entries must not act on a new directory while its read is pending.
+        endSelection(); list.destroy_all_children(); items = []; tiles = [];
+        if (queued) { GLib.source_remove(queued); queued = 0; }
         current = file; selected.clear(); last = -1; heading.text = file.get_basename() || file.get_parse_name(); status.text = ''; closeMenu(); monitor?.cancel();
         back.reactive = history.length > 0; back.opacity = back.reactive ? 255 : 90; up.reactive = Boolean(file.get_parent());
         try { monitor = file.monitor_directory(Gio.FileMonitorFlags.WATCH_MOVES, cancel); monitor.connect('changed', () => { if (!queued && !disposed) queued = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => { queued = 0; refresh(); return GLib.SOURCE_REMOVE; }); }); } catch {}
@@ -363,7 +375,7 @@ export function liveFolder(bar, path) {
     root.connect('destroy', () => {
         disposed = true; closeMenu(); endSelection(); global.stage.disconnect(keySignal);
         if (popoutWidth && bar._popout) bar._popout.disconnect(popoutWidth);
-        disposed = true; generation++; cancel.cancel(); monitor?.cancel();
+        disposed = true; generation++; cancel.cancel(); refreshCancel?.cancel(); monitor?.cancel();
         if (queued) GLib.source_remove(queued); if (relayout) GLib.source_remove(relayout);
     });
     root._viewMode = () => viewMode;

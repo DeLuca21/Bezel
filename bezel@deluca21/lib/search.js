@@ -1,18 +1,17 @@
 const normalize = value => String(value ?? '').normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase();
+const compareNames = new Intl.Collator(undefined, {sensitivity: 'base'}).compare;
 
-function distance(a, b) {
-    let previous = null;
-    let row = Array.from({length: b.length + 1}, (_, i) => i);
-    for (let i = 0; i < a.length; i++) {
-        const next = [i + 1];
-        for (let j = 0; j < b.length; j++) {
-            let cost = Math.min(next[j] + 1, row[j + 1] + 1, row[j] + Number(a[i] !== b[j]));
-            if (i > 0 && j > 0 && a[i] === b[j - 1] && a[i - 1] === b[j]) cost = Math.min(cost, previous[j - 1] + 1);
-            next.push(cost);
-        }
-        previous = row; row = next;
-    }
-    return row[b.length];
+// Only one typo is accepted. Avoid allocating a quadratic edit-distance table
+// for every candidate, especially when a long query is pasted into the launcher.
+function withinOneEdit(a, b) {
+    if (Math.abs(a.length - b.length) > 1) return false;
+    let i = 0;
+    while (i < a.length && i < b.length && a[i] === b[i]) i++;
+    if (i === Math.min(a.length, b.length)) return true;
+    if (a.length > b.length) return a.slice(i + 1) === b.slice(i);
+    if (b.length > a.length) return a.slice(i) === b.slice(i + 1);
+    return a.slice(i + 1) === b.slice(i + 1)
+        || (a[i] === b[i + 1] && a[i + 1] === b[i] && a.slice(i + 2) === b.slice(i + 2));
 }
 
 function wordScore(word, text) {
@@ -37,25 +36,47 @@ function wordScore(word, text) {
         }
     }
     if (word.length >= 4) for (const [position, part] of parts.entries()) {
-        if (Math.abs(part.length - word.length) <= 1 && distance(word, part) <= 1)
+        if (Math.abs(part.length - word.length) <= 1 && withinOneEdit(word, part))
             best = Math.min(best, 45 + Math.min(position * 3, 12));
     }
     return best;
 }
 
+function queryMatcher(query) {
+    const normalized = normalize(query).trim();
+    const words = normalized.split(/\s+/).filter(Boolean);
+    return value => {
+        const text = normalize(value);
+        if (normalized === text) return 0;
+        let sum = 0;
+        for (const word of words) {
+            sum += wordScore(word, text);
+            if (!Number.isFinite(sum)) break;
+        }
+        return sum;
+    };
+}
+
 export function matchScore(query, value) {
-    const text = normalize(value);
-    if (normalize(query).trim() === text) return 0;
-    const words = normalize(query).trim().split(/\s+/).filter(Boolean);
-    return words.reduce((sum, word) => sum + wordScore(word, text), 0);
+    return queryMatcher(query)(value);
+}
+
+export function createSearchScorer(query) {
+    const match = queryMatcher(query);
+    return item => {
+        const name = match(item.name);
+        // Keyword results have a minimum score of 60 and cannot beat a name hit.
+        return name < 60 ? name : Math.min(name, 60 + match(`${item.name} ${item.keywords ?? ''}`));
+    };
 }
 
 export function scoreItem(query, item) {
-    return Math.min(matchScore(query, item.name), 60 + matchScore(query, `${item.name} ${item.keywords ?? ''}`));
+    return createSearchScorer(query)(item);
 }
 
 export function filterMatches(query, items) {
-    return items.map(item => ({...item, score: scoreItem(query, item)}))
+    const score = createSearchScorer(query);
+    return items.map(item => ({...item, score: score(item)}))
         .filter(item => Number.isFinite(item.score))
         .sort(compareSearchResults);
 }
@@ -65,7 +86,7 @@ export function compareSearchResults(a, b) {
     const priority = item => item.file ? 6 : item.window ? 2 : 0;
     return (a.score ?? -100) + priority(a) - ((b.score ?? -100) + priority(b))
         || Number(Boolean(a.file)) - Number(Boolean(b.file))
-        || a.name.localeCompare(b.name, undefined, {sensitivity: 'base'})
+        || compareNames(a.name, b.name)
         || String(a.detail ?? '').localeCompare(String(b.detail ?? ''));
 }
 
