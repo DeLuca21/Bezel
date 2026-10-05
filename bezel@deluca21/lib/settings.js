@@ -1465,6 +1465,11 @@ export class SettingsWindow {
         for (const [key, title] of [['dashboard', 'Dashboard'], ['notifications', 'Notifications']]) {
             this.card.append(label(title, 'subheading'));
             this.card.append(this._spotGrid(`${key}-position`));
+            if (key === 'notifications') {
+                this.card.append(this._step('Maximum height (px)', this.settings.get_int('notifications-max-height'), 240, 1600, 40,
+                    value => this.settings.set_int('notifications-max-height', value)));
+                this.card.append(label('Show more history before scrolling. Limited to the available screen height.', 'muted'));
+            }
         }
     }
 

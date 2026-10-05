@@ -232,6 +232,7 @@
       <summary>Dim the desktop behind the power menu</summary>
     </key>
     <key name="dashboard-position" type="s"><default>'icon'</default><summary>Dashboard drawer position</summary></key>
+    <key name="notifications-max-height" type="i"><default>480</default><range min="240" max="1600"/><summary>Maximum notification history height in pixels</summary></key>
     <key name="notifications-position" type="s"><default>'top-right'</default><summary>Notification history and arrival position</summary></key>
     <key name="weather-dashboard" type="b"><default>true</default><summary>Show weather on dashboard</summary></key>
     <key name="weather-clock" type="b"><default>false</default><summary>Show weather beside clock</summary></key>
