@@ -3911,7 +3911,8 @@ class Bar {
         });
         scroll.clip_to_allocation = true;
         scroll.set_child(content);
-        this._popupBox.add_child(decorateScroll(scroll, this._theme, false));
+        this._popupBox.add_child(decorateScroll(scroll, this._theme, false,
+            () => this._popoutId === 'dashboard' && Boolean(this._dashboardPageMotion || this._dashboardSizeTimeline)));
         this._popupFooter = content._bezelFooter ?? null;
         if (this._popupFooter) this._popupBox.add_child(this._popupFooter);
         this._popupScroll = scroll;
@@ -4156,6 +4157,10 @@ class Bar {
         if (this._dashboardSizeTimeline && this._dashboardSizeTarget?.width === width
             && this._dashboardSizeTarget?.height === height)
             return;
+        // A zero-duration remesure while the morph is still running snaps the
+        // last few pixels and reads as a bounce on short pages.
+        if (!duration && this._dashboardSizeTimeline)
+            return;
         this._dashboardSizeTimeline?.stop();
         this._dashboardSizeTimeline = null;
         this._dashboardSizeTarget = {width, height};
@@ -4164,10 +4169,6 @@ class Bar {
         const paint = progress => {
             if (!this._popout) return;
             this._popout.width = fromWidth + (width - fromWidth) * progress;
-            // Prevent an incoming wider page from allocating the header at its
-            // final width before the animated viewport has reached that width.
-            if (this._popoutId === 'dashboard' && this._popupContent)
-                this._popupContent.width = Math.max(1, this._popout.width - 36);
             this._applyPopupHeight(fromHeight + (height - fromHeight) * progress);
         };
         if (!duration || !allowsMotion(St.Settings.get(), St.ReducedMotion)) {
@@ -4273,8 +4274,18 @@ class Bar {
         const wanted = Math.max(minHeight, extent + pad + chrome + footer + slack);
         if (measureOnly)
             return this._popupHeightLimit(scrolling ? Math.min(wanted, cap) : wanted);
-        if (this._dashboardSizeTimeline)
+        if (this._dashboardSizeTimeline || this._dashboardPageMotion)
             return;
+        if (this._popoutId === 'dashboard') {
+            const height = this._popupHeightLimit(scrolling ? Math.min(wanted, cap) : wanted);
+            const width = this._popupWidth ?? this._popout.width;
+            if (this._dashboardSizeTarget
+                && Math.abs(this._dashboardSizeTarget.height - height) < 2
+                && Math.abs(this._dashboardSizeTarget.width - width) < 2)
+                return;
+            this._setDashboardSize(width, height, 0);
+            return;
+        }
         this._setPopupHeight(scrolling ? Math.min(wanted, cap) : wanted);
         if (scrolling && this._popoutId !== 'launcher' && wanted > cap + 8)
             this._popupLockedHeight = true;

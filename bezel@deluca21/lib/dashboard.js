@@ -15,6 +15,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 const UNIT = 272;
 const GAP = 12;
+const PAGE_GUTTER = 48;
 const text = (theme, value, size = 14, muted = false) => new St.Label({text: value,
     x_align: Clutter.ActorAlign.CENTER, style: `color: ${muted ? theme.muted : theme.fg}; font-size: ${size}px;`});
 const column = () => new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 10px;', x_expand: true});
@@ -30,7 +31,10 @@ export function buildDashboard(bar) {
     let editing = false;
     const root = column();
     const tabs = new St.BoxLayout({style: `spacing: 8px; border-bottom: 1px solid ${theme.border}; padding-bottom: 10px;`});
-    const stage = new St.Widget({layout_manager: new Clutter.BinLayout(), x_expand: true});
+    const stage = new St.Widget({layout_manager: new Clutter.BinLayout(), x_expand: true,
+        y_expand: false, y_align: Clutter.ActorAlign.START});
+    root.y_expand = false;
+    root.y_align = Clutter.ActorAlign.START;
     const tabHeader = new St.BoxLayout({style: 'spacing: 8px;', x_expand: false, x_align: Clutter.ActorAlign.CENTER});
     const tabScroll = new St.ScrollView({name: 'bezel-dashboard-tabs', hscrollbar_policy: St.PolicyType.AUTOMATIC,
         vscrollbar_policy: St.PolicyType.NEVER, width: 1, x_expand: false});
@@ -61,12 +65,21 @@ export function buildDashboard(bar) {
     let highlightProgress = 1;
     let pageDuration = 0;
     let pageTimeline = null;
+    let frameLock = null;
+    let motionGen = 0;
     let closed = false;
+    const unlockFrame = gen => {
+        if (gen != null && gen !== motionGen) return;
+        frameLock = null;
+        bar._dashboardPageMotion = false;
+        bar._popupScroll?.get_parent?.()?._bezelSyncOverflow?.();
+    };
     root._stopDashboardMotion = () => {
         pageTimeline?.stop();
         highlightTimeline?.stop();
         pageTimeline = highlightTimeline = null;
         pageDuration = 0;
+        unlockFrame();
     };
     const syncHighlight = () => {
         if (closed) return;
@@ -101,20 +114,48 @@ export function buildDashboard(bar) {
         });
         timeline.start();
     };
-    // ScrollView minimum sizes can exceed the animated viewport while two pages
-    // coexist. Anchor the header to the actual drawer, not that allocation.
+    // Two pages can make the scroll content wider than the frame. Anchor the
+    // tabs and the page stack to the drawer without relayout on each frame.
+    let framing = false;
+    // The drawer's x is updated before descendant transforms. The scroll
+    // viewport stays in the same snapshot as the tabs and pages.
+    const viewportCenter = () => {
+        const viewport = bar._popupScroll;
+        if (!viewport?.get_stage?.()) return null;
+        const [x] = viewport.get_transformed_position();
+        const [width] = viewport.get_transformed_size();
+        if (!(width > 0) || !Number.isFinite(x)) return null;
+        return x + width / 2;
+    };
     const centerHeader = () => {
-        if (closed || !bar._popout || !tabHeader.get_stage() || tabHeader.width <= 0) return;
+        const center = viewportCenter();
+        if (center == null || !tabHeader.get_stage() || tabScroll.width <= 0) return;
         const [x] = tabScroll.get_transformed_position();
-        const desired = bar._popout.x + bar._popout.width / 2;
-        const offset = desired - (x + tabScroll.width / 2);
+        const offset = center - (x + tabScroll.width / 2);
         if (Number.isFinite(offset) && Math.abs(offset) > 0.01)
             tabHeader.translation_x += offset;
     };
-    root._syncDashboardHeader = centerHeader;
-    root.connect('notify::allocation', centerHeader);
-    tabHeader.connect('notify::allocation', centerHeader);
-    tabScroll.connect('notify::allocation', centerHeader);
+    const centerPages = () => {
+        const center = viewportCenter();
+        if (center == null || !stage.get_stage()) return;
+        const [x] = stage.get_transformed_position();
+        const [width] = stage.get_transformed_size();
+        if (!(width > 0)) return;
+        const offset = center - (x + width / 2);
+        if (Number.isFinite(offset) && Math.abs(offset) > 0.01)
+            stage.translation_x += offset;
+    };
+    const syncFrame = () => {
+        if (framing || closed || !bar._popout) return;
+        framing = true;
+        centerHeader();
+        centerPages();
+        framing = false;
+    };
+    root._syncDashboardHeader = syncFrame;
+    root.connect('notify::allocation', syncFrame);
+    tabHeader.connect('notify::allocation', syncFrame);
+    tabScroll.connect('notify::allocation', syncFrame);
     tabScroll.hadjustment.connectObject('notify::value', syncHighlight, root);
     const reader = metricsReader();
     const disposeView = view => {
@@ -129,6 +170,8 @@ export function buildDashboard(bar) {
         pageTimeline = null;
         highlightTimeline?.stop();
         highlightTimeline = null;
+        unlockFrame();
+        bar._cancel('_dashboardUnlock');
         for (const view of stage.get_children())
             disposeView(view);
         // Cancelling a gesture can reflow once; cancel its tab-scroll callback
@@ -151,8 +194,12 @@ export function buildDashboard(bar) {
         view.width = width - 36;
         view.x_expand = false;
         view.x_align = Clutter.ActorAlign.CENTER;
-        view.y_expand = false;
+        // A child that does not expand is centered on both axes, and the
+        // height request is what stops a shorter page being squashed into the
+        // frame while that frame is still the previous page's height.
+        view.y_expand = true;
         view.y_align = Clutter.ActorAlign.START;
+        view.clip_to_allocation = true;
         const headerWidth = Math.min(...pages.map(page => pageWidth(pageColumns(layout[page.id] ?? []))));
         const editWidth = edit.get_stage() ? edit.get_preferred_width(-1)[1] : 30;
         headerBalance.width = editWidth;
@@ -161,7 +208,13 @@ export function buildDashboard(bar) {
         tabHeader.width = tabScroll.width + editWidth * 2 + 16;
         // Building an incoming page must not resize the visible outgoing page.
         if (!view.get_stage() || id !== current) return;
+        // A later remesure at the end of the slide snaps the frame by a few
+        // pixels. Keep the size that started the animation.
+        if (frameLock) return;
         view._preparePage?.();
+        const [, pageHeight] = view.get_preferred_height(Math.max(1, view.width));
+        if (pageHeight > 0)
+            view.height = Math.ceil(pageHeight);
         bar._later('_dashboardTabScroll', 20, () => {
             const button = buttons.get(id);
             const adjustment = tabScroll.hadjustment;
@@ -183,7 +236,13 @@ export function buildDashboard(bar) {
         bar._popupLockedHeight = false;
         const height = bar._fitPopup(true, width);
         for (const child of others) child.show();
-        if (Number.isFinite(height)) bar._setDashboardSize(width, height, pageDuration);
+        if (Number.isFinite(height)) {
+            if (pageDuration) {
+                frameLock = {width, height};
+                bar._dashboardPageMotion = true;
+            }
+            bar._setDashboardSize(width, height, pageDuration);
+        }
     };
     const fill = (id, host, updates, cleanups) => {
         host._dashPage = true;
@@ -337,6 +396,8 @@ export function buildDashboard(bar) {
                 editor.later = global.compositor.get_laters().add(Meta.LaterType.IDLE, () => {
                     editor.later = 0;
                     host._preparePage();
+                    if (frameLock)
+                        return GLib.SOURCE_REMOVE;
                     sizePage(host, id);
                     if (!animate || editor.floating || !allowsMotion(St.Settings.get(), St.ReducedMotion))
                         return GLib.SOURCE_REMOVE;
@@ -449,6 +510,9 @@ export function buildDashboard(bar) {
         for (const page of stage.get_children()) page._dashUpdates?.stop();
         pageTimeline?.stop();
         pageTimeline = null;
+        frameLock = null;
+        motionGen += 1;
+        bar._dashboardPageMotion = false;
         const view = column();
         const cleanups = [];
         const updates = pageUpdates(bar, reader);
@@ -482,28 +546,33 @@ export function buildDashboard(bar) {
             return;
         }
         const dir = order().indexOf(id) >= order().indexOf(current) ? 1 : -1;
-        const width = Math.max(80, pageWidth(pageColumns(layout[id] ?? [])) - 36);
-        view.translation_x = dir * width;
         stage.add_child(view);
         current = id;
         sizePage(view, id);
         moveHighlight(pageDuration);
+        // Both pages are centered in the same bin. Slide by the average width
+        // plus a gutter so the cards stay adjacent without sitting flush.
+        const distance = (Math.max(80, previous.width) + Math.max(80, view.width)) / 2 + PAGE_GUTTER;
         const from = previous.translation_x;
+        view.translation_x = from + dir * distance;
         const timeline = new Clutter.Timeline({duration: Math.max(1, pageDuration), actor: stage});
         pageTimeline = timeline;
         timeline.set_progress_mode(Clutter.AnimationMode.EASE_OUT_CUBIC);
         timeline.connect('new-frame', () => {
             const progress = timeline.get_progress();
-            previous.translation_x = from + (-dir * width - from) * progress;
-            view.translation_x = dir * width * (1 - progress);
+            previous.translation_x = from + (-dir * distance - from) * progress;
+            view.translation_x = (from + dir * distance) * (1 - progress);
         });
         timeline.connect('completed', () => {
             pageTimeline = null;
             view.translation_x = 0;
             disposeView(previous);
             pageDuration = 0;
-            if (!view._dashDisposed && current === id)
-                sizePage(view, id);
+            const gen = motionGen;
+            if (bar._dashboardSizeTimeline)
+                bar._dashboardSizeTimeline.connect('completed', () => unlockFrame(gen));
+            else
+                bar._later('_dashboardUnlock', 0, () => unlockFrame(gen));
         });
         timeline.start();
         current = id;

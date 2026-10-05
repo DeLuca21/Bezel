@@ -5,7 +5,7 @@ import {hexToRgba} from './theme.js';
 
 // St's overlay scrollbars paint under opaque children and show on 1px overflow.
 // Hide them and put a fade + thumb on top so you can still tell the list moves.
-export function decorateScroll(scroll, theme, showThumb = true) {
+export function decorateScroll(scroll, theme, showThumb = true, suppressOverflow = () => false) {
     scroll.add_style_class_name('bezel-popout-scroll');
     scroll.overlay_scrollbars = true;
     scroll.hscrollbar_policy = St.PolicyType.NEVER;
@@ -60,7 +60,9 @@ export function decorateScroll(scroll, theme, showThumb = true) {
         const value = adj.value;
         if (!Number.isFinite(upper) || !Number.isFinite(page) || !Number.isFinite(value))
             return;
-        const overflow = upper > page + 2;
+        // A page transition temporarily keeps both pages in the scroll view.
+        // Their combined extent is not user-scrollable overflow.
+        const overflow = !suppressOverflow() && upper > page + 2;
         overlay.visible = overflow;
         if (!overflow)
             return;
