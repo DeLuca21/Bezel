@@ -3909,10 +3909,9 @@ class Bar {
             vscrollbar_policy: id === 'dashboard' || id === 'shelf' || String(id).startsWith('group:') ? St.PolicyType.AUTOMATIC : St.PolicyType.NEVER,
             x_expand: true, y_expand: true,
         });
-        const menu = this._menuPopup(id);
         scroll.clip_to_allocation = true;
         scroll.set_child(content);
-        this._popupBox.add_child(decorateScroll(scroll, this._theme, !menu));
+        this._popupBox.add_child(decorateScroll(scroll, this._theme, false));
         this._popupFooter = content._bezelFooter ?? null;
         if (this._popupFooter) this._popupBox.add_child(this._popupFooter);
         this._popupScroll = scroll;
