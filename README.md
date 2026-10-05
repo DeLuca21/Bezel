@@ -95,16 +95,6 @@ rm -rf /tmp/bezel-install
 
 Log out and back in. The first time, enable **Bezel** in Extensions. Wayland loads extension JavaScript at login, so an update needs that logout too. About in Bezel settings can run these commands after showing them for confirmation.
 
-To install changes from this checkout into your local extension, run:
-
-```sh
-python3 scripts/install-local.py
-```
-
-The installer backs up the previous extension under `.backups/`, compiles schemas,
-and verifies that the installed files match the workspace. Saved GNOME settings
-are preserved. On Wayland, log out and back in to load the updated JavaScript.
-
 ---
 
 ## 🔧 Preferences
