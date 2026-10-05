@@ -14,7 +14,7 @@ import Soup from 'gi://Soup?version=3.0';
 import {readBars, saveBars, barGroups, groupAppearance, barAppearancePreset, isSpacer, spacerLabel, applyPreset, presetBars, EDGES, DATE_FORMATS, barDateFormat, barTimeFormat, settingChoice, settingFlag, MODULE_SWITCHES, switchOn, hoverEnabled, sliderLayout, powerLayout, powerDim, PANEL_MODULES, hexColor} from './config.js';
 import {PRESETS, resolveTheme} from './theme.js';
 import {layoutPreview} from './layoutPreview.js';
-import {savedLayouts, saveLayout, restoreLayout, deleteLayout, matchingLayout, layoutIsClean, captureCleanLayout, rememberLayout, noteRevertedLayout} from './profiles.js';
+import {savedLayouts, saveLayout, restoreLayout, deleteLayout, matchingLayout, nextLayoutName, layoutIsClean, captureCleanLayout, rememberLayout, noteRevertedLayout} from './profiles.js';
 import {LOGOS} from './logos.js';
 import {MODULES, addBar, removeBar, addModule, removeModule, patchBar, setFloating, setKind,
     createGroup, deleteGroup, assignGroup, resizeSpacer, reorderModule, moveModule, undoPreset, setCustomColor, patchModule, patchGroup,
@@ -1527,7 +1527,7 @@ export class SettingsWindow {
         for (const [key, title] of [['edge-panels', 'Top edge opens dashboard'], ['power-hover', 'Bottom edge opens power']])
             this.card.append(this._toggle(title, this.settings.get_boolean(key), value => this.settings.set_boolean(key, value)));
         this.card.append(this._step('Hover delay (ms)', this.settings.get_int('hover-delay'), 100, 1000, 50, value => this.settings.set_int('hover-delay', value)));
-        this.card.append(this._step('Animation (ms)', this.settings.get_int('animation-duration'), 0, 800, 20, value => this.settings.set_int('animation-duration', value)));
+        this.card.append(this._step('Drawer & autohide duration (ms)', this.settings.get_int('animation-duration'), 0, 800, 20, value => this.settings.set_int('animation-duration', value)));
         const motion = this.settings.get_string('layout-transition');
         this.card.append(this._segments([['none', 'Off'], ['fade', 'Fade'], ['retreat', 'Retreat']], ['none', 'fade', 'retreat'].includes(motion) ? motion : 'fade', value => this.settings.set_string('layout-transition', value)));
         this.card.append(this._step('Layout transition (ms)', this.settings.get_int('layout-transition-duration'), 0, 1600, 40, value => this.settings.set_int('layout-transition-duration', value)));
@@ -1828,8 +1828,7 @@ export class SettingsWindow {
         this._captureCleanLayout();
         if (layoutIsClean(this.settings)) { action(); return; }
         const dialog = new Adw.AlertDialog({heading: 'Keep your layout changes?', body: 'Save your current layout before switching, or discard the unsaved changes.'});
-        let n = 1; while (savedLayouts(this.settings).some(profile => profile.name === `Layout ${n}`)) n++;
-        const entry = new Gtk.Entry({text: `Layout ${n}`, max_length: 80}); dialog.extra_child = entry;
+        const entry = new Gtk.Entry({text: nextLayoutName(this.settings), max_length: 80}); dialog.extra_child = entry;
         dialog.add_response('cancel', 'Cancel'); dialog.add_response('discard', 'Discard changes'); dialog.add_response('save', 'Save and switch');
         dialog.close_response = 'cancel'; dialog.default_response = 'save';
         dialog.set_response_appearance('discard', Adw.ResponseAppearance.DESTRUCTIVE); dialog.set_response_appearance('save', Adw.ResponseAppearance.SUGGESTED);

@@ -17,15 +17,21 @@ function cornerCutsOverlap(a, b, openingWidth, openingHeight) {
 
 function drawerOverlapsCorner(popup, notification, opening) {
     const sides = opening.sides ?? {left: 0, top: 0, right: 0, bottom: 0};
-    const aw = popup.width ?? 0;
-    const ah = (popup.height ?? 0) * Math.max(0, popup.progress ?? 1);
+    const progress = Math.max(0, Math.min(1, popup.progress ?? 1));
+    const horizontal = popup.edge === 'left' || popup.edge === 'right';
+    const aw = (popup.width ?? 0) * (horizontal ? progress : 1);
+    const ah = (popup.height ?? 0) * (horizontal ? 1 : progress);
+    // Match the drawer clip: right/bottom drawers reveal from their far edge.
+    const ax = popup.x + (popup.edge === 'right' ? (popup.width ?? 0) - aw : 0);
+    const ay = popup.y + (popup.edge === 'bottom' ? (popup.height ?? 0) - ah : 0);
     const bw = notification.width ?? 0;
     const bh = (notification.height ?? 0) * Math.max(0, notification.progress ?? 1);
     const left = notification.corner?.endsWith('left');
     const bottom = notification.edge === 'bottom' || notification.corner?.startsWith('bottom');
     const bx = left ? sides.left : sides.left + opening.w - bw;
     const by = bottom ? sides.top + opening.h - bh : sides.top;
-    return !(popup.x + aw <= bx || bx + bw <= popup.x || popup.y + ah <= by || by + bh <= popup.y);
+    return aw > 0 && ah > 0 && bh > 0 && bw > 0
+        && !(ax + aw <= bx || bx + bw <= ax || ay + ah <= by || by + bh <= ay);
 }
 
 // A joined banner is a hole in the frame. When another joined drawer already
@@ -49,8 +55,18 @@ export function frameRegions(width, height, sides, padding, popup = null, notifi
     const bottom = Math.min(height - top, Math.ceil(sides.bottom + padding));
     const left = Math.min(width, Math.ceil(sides.left + padding));
     const right = Math.min(width - left, Math.ceil(sides.right + padding));
-    let fixed = [[0, 0, width, top], [0, height - bottom, width, bottom],
-        [0, top, left, height - top - bottom], [width - right, top, right, height - top - bottom]];
+    // Split corners from edges so a reveal only dirties its edge and two corners.
+    // `sides` describes stable swept bounds, not the current reveal progress.
+    let fixed = [
+        {rect: [left, 0, width - left - right, top], edges: ['top']},
+        {rect: [left, height - bottom, width - left - right, bottom], edges: ['bottom']},
+        {rect: [0, top, left, height - top - bottom], edges: ['left']},
+        {rect: [width - right, top, right, height - top - bottom], edges: ['right']},
+        {rect: [0, 0, left, top], edges: ['left', 'top']},
+        {rect: [width - right, 0, right, top], edges: ['right', 'top']},
+        {rect: [0, height - bottom, left, bottom], edges: ['left', 'bottom']},
+        {rect: [width - right, height - bottom, right, bottom], edges: ['right', 'bottom']},
+    ];
     const patches = [];
     const clip = ([x, y, w, h]) => {
         const x1 = Math.max(0, Math.floor(x)), y1 = Math.max(0, Math.floor(y));
@@ -86,10 +102,10 @@ export function frameRegions(width, height, sides, padding, popup = null, notifi
     };
     let dynamic = [];
     for (const patch of patches) {
-        fixed = fixed.flatMap(rect => subtract(rect, patch));
+        fixed = fixed.flatMap(({rect, edges}) => subtract(rect, patch).map(piece => ({rect: piece, edges})));
         dynamic = dynamic.flatMap(rect => subtract(rect, patch));
         dynamic.push(patch);
     }
-    return [...fixed.map(rect => ({rect, dynamic: false})), ...dynamic.map(rect => ({rect, dynamic: true}))]
+    return [...fixed.map(region => ({...region, dynamic: false})), ...dynamic.map(rect => ({rect, dynamic: true}))]
         .filter(({rect: [, , w, h]}) => w > 0 && h > 0);
 }

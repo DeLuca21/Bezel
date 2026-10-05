@@ -43,13 +43,20 @@ export function monthGrid(theme, activate = openCalendarDate, options = {}) {
     let cellW = 32;
     let cellH = 30;
     let font = 12;
+    let rendered = '';
     const render = () => {
+        const currentDate = GLib.DateTime.new_now_local().format('%F');
+        const key = `${month.format('%Y-%m')}:${currentDate}:${cellW}:${cellH}:${font}`;
+        if (rendered === key) return;
+        rendered = key;
         title.label = month.format('%B %Y');
         title.style = `font-size: ${font}px;`;
         grid.destroy_all_children();
         const layout = grid.layout_manager;
         ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'].forEach((day, column) => {
-            const heading = new St.Label({text: day, width: cellW, x_align: Clutter.ActorAlign.CENTER, style: `color: ${theme.muted}; font-size: ${font}px;`});
+            // Date buttons set the column width; centre the natural-width label
+            // so St.Label's single-line text cannot sit at the column's left edge.
+            const heading = new St.Label({text: day, x_align: Clutter.ActorAlign.CENTER, style: `color: ${theme.muted}; font-size: ${font}px;`});
             layout.attach(heading, column + (options.weekNumbers ? 1 : 0), 0, 1, 1);
         });
         const start = month.get_day_of_week() - 1;
@@ -60,7 +67,7 @@ export function monthGrid(theme, activate = openCalendarDate, options = {}) {
         const days = month.add_months(1).add_days(-1).get_day_of_month();
         for (let day = 1; day <= days; day++) {
             const date = month.add_days(day - 1);
-            const current = date.format('%F') === today.format('%F');
+            const current = date.format('%F') === currentDate;
             const button = new St.Button({width: cellW, height: cellH, can_focus: true, label: String(day),
                 accessible_name: date.format('%A, %e %B %Y'), style_class: 'bezel-calendar-day',
                 style: `color: ${current ? theme.bg : theme.fg}; font-size: ${font}px; ${current ? `background-color: ${theme.accent};` : ''} border-radius: 8px;`});
@@ -72,7 +79,11 @@ export function monthGrid(theme, activate = openCalendarDate, options = {}) {
     };
     previous.connect('clicked', () => { month = month.add_months(-1); render(); previous.grab_key_focus(); });
     next.connect('clicked', () => { month = month.add_months(1); render(); next.grab_key_focus(); });
-    title.connect('clicked', () => { month = GLib.DateTime.new_local(today.get_year(), today.get_month(), 1, 12, 0, 0); render(); });
+    title.connect('clicked', () => {
+        const current = GLib.DateTime.new_now_local();
+        month = GLib.DateTime.new_local(current.get_year(), current.get_month(), 1, 12, 0, 0);
+        render();
+    });
     box._dashLayout = ({width, height}) => {
         if (!height) {
             cellW = 32;
@@ -80,7 +91,7 @@ export function monthGrid(theme, activate = openCalendarDate, options = {}) {
             font = 12;
         } else {
             cellH = Math.max(18, Math.min(64, Math.round((height - 36) / 7)));
-            cellW = Math.max(18, Math.min(64, Math.round(Math.min(cellH * 1.08, Math.max(18, (width - 8) / 7)))));
+            cellW = Math.max(18, Math.min(64, Math.round(Math.min(cellH * 1.08, Math.max(18, (width - 8) / (options.weekNumbers ? 8 : 7))))));
             font = Math.max(10, Math.min(18, Math.round(cellH * 0.42)));
         }
         render();

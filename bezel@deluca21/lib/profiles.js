@@ -60,6 +60,13 @@ export function savedLayouts(settings) {
     } catch { return []; }
 }
 
+export function nextLayoutName(settings) {
+    const names = new Set(savedLayouts(settings).map(profile => profile.name));
+    let n = 1;
+    while (names.has(`Layout ${n}`)) n++;
+    return `Layout ${n}`;
+}
+
 export function layoutValues(settings) {
     return Object.fromEntries(settings.settings_schema.list_keys().filter(key => !EXCLUDED.has(key)).sort().map(key => {
         const value = settings.get_value(key);

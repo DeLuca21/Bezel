@@ -120,7 +120,7 @@ export class BezelOverlay {
     }
 
     queueRebuild() {
-        if (this._holdRebuild)
+        if (this._destroyed || this._holdRebuild)
             return;
         if (this._rebuildId)
             GLib.source_remove(this._rebuildId);
@@ -140,6 +140,7 @@ export class BezelOverlay {
     }
 
     skipRebuild(fn) {
+        if (this._destroyed) return;
         this._holdRebuild = true;
         if (this._rebuildId) {
             GLib.source_remove(this._rebuildId);
@@ -148,7 +149,9 @@ export class BezelOverlay {
         try {
             fn();
         } finally {
-            GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            if (this._holdRebuildId) GLib.source_remove(this._holdRebuildId);
+            this._holdRebuildId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                this._holdRebuildId = 0;
                 if (this._rebuildId) {
                     GLib.source_remove(this._rebuildId);
                     this._rebuildId = 0;
@@ -449,7 +452,12 @@ export class BezelOverlay {
     }
 
     destroy() {
+        if (this._destroyed) return;
+        this._destroyed = true;
         this._layoutTransition.cancel();
+        if (this._holdRebuildId)
+            GLib.source_remove(this._holdRebuildId);
+        this._holdRebuildId = 0;
         if (this._rebuildId)
             GLib.source_remove(this._rebuildId);
         if (this._id)
@@ -2541,6 +2549,7 @@ class Bar {
         this._shown = show;
         if (this._joinedAutohide) {
             this._revealTimeline?.stop();
+            this._revealTimeline = null;
             const from = this._revealProgress ?? 0;
             const target = show ? 1 : 0;
             const frame = this._overlay._frames.get(this._monitor.index);
@@ -2587,7 +2596,7 @@ class Bar {
         const scaleY = !this._vertical && !show ? 0 : 1;
         this._actor.remove_all_transitions();
         this._actor.show();
-        if (!animate || !allowsMotion(St.Settings.get(), St.ReducedMotion)) {
+        if (!animate || !this._state.animationDuration || !allowsMotion(St.Settings.get(), St.ReducedMotion)) {
             this._actor.set_scale(scaleX, scaleY);
             this._actor.opacity = show ? 255 : 0;
             this._overlay.relayoutPopups(this._monitor.index, true);
@@ -2595,8 +2604,10 @@ class Bar {
         }
         this._actor.ease({
             scale_x: scaleX, scale_y: scaleY, opacity: show ? 255 : 0,
-            duration: 220, mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
-            onComplete: () => this._overlay.relayoutPopups(this._monitor.index, true),
+            duration: this._state.animationDuration, mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
+            onComplete: () => {
+                if (!this._destroyed) this._overlay.relayoutPopups(this._monitor.index, true);
+            },
         });
         this._overlay.relayoutPopups(this._monitor.index);
     }
@@ -2919,8 +2930,10 @@ class Bar {
             }
             faces.push(face);
         }
-        if (faces.length === 1)
+        if (faces.length === 1) {
+            this._wire(faces[0]);
             return faces[0];
+        }
         const box = new St.BoxLayout({
             orientation: this._content.orientation,
             x_align: Clutter.ActorAlign.CENTER, style: 'spacing: 6px;',
@@ -3001,8 +3014,10 @@ class Bar {
             const seconds = (sharedClock ? sharedClock.showSeconds : item.options?.showSeconds) ?? clockBar?.clockSeconds === true;
             const update = () => { value.text = GLib.DateTime.new_now_local().format(id === 'date' ? DATE_FORMATS[barDateFormat(clockBar, this._overlay._settings)].format : timePattern(twelve, seconds)) || ''; return GLib.SOURCE_CONTINUE; };
             update();
-            const timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, update);
-            this._popupCleanups.push(() => GLib.source_remove(timer));
+            let timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, update);
+            const stop = () => { if (timer) GLib.source_remove(timer); timer = 0; };
+            this._popupCleanups.push(stop);
+            root.connect('destroy', stop);
             return root;
         }
         if (id === 'calendar') return this._monthGrid(features);
@@ -3258,8 +3273,15 @@ class Bar {
             child: row,
             x_align: Clutter.ActorAlign.CENTER,
         });
+        let watchedWindow = null;
+        let titleSignal = 0;
         const paint = () => {
             const win = global.display.focus_window;
+            if (watchedWindow !== win) {
+                if (titleSignal) watchedWindow.disconnect(titleSignal);
+                watchedWindow = win;
+                titleSignal = win?.connect('notify::title', paint) ?? 0;
+            }
             const app = win ? Shell.WindowTracker.get_default().get_window_app(win) : null;
             icon.gicon = app?.get_app_info()?.get_icon() ?? null;
             const text = win?.get_title() ?? '';
@@ -3272,6 +3294,11 @@ class Bar {
         };
         paint();
         this._signals.push([global.display, global.display.connect('notify::focus-window', paint)]);
+        button.connect('destroy', () => {
+            if (titleSignal) watchedWindow.disconnect(titleSignal);
+            titleSignal = 0;
+            watchedWindow = null;
+        });
         button._activate = () => global.display.focus_window?.activate(global.get_current_time());
         button.connect('button-press-event', (_actor, event) => {
             if (event.get_button() !== 3)
@@ -3306,18 +3333,33 @@ class Bar {
         const refresh = () => {
             if (this._popoutId?.startsWith('app:'))
                 this._close();
-            box.destroy_all_children();
-            const ids = [...this._state.pinned];
+            const ids = [...new Set(this._state.pinned)];
             if (this._state.runningApps) {
                 for (const app of system.get_running()) {
                     if (app.get_id() && !ids.includes(`app:${app.get_id()}`))
                         ids.push(`app:${app.get_id()}`);
                 }
             }
-            for (const id of ids) {
+            const existing = new Map(box.get_children().map(button => [button._bezelAppId, button]));
+            const wanted = new Set(ids);
+            let changed = false;
+            for (const [id, button] of existing) {
+                if (!wanted.has(id)) { button.destroy(); changed = true; }
+            }
+            for (const [index, id] of ids.entries()) {
+                const retained = existing.get(id);
+                if (retained) {
+                    if (box.get_child_at_index(index) !== retained) {
+                        box.set_child_at_index(retained, index);
+                        changed = true;
+                    }
+                    retained._bezelRefreshAppFeedback?.();
+                    continue;
+                }
                 const button = this._app(id, size);
+                changed = true;
                 this._wire(button);
-                box.add_child(button);
+                box.insert_child_at_index(button, index);
                 button._bezelAppId = id;
                 this._dragItem(button, () => box.get_children(), ordered => {
                     const bars = readState(this._overlay._settings).bars;
@@ -3327,7 +3369,7 @@ class Bar {
                     saveBars(this._overlay._settings, bars);
                 });
             }
-            if (this._box)
+            if (changed && this._box)
                 this._place();
         };
         refresh();
@@ -3364,7 +3406,14 @@ class Bar {
         };
         const tracker = Shell.WindowTracker.get_default();
         const focusSignal = tracker.connect('notify::focus-app', updateFeedback);
-        button.connect('destroy', () => tracker.disconnect(focusSignal));
+        button._bezelRefreshAppFeedback = updateFeedback;
+        button.connect('destroy', () => {
+            tracker.disconnect(focusSignal);
+            if (this._appHoverActor === button) {
+                this._cancel('_appHover');
+                this._appHoverActor = null;
+            }
+        });
         button.connect('notify::hover', updateFeedback);
         button.connect('notify::pressed', () => {
             if (!this._state.appPress || !allowsMotion(St.Settings.get(), St.ReducedMotion)) return;
@@ -3392,9 +3441,14 @@ class Bar {
         });
         button.connect('notify::hover', () => {
             this._cancel('_appHover');
-            if (button.hover && !this._state.editMode && this._hoverFor('apps'))
-                this._later('_appHover', this._state.hoverDelay + 150, () => this._open(id, button, () => this._appMenu(id, app), null, true));
-            else
+            this._appHoverActor = null;
+            if (button.hover && !this._state.editMode && this._hoverFor('apps')) {
+                this._appHoverActor = button;
+                this._later('_appHover', this._state.hoverDelay + 150, () => {
+                    this._appHoverActor = null;
+                    this._open(id, button, () => this._appMenu(id, app), null, true);
+                });
+            } else
                 this._closeSoon();
         });
         return button;
@@ -3469,24 +3523,27 @@ class Bar {
                 column.add_child(actor);
         const names = {clock: '', date: ''};
         const clockSettings = new Gio.Settings({schema_id: 'org.gnome.desktop.interface'});
+        // Configuration changes rebuild the bar; do not parse every saved bar each tick.
+        const bar = readBars(this._overlay._settings)[this._index];
+        let lastAppearance = null;
         const paint = () => {
-            const bar = readBars(this._overlay._settings)[this._index];
+            const timestamp = GLib.DateTime.new_now_local();
             const twelve = barTimeFormat(bar, clockSettings.get_string('clock-format')) === '12h';
             const seconds = bar?.modules.find(item => item.id === (this._moduleInstance || 'clock'))?.showSeconds ?? bar?.clockSeconds === true;
             if (ids.includes('clock')) {
-                const shown = (GLib.DateTime.new_now_local().format(timePattern(twelve, seconds)) ?? '').replace(/^0/, '');
-                const hour = (GLib.DateTime.new_now_local().format(twelve ? '%I' : '%H') ?? '').replace(/^0/, '');
+                const shown = (timestamp.format(timePattern(twelve, seconds)) ?? '').replace(/^0/, '');
+                const hour = (timestamp.format(twelve ? '%I' : '%H') ?? '').replace(/^0/, '');
                 time.text = this._vertical ? hour : shown;
-                minute.text = seconds ? `${now('%M')}:${now('%S')}` : now('%M');
+                minute.text = timestamp.format(seconds ? '%M:%S' : '%M') ?? '';
                 minute.visible = this._vertical;
-                ampm.text = twelve ? now('%p').toLowerCase() : '';
+                ampm.text = twelve ? (timestamp.format('%p') ?? '').toLowerCase() : '';
                 ampm.visible = twelve && this._vertical;
                 names.clock = shown;
             }
             if (ids.includes('date')) {
                 const key = barDateFormat(bar, this._overlay._settings);
                 const spec = DATE_FORMATS[key]?.format ?? DATE_FORMATS.medium.format;
-                const text = (GLib.DateTime.new_now_local().format(spec) ?? '').replace(/\s+/g, ' ').trim();
+                const text = (timestamp.format(spec) ?? '').replace(/\s+/g, ' ').trim();
                 if (this._vertical) {
                     const parts = text.split(' ');
                     datePrimary.text = parts[0] ?? '';
@@ -3499,7 +3556,11 @@ class Bar {
                 names.date = text;
             }
             button.accessible_name = [names.clock, names.date].filter(Boolean).join(' · ') || 'Clock';
-            if (this._box) this._place();
+            const appearance = `${names.clock}|${names.date}|${twelve}`;
+            if (appearance !== lastAppearance) {
+                lastAppearance = appearance;
+                if (this._box) this._place();
+            }
         };
         paint();
         if (ids.includes('clock'))
@@ -3586,7 +3647,10 @@ class Bar {
                 icons.battery.visible = services.batteryInfo.present || !values.battery;
             }
         }));
-        const layout = sliderLayout(this._state.modules.find(item => item.id === 'volume'), this._overlay._settings);
+        // Only volume controls use the edge OSD. A standalone Wi-Fi or battery
+        // button must keep its own sidebar anchor and a full-width drawer.
+        const layout = wanted.includes('volume')
+            ? sliderLayout(this._state.modules.find(item => item.id === 'volume'), this._overlay._settings) : 'drawer';
         const openId = layout === 'edge' ? 'osd' : 'status';
         const build = () => {
             if (wanted.length === 1 && (wanted[0] !== 'volume' || layout === 'drawer'))
@@ -3703,7 +3767,7 @@ class Bar {
             location = `bottom-${this._state.edge}`;
         const radius = Math.max(12, this._state.radius);
         const frame = this._overlay._frames.get(monitor.index);
-        if (location === 'icon' && frame)
+        if (location === 'icon' && frame && id !== 'status')
             location = this._snapPopupLocation(monitor, frame.sides, anchor) ?? location;
         edge = location === 'icon' ? (edge ?? this._state.edge) : location.split('-')[0];
         if (!['top', 'bottom', 'left', 'right'].includes(edge)) edge = this._state.edge;
@@ -4012,6 +4076,7 @@ class Bar {
         const height = Math.min(Math.max(64, next), maxHeight);
         // Resize the frame and viewport together. Animating only the outer actor
         // leaves its placement and clip behind the new content allocation.
+        this._popout.remove_transition('height');
         this._popout.height = height;
         this._popupPlate?._bezelSyncPlate?.();
         const scrolling = this._popupScrolls();
@@ -4209,6 +4274,7 @@ class Bar {
 
     _animatePopup(target, complete = null) {
         this._popupTimeline?.stop();
+        this._popupTimeline = null;
         this._popupTarget = target;
         const from = this._popupProgress;
         const duration = allowsMotion(St.Settings.get(), St.ReducedMotion)
@@ -4253,6 +4319,7 @@ class Bar {
         this._popupFrame = null;
         this._popupGeometry = null;
         this._cancel('_appHover');
+        this._appHoverActor = null;
         this._cancel('_hoverWatch');
         this._outsideSince = 0;
         this._cancel('_closeTimer');
@@ -4296,6 +4363,7 @@ class Bar {
         this._popupScroll = null;
         this._launcherEntry = null;
         this._launcherWidget = null;
+        this._dashboardWidget = null;
         if (this._state.autohide)
             this._slideLater();
     }
@@ -4310,7 +4378,7 @@ class Bar {
         return monthGrid(this._theme, date => { if (openCalendarDate(date)) this._close(); }, options);
     }
 
-    _mediaCard(artwork = false, artSize = 84, options = moduleFeatures(this, 'media')) {
+    _mediaCard(artwork = false, artSize = 84, options = moduleFeatures(this, 'media'), cleanups = this._popupCleanups) {
         const services = this._overlay.services;
         const box = card(this._theme);
         const art = new St.Icon({icon_name: 'audio-x-generic-symbolic', icon_size: artSize,
@@ -4391,7 +4459,7 @@ class Bar {
                     button.child.icon_size = Math.max(16, Math.round(22 * factor));
             }
         };
-        this._popupCleanups.push(services.subscribe(() => {
+        const unsubscribe = services.subscribe(() => {
             const media = services.media;
             if (artwork) {
                 art.gicon = media?.artUrl?.startsWith('file://') ? new Gio.FileIcon({file: Gio.File.new_for_uri(media.artUrl)}) : new Gio.ThemedIcon({name: 'audio-x-generic-symbolic'});
@@ -4403,7 +4471,9 @@ class Bar {
             buttons.PlayPause.reactive = Boolean(media?.playing ? media.canPause : media?.canPlay);
             buttons.Previous.reactive = Boolean(media?.canPrevious);
             buttons.Next.reactive = Boolean(media?.canNext);
-        }));
+        });
+        cleanups.push(unsubscribe);
+        box.connect('destroy', unsubscribe);
         return box;
     }
 

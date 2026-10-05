@@ -31,6 +31,7 @@ export class IndicatorBridge {
         this.icons = new Map();
         this.containers = new Map();
         this.verticalLayouts = new Map();
+        this.layouts = new Map();
         this.host = bar._indicatorSlot ?? new St.BoxLayout({
             orientation: bar._content?.orientation ?? (bar._vertical ? Clutter.Orientation.VERTICAL : Clutter.Orientation.HORIZONTAL), style_class: 'bezel-indicators',
             style: `color: ${bar._theme.fg};`, x_align: Clutter.ActorAlign.CENTER,
@@ -263,16 +264,23 @@ export class IndicatorBridge {
     }
 
     compact(actor) {
+        if (!this.layouts.has(actor)) {
+            const saved = {style: actor.get_style?.(), x: actor.x_align, y: actor.y_align,
+                expand: actor.x_expand, margins: [actor.margin_top, actor.margin_bottom, actor.margin_left, actor.margin_right]};
+            saved.destroy = actor.connect('destroy', () => this.layouts.delete(actor));
+            this.layouts.set(actor, saved);
+        }
+        const saved = this.layouts.get(actor);
         actor.x_align = Clutter.ActorAlign.CENTER;
         actor.y_align = Clutter.ActorAlign.CENTER;
         actor.x_expand = false;
-        actor.set_style?.(`${stripColor(actor.get_style?.())}; min-width: 0; min-height: 0; padding: 0; -minimum-hpadding: 0; -natural-hpadding: 0; color: ${this.bar._theme.fg};`);
+        actor.set_style?.(`${stripColor(saved.style)}; min-width: 0; min-height: 0; padding: 0; -minimum-hpadding: 0; -natural-hpadding: 0; color: ${this.bar._theme.fg};`);
     }
 
     spaceChildren() {
         const gap = this.gap();
         for (const spacer of this.host.get_children().filter(child => child._bezelGap))
-            this.host.remove_child(spacer);
+            spacer.destroy();
         const kids = this.host.get_children().filter(child => child.visible && child._bezelRole);
         kids.forEach((child, index) => {
             child.margin_top = child.margin_bottom = child.margin_left = child.margin_right = 0;
@@ -379,6 +387,15 @@ export class IndicatorBridge {
             }
         }
         this.records.clear();
+        for (const [actor, saved] of this.layouts) {
+            actor.disconnect(saved.destroy);
+            actor.set_style?.(saved.style);
+            actor.x_align = saved.x;
+            actor.y_align = saved.y;
+            actor.x_expand = saved.expand;
+            [actor.margin_top, actor.margin_bottom, actor.margin_left, actor.margin_right] = saved.margins;
+        }
+        this.layouts.clear();
         if (this._ownsHost)
             this.host.destroy();
     }
