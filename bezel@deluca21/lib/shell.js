@@ -481,12 +481,11 @@ export class BezelOverlay {
         for (const bar of this._bars) {
             if (bar._monitor.index !== monitorIndex || !bar._popout)
                 continue;
-            if (refit) {
-                bar._popupGeometry = null;
+            // A bar/frame refit must retain the drawer's attachment geometry.
+            // Clearing it makes the next page change recenter a side drawer.
+            if (refit)
                 bar._fitPopup();
-            } else {
-                bar._placePopup();
-            }
+            bar._placePopup();
         }
         if (this._notifications?.monitor?.index === monitorIndex)
             this._notifications.position();
@@ -3034,6 +3033,7 @@ class Bar {
             if (!face) continue;
             if (!direct) {
                 const panel = () => buildGroupPopout(this, group, group.clicks?.[id] === 'tab' ? id : null);
+                face._groupTabModule = group.clicks?.[id] === 'tab' ? id : null;
                 face._activate = () => this._toggle(`group:${group.id}`, face, panel);
                 face.accessible_name = id ? GROUP_ITEMS[moduleType(id)]?.title || id : group.name;
                 this._hoverDrawer(`group:${group.id}`, face, panel, typeof group.hover === 'boolean' ? group.hover : members.some(member => this._hoverFor(member.id)));
@@ -3788,7 +3788,7 @@ class Bar {
             this._cancel(timer);
             if (button.hover && enabled && !this._state.editMode && !Main.overview.visible) {
                 this._later(timer, this._state.hoverDelay, () => {
-                    if (button.hover && !Main.overview.visible && (this._popoutId !== id || this._popoutInstance !== (this._moduleInstance || null)))
+                    if (button.hover && !Main.overview.visible && (this._popoutId !== id || this._popoutInstance !== (this._moduleInstance || null) || String(id).startsWith('group:') && this._anchor !== button))
                         this._open(id, button, build, null, true);
                 });
             } else {
@@ -3798,7 +3798,9 @@ class Bar {
     }
 
     _toggle(id, anchor, build) {
-        if (this._popoutId === id && this._popoutInstance === (this._moduleInstance || null))
+        if (this._popoutId === id && String(id).startsWith('group:') && this._anchor !== anchor)
+            this._open(id, anchor, build);
+        else if (this._popoutId === id && this._popoutInstance === (this._moduleInstance || null))
             this._close(true);
         else
             this._open(id, anchor, build);
@@ -3807,6 +3809,11 @@ class Bar {
     _open(id, anchor, build, edge = null, hover = false) {
         if (this._destroyed)
             return;
+        if (this._popoutId === id && String(id).startsWith('group:')) {
+            this._anchor = anchor;
+            if (anchor?._groupTabModule) this._popupContent?._selectGroupModule?.(anchor._groupTabModule);
+            this._placePopup();
+        }
         if (this._popoutId === id && this._anchor === anchor) {
             if (!hover) { this._hoverPopup = false; this._cancel('_hoverWatch'); }
             this._cancel('_closeTimer');
@@ -3971,7 +3978,7 @@ class Bar {
         chrome(this._popout, true, false);
         content._preparePopup?.();
         const app = String(id).startsWith('app:');
-        const stable = id === 'dashboard' || id === 'osd' || id === 'clock' || id === 'shelf' || rail;
+        const stable = content._preparePopup || id === 'dashboard' || id === 'osd' || id === 'clock' || id === 'shelf' || rail;
         if (!app && !stable) {
             const requestFit = () => {
                 if ((this._popupProgress ?? 0) < 1)
@@ -4157,20 +4164,40 @@ class Bar {
         if (this._dashboardSizeTimeline && this._dashboardSizeTarget?.width === width
             && this._dashboardSizeTarget?.height === height)
             return;
-        // A zero-duration remesure while the morph is still running snaps the
-        // last few pixels and reads as a bounce on short pages.
-        if (!duration && this._dashboardSizeTimeline)
-            return;
         this._dashboardSizeTimeline?.stop();
         this._dashboardSizeTimeline = null;
         this._dashboardSizeTarget = {width, height};
         const fromWidth = this._popout.width;
         const fromHeight = this._popout.height;
+        const from = this._popupGeometry ? {...this._popupGeometry} : null;
+        // Resolve attachment geometry once. Frames only interpolate these
+        // numbers; measuring and placing the whole drawer here causes churn.
+        this._popout.set_size(width, height);
+        this._placePopup();
+        const target = {...this._popupGeometry};
+        const side = ['left', 'right'].includes(this._popupEdge);
+        if (side && from) target.y = from.y;
+        const chromeHeight = this._popupChrome?.height ?? 0;
+        const footerHeight = this._popupFooter?.height ?? 0;
         const paint = progress => {
             if (!this._popout) return;
-            this._popout.width = fromWidth + (width - fromWidth) * progress;
-            this._applyPopupHeight(fromHeight + (height - fromHeight) * progress);
+            const w = fromWidth + (width - fromWidth) * progress;
+            const h = fromHeight + (height - fromHeight) * progress;
+            const x = from ? from.x + (target.x - from.x) * progress : target.x;
+            const y = from ? from.y + (target.y - from.y) * progress : target.y;
+            this._popout.set_size(w, h);
+            this._popout.set_position(x, y);
+            this._popupGeometry = {...target, x, y, width: w, height: h};
+            if (this._popupScrolls() && this._popupScroll) {
+                const room = Math.max(48, h - chromeHeight - footerHeight - 36);
+                this._popupScroll.height = room;
+                this._popupScroll.get_parent().height = room;
+            }
+            this._popupPlate?._bezelSyncPlate?.();
+            this._layoutDismissStrips();
+            this._clipPopup(this._popupProgress);
         };
+        paint(0);
         if (!duration || !allowsMotion(St.Settings.get(), St.ReducedMotion)) {
             paint(1);
             return;
@@ -4182,6 +4209,8 @@ class Bar {
         timeline.connect('completed', () => {
             this._dashboardSizeTimeline = null;
             paint(1);
+            this._layoutDismissStrips();
+            this._popupScroll?.get_parent?.()?._bezelSyncOverflow?.();
         });
         timeline.start();
     }
@@ -4255,6 +4284,7 @@ class Bar {
     _fitPopup(measureOnly = false, targetWidth = null) {
         if (this._popupFitLock || (this._popupLockedHeight && this._popoutId !== 'dashboard') || !this._popout || !this._popupContent)
             return;
+        if (!measureOnly && (this._dashboardSizeTimeline || this._dashboardPageMotion)) return;
         const pad = this._popoutId === 'status' ? 52 : this._popoutId === 'osd' || powerLayout(this._state.modules.find(item => item.id === 'power'), this._overlay._settings) === 'rail' && this._popoutId === 'power' ? 24 : 36;
         const width = Math.max(1, (targetWidth ?? this._popout.width) - pad);
         const app = String(this._popoutId).startsWith('app:');
@@ -4340,6 +4370,7 @@ class Bar {
         x = clamp(x, monitor.x + opening.left, monitor.x + monitor.width - opening.right - width);
         y = clamp(y, monitor.y + opening.top + join,
             monitor.y + monitor.height - opening.bottom - this._popout.height - join);
+        if (side && this._popupGeometry) y = this._popupGeometry.y;
         x = Math.round(x);
         y = Math.round(y);
         const geometry = {x, y, width, height: this._popout.height, edge,
@@ -4477,6 +4508,8 @@ class Bar {
 
     _close(animate = false) {
         this._popupContent?._stopDashboardMotion?.();
+        for (const controller of this._groupTabControllers ?? []) controller.stopTabs?.();
+        for (const controller of this._calendarControllers ?? []) controller.stop();
         this._dashboardSizeTimeline?.stop();
         this._dashboardSizeTimeline = null;
         this._popupResizeTimeline?.stop();
@@ -4549,7 +4582,7 @@ class Bar {
     }
 
     _monthGrid(options = moduleFeatures(this, 'clock')) {
-        return monthGrid(this._theme, date => { if (openCalendarDate(date)) this._close(); }, options);
+        return monthGrid(this._theme, date => { if (openCalendarDate(date)) this._close(); }, {...options, bar: this});
     }
 
     _mediaCard(artwork = false, artSize = 84, options = moduleFeatures(this, 'media'), cleanups = this._popupCleanups) {

@@ -114,48 +114,16 @@ export function buildDashboard(bar) {
         });
         timeline.start();
     };
-    // Two pages can make the scroll content wider than the frame. Anchor the
-    // tabs and the page stack to the drawer without relayout on each frame.
-    let framing = false;
-    // The drawer's x is updated before descendant transforms. The scroll
-    // viewport stays in the same snapshot as the tabs and pages.
-    const viewportCenter = () => {
-        const viewport = bar._popupScroll;
-        if (!viewport?.get_stage?.()) return null;
-        const [x] = viewport.get_transformed_position();
-        const [width] = viewport.get_transformed_size();
-        if (!(width > 0) || !Number.isFinite(x)) return null;
-        return x + width / 2;
-    };
-    const centerHeader = () => {
-        const center = viewportCenter();
-        if (center == null || !tabHeader.get_stage() || tabScroll.width <= 0) return;
-        const [x] = tabScroll.get_transformed_position();
-        const offset = center - (x + tabScroll.width / 2);
-        if (Number.isFinite(offset) && Math.abs(offset) > 0.01)
-            tabHeader.translation_x += offset;
-    };
-    const centerPages = () => {
-        const center = viewportCenter();
-        if (center == null || !stage.get_stage()) return;
-        const [x] = stage.get_transformed_position();
-        const [width] = stage.get_transformed_size();
-        if (!(width > 0)) return;
-        const offset = center - (x + width / 2);
-        if (Number.isFinite(offset) && Math.abs(offset) > 0.01)
-            stage.translation_x += offset;
-    };
+    // The scroll child requests no minimum width, so the viewport allocates
+    // the header and page bin directly. Fixed-size pages may overflow that bin;
+    // no transformed-position correction is needed during frame resizing.
+    root.width = 1;
+    stage.width = 1;
     const syncFrame = () => {
-        if (framing || closed || !bar._popout) return;
-        framing = true;
-        centerHeader();
-        centerPages();
-        framing = false;
+        tabHeader.x_align = bar._popupEdge === 'left' ? Clutter.ActorAlign.START
+            : bar._popupEdge === 'right' ? Clutter.ActorAlign.END : Clutter.ActorAlign.CENTER;
     };
     root._syncDashboardHeader = syncFrame;
-    root.connect('notify::allocation', syncFrame);
-    tabHeader.connect('notify::allocation', syncFrame);
-    tabScroll.connect('notify::allocation', syncFrame);
     tabScroll.hadjustment.connectObject('notify::value', syncHighlight, root);
     const reader = metricsReader();
     const disposeView = view => {
@@ -611,6 +579,12 @@ export function buildDashboard(bar) {
     });
     tabHeader.add_child(edit);
     syncTabs();
+    root._refreshPageHeight = () => {
+        const view = stage.get_last_child();
+        if (!view?.get_stage()) return;
+        view.height = -1;
+        view.height = Math.ceil(view.get_preferred_height(view.width)[1]);
+    };
     root._preparePopup = () => {
         const view = stage.get_last_child();
         if (view) sizePage(view, current);

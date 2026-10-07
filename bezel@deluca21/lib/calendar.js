@@ -1,3 +1,4 @@
+import {pageMotion, motionDuration} from './pageMotion.js';
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -38,8 +39,15 @@ export function monthGrid(theme, activate = openCalendarDate, options = {}) {
     header.add_child(title);
     header.add_child(next);
     box.add_child(header);
-    const grid = new St.Widget({layout_manager: new Clutter.GridLayout()});
-    box.add_child(grid);
+    const stage = new St.Widget({name: 'bezel-calendar-pages', layout_manager: new Clutter.BinLayout(),
+        y_align: Clutter.ActorAlign.START, clip_to_allocation: true});
+    box.add_child(stage);
+    const bar = options.bar;
+    if (bar) bar._calendarControllers ??= new Set();
+    const motion = pageMotion(stage, bar, bar?._calendarControllers);
+    bar?._popupCleanups.push(() => motion.destroy());
+    let grid = null;
+    let direction = 0;
     let cellW = 32;
     let cellH = 30;
     let font = 12;
@@ -51,7 +59,7 @@ export function monthGrid(theme, activate = openCalendarDate, options = {}) {
         rendered = key;
         title.label = month.format('%B %Y');
         title.style = `font-size: ${font}px;`;
-        grid.destroy_all_children();
+        grid = new St.Widget({layout_manager: new Clutter.GridLayout(), width: cellW * (options.weekNumbers ? 8 : 7)});
         const layout = grid.layout_manager;
         ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'].forEach((day, column) => {
             // Date buttons set the column width; centre the natural-width label
@@ -76,11 +84,14 @@ export function monthGrid(theme, activate = openCalendarDate, options = {}) {
             const index = start + day - 1;
             layout.attach(button, index % 7 + (options.weekNumbers ? 1 : 0), Math.floor(index / 7) + 1, 1, 1);
         }
+        motion.show(grid, direction || 1, direction ? motionDuration(bar) : 0);
+        direction = 0;
     };
-    previous.connect('clicked', () => { month = month.add_months(-1); render(); previous.grab_key_focus(); });
-    next.connect('clicked', () => { month = month.add_months(1); render(); next.grab_key_focus(); });
+    previous.connect('clicked', () => { direction = -1; month = month.add_months(-1); render(); previous.grab_key_focus(); });
+    next.connect('clicked', () => { direction = 1; month = month.add_months(1); render(); next.grab_key_focus(); });
     title.connect('clicked', () => {
         const current = GLib.DateTime.new_now_local();
+        direction = month.compare(current) > 0 ? -1 : 1;
         month = GLib.DateTime.new_local(current.get_year(), current.get_month(), 1, 12, 0, 0);
         render();
     });

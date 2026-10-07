@@ -1,6 +1,6 @@
+import {groupTabs} from './groupTabs.js';
 import {switchOn} from './config.js';
 import Clutter from 'gi://Clutter';
-import GLib from 'gi://GLib';
 import St from 'gi://St';
 import {PopupAnimation} from 'resource:///org/gnome/shell/ui/boxpointer.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -61,20 +61,14 @@ export function buildDevicePanel(bar, id, options = null) {
     const host = new St.ScrollView({overlay_scrollbars: true, x_expand: true,
         hscrollbar_policy: St.PolicyType.NEVER, vscrollbar_policy: St.PolicyType.AUTOMATIC, height: 160});
     host.set_child(list); root.add_child(host);
-    let timer = 0;
     let released = false;
-    const fit = () => {
-        timer = 0;
-        if (released || !host.get_stage()) return GLib.SOURCE_REMOVE;
-        let bottom = 0;
-        for (const child of list.get_children())
-            if (child.visible && child.height > 4) bottom = Math.max(bottom, child.y + child.height);
-        const height = Math.min(220, Math.max(64, (bottom || 56) + 12));
-        if (Math.abs(host.height - height) > 2) { host.height = height; bar._fitPopup(); }
-        return GLib.SOURCE_REMOVE;
+    let prepared = false;
+    root._prepareDevicePanel = () => {
+        if (prepared || released || !list.get_stage()) return;
+        prepared = true;
+        const natural = list.get_preferred_height(Math.max(1, bar._popupWidth - 36))[1];
+        host.height = Math.min(220, Math.max(64, Math.ceil(natural)));
     };
-    const queueFit = () => { if (!timer && !released) timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 30, fit); };
-    const allocation = list.connect('notify::allocation', queueFit);
     const quick = Main.panel.statusArea.quickSettings;
     const nativeOpen = quick.menu.connect('open-state-changed', (_menu, open) => { if (open) bar._close(); });
     if (id === 'network') control._startScanning?.();
@@ -82,9 +76,6 @@ export function buildDevicePanel(bar, id, options = null) {
     const release = () => {
         if (released) return;
         released = true;
-        if (timer) GLib.source_remove(timer);
-        timer = 0;
-        list.disconnect(allocation);
         quick.menu.disconnect(nativeOpen);
         signals.forEach(signal => control.disconnect(signal));
         if (id === 'network') control._stopScanning?.();
@@ -94,39 +85,17 @@ export function buildDevicePanel(bar, id, options = null) {
     };
     root.connect('destroy', release);
     bar._popupCleanups.push(release);
-    queueFit();
     return root;
 }
 
-export function groupTabStyle(theme, selected) {
-    return `padding: 12px 10px; border-radius: 12px; background-color: ${selected ? theme.accent : theme.surface}; color: ${selected ? theme.bg : theme.fg};`;
-}
-
 export function buildDeviceControls(bar) {
-    const root = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 10px;'});
-    const tabs = new St.BoxLayout({style: 'spacing: 6px;'});
-    const body = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 8px;'});
-    root.add_child(tabs); root.add_child(body);
-    const entries = Object.keys(devices).filter(deviceAvailable);
-    const buttons = [];
-    let cleanup = [];
-    const clear = () => { cleanup.splice(0).forEach(fn => fn()); body.destroy_all_children(); };
-    const select = index => {
-        if (!entries[index]) return;
-        clear();
-        buttons.forEach((button, i) => button.set_style(groupTabStyle(bar._theme, i === index)));
+    const entries = Object.keys(devices).filter(deviceAvailable).map(id => ({id, title: devices[id]}));
+    const root = groupTabs(bar, entries, (entry, page, cleanups) => {
         const start = bar._popupCleanups.length;
-        body.add_child(buildDevicePanel(bar, entries[index]));
-        cleanup = bar._popupCleanups.splice(start);
-    };
-    entries.forEach((id, index) => {
-        const button = new St.Button({label: devices[id], can_focus: true, x_expand: true});
-        button.connect('clicked', () => select(index)); buttons.push(button); tabs.add_child(button);
+        page.add_child(buildDevicePanel(bar, entry.id));
+        cleanups.push(...bar._popupCleanups.splice(start));
     });
-    bar._popupCleanups.push(clear);
-    root.connect('destroy', () => cleanup.splice(0).forEach(fn => fn()));
-    root._selectDeviceTab = select;
-    if (entries.length) select(0);
-    else root.add_child(new St.Label({text: 'No device controls available'}));
+    root._selectDeviceTab = root._selectGroupTab;
+    if (!entries.length) root.add_child(new St.Label({text: 'No device controls available'}));
     return root;
 }
