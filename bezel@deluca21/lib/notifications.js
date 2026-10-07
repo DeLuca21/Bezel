@@ -3,6 +3,7 @@ import GLib from 'gi://GLib';
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as MessageList from 'resource:///org/gnome/shell/ui/messageList.js';
+import {motionDuration} from './pageMotion.js';
 import {settingChoice} from './config.js';
 import {notificationJoinsFrame} from './frame-regions.js';
 
@@ -248,61 +249,172 @@ export function buildNotificationCenter(bar, embedded = false) {
     const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL,
         style: 'spacing: 10px;'});
     box.add_child(new St.Label({text: 'Notifications', style: 'font-weight: bold; font-size: 18px;'}));
-    const empty = new St.Label({text: 'No notifications', style: `color: ${bar._theme.muted}; padding: 20px;`});
-    box.add_child(empty);
+    const list = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL});
+    box.add_child(list);
+    const empty = new St.Label({text: 'No notifications', y_align: Clutter.ActorAlign.START,
+        y_expand: true, style: `color: ${bar._theme.muted}; padding: 20px;`});
+    // Keep the placeholder in the same stack: toggling a sibling after the
+    // final collapse changes BoxLayout spacing and forces another drawer fit.
+    const emptySlot = new St.Widget({name: 'bezel-notification-empty', layout_manager: new Clutter.BinLayout(),
+        clip_to_allocation: true, height: 0, x_expand: true});
+    emptySlot.add_child(empty);
+    list.add_child(emptySlot);
     const messages = new Map();
-    const fitHistory = () => {
+    const oldestFirst = settingChoice(bar._overlay._settings, 'notifications-order', 'newest-first',
+        ['newest-first', 'oldest-first']) === 'oldest-first';
+    let sequence = 0;
+    const timestamp = notification => notification.datetime
+        ? notification.datetime.to_unix() * 1000000 + notification.datetime.get_microsecond() : 0;
+    // Sort across sources as well as live arrivals, so reopening preserves order.
+    const orderedRows = () => [...messages.values()].sort((a, b) =>
+        (oldestFirst ? 1 : -1) * (a.time - b.time || a.sequence - b.sequence));
+    const timelines = new Set();
+    let layoutTimeline = null;
+    let pending = 0;
+    let stopped = false;
+    const animate = (duration, actor, paint, complete) => {
+        if (!duration) { paint(1); complete?.(); return null; }
+        const timeline = new Clutter.Timeline({duration, actor});
+        timelines.add(timeline);
+        timeline.set_progress_mode(Clutter.AnimationMode.EASE_OUT_CUBIC);
+        timeline.connect('new-frame', () => paint(timeline.get_progress()));
+        timeline.connect('completed', () => {
+            timelines.delete(timeline);
+            paint(1);
+            complete?.();
+        });
+        timeline.start();
+        return timeline;
+    };
+    const reflow = (duration = motionDuration(bar)) => {
+        if (stopped || !box.get_stage() || !bar._popout) return;
+        if (layoutTimeline) { layoutTimeline.stop(); timelines.delete(layoutTimeline); layoutTimeline = null; }
+        const width = Math.max(1, embedded ? box.width : bar._popupWidth - 36);
+        const rows = orderedRows();
+        rows.forEach((row, index) => {
+            if (list.get_child_at_index(index) !== row.slot) list.set_child_at_index(row.slot, index);
+        });
+        const visible = rows.filter(row => !row.collapsing);
+        const emptyFrom = emptySlot.height;
+        empty.height = -1;
+        empty.height = Math.ceil(empty.get_preferred_height(width)[1]);
+        const emptyTarget = visible.length ? 0 : empty.height;
+        emptySlot.height = emptyTarget;
+        const sizes = rows.map(row => {
+            const from = row.slot.height;
+            if (!row.leaving) {
+                row.message.width = width;
+                row.message.height = -1;
+                row.message.height = Math.ceil(row.message.get_preferred_height(width)[1]);
+            }
+            const last = visible.at(-1) === row;
+            const target = row.collapsing ? 0 : row.message.height + (last ? 0 : 10);
+            row.slot.height = target;
+            return {row, from: row.entering ? 0 : from, target, x: row.message.translation_x};
+        });
+        // Measure final content once, then restore the current visual heights.
+        for (let parent = box.get_parent(); parent; parent = parent.get_parent()) {
+            parent._refreshPageHeight?.();
+            if (parent === bar._popupContent) break;
+        }
         bar._popupLockedHeight = false;
-        const fit = () => {
-            if ((!embedded && bar._popoutId !== 'notifications') || !bar._popout)
-                return;
-            bar._popupLockedHeight = false;
-            bar._fitPopup();
+        const height = bar._fitPopup(true);
+        for (const {row, from} of sizes) row.slot.height = from;
+        emptySlot.height = emptyFrom;
+        if (Number.isFinite(height)) bar._setDashboardSize(bar._popupWidth, height, duration);
+        for (const {row} of sizes) row.entering = false;
+        const finish = () => {
+            layoutTimeline = null;
+            for (const {row} of sizes) {
+                if (!row.collapsing) continue;
+                messages.delete(row.notification);
+                row.slot.destroy();
+            }
+            bar._popupScroll?.get_parent?.()?._bezelSyncOverflow?.();
         };
-        fit();
-        bar._later?.('_historyFitId', 60, fit);
+        layoutTimeline = animate(duration, list, progress => {
+            emptySlot.height = emptyFrom + (emptyTarget - emptyFrom) * progress;
+            for (const {row, from, target, x} of sizes) {
+                row.slot.height = from + (target - from) * progress;
+                if (!row.leaving) row.message.translation_x = x * (1 - progress);
+            }
+        }, finish);
+    };
+    const queueReflow = () => {
+        if (pending || stopped) return;
+        pending = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            pending = 0;
+            reflow();
+            return GLib.SOURCE_REMOVE;
+        });
     };
     const add = notification => {
-        if (messages.has(notification)) return;
+        if (stopped || messages.has(notification)) return;
         const message = new MessageList.NotificationMessage(notification);
-        // Reserve the complete action row while its reveal scales. Otherwise a
-        // scrolling BoxLayout can allocate the scaled minimum and clip labels.
+        message.y_align = Clutter.ActorAlign.START;
+        message.y_expand = true;
         if (message._actionBin?.layout_manager && 'scalingEnabled' in message._actionBin.layout_manager)
             message._actionBin.layout_manager.scalingEnabled = false;
         message.set_style(`background-color: ${bar._theme.surface}; color: ${bar._theme.fg}; border-radius: 16px;`);
         if (message._header) message._header.set_style(`color: ${bar._theme.muted};`);
         message._header?.closeButton.set_style(`color: ${bar._theme.fg}; background-color: ${bar._theme.bg}; border-radius: 12px;`);
         styleActions(message, bar._theme);
-        messages.set(notification, message);
-        const shrinkHistory = () => {
-            if (!messages.delete(notification))
-                return;
-            // Closing the drawer destroys these views. The scroll adjustment is
-            // already gone by then, so only refit while the shade is open.
-            if ((!embedded && bar._popoutId !== 'notifications') || !bar._popout)
-                return;
-            empty.visible = messages.size === 0;
-            bar._popupScroll?.get_parent?.()?._bezelSyncOverflow?.();
-            fitHistory();
-        };
+        const slot = new St.Widget({name: 'bezel-notification-slot', layout_manager: new Clutter.BinLayout(), x_expand: true,
+            clip_to_allocation: true, height: 0});
+        slot.add_child(message);
+        const row = {notification, message, slot, time: timestamp(notification), sequence: sequence++,
+            entering: true, leaving: false, collapsing: false};
+        messages.set(notification, row);
+        // Use GNOME's final expanded layout; our slot and frame share the reveal
+        // timing instead of competing with its independent preferred-height tween.
+        for (const method of ['expand', 'unexpand']) {
+            const native = message[method].bind(message);
+            message[method] = () => { if (stopped || row.leaving) return; native(false); queueReflow(); };
+        }
         message.connect_after('close', () => {
-            message.destroy();
-            shrinkHistory();
+            if (stopped || row.leaving) return;
+            row.leaving = true;
+            message.reactive = false;
+            const from = message.translation_x;
+            const duration = motionDuration(bar);
+            animate(Math.round(duration / 2), message, progress => {
+                message.translation_x = from + (message.width + 48 - from) * progress;
+            }, () => {
+                row.collapsing = true;
+                reflow(duration);
+            });
         });
-        message.connect('destroy', shrinkHistory);
-        box.insert_child_at_index(message, 1);
-        empty.hide();
-        bar._popupScroll?.get_parent?.()?._bezelSyncOverflow?.();
-        fitHistory();
+        notification.connectObject('notify::title', queueReflow, 'notify::body', queueReflow,
+            'notify::gicon', queueReflow, 'action-added', queueReflow, 'action-removed', queueReflow,
+            'notify::datetime', () => { row.time = timestamp(notification); queueReflow(); }, message);
+        list.insert_child_at_index(slot, orderedRows().indexOf(row));
+        if (motionDuration(bar)) message.translation_x = 48;
+        queueReflow();
     };
     const sources = new Set();
     const watch = source => {
-        if (sources.has(source)) return;
+        if (stopped || sources.has(source)) return;
         sources.add(source);
         source.notifications.forEach(add);
         source.connectObject('notification-added', (_source, notification) => add(notification),
             'destroy', () => sources.delete(source), box);
     };
+    const stop = () => {
+        if (stopped) return;
+        stopped = true;
+        if (pending) GLib.source_remove(pending);
+        pending = 0;
+        for (const timeline of timelines) timeline.stop();
+        timelines.clear();
+        layoutTimeline = null;
+        bar._notificationControllers.delete(controller);
+    };
+    const controller = {stop, get moving() { return timelines.size > 0; }};
+    bar._notificationControllers ??= new Set();
+    bar._notificationControllers.add(controller);
+    box._preparePopup = () => { if (pending) GLib.source_remove(pending); pending = 0; reflow(0); };
+    box.connect('destroy', stop);
+    bar._popupCleanups.push(stop);
     Main.messageTray.getSources().forEach(watch);
     Main.messageTray.connectObject('source-added', (_tray, source) => watch(source), box);
     return box;

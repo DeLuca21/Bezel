@@ -1466,6 +1466,9 @@ export class SettingsWindow {
             this.card.append(label(title, 'subheading'));
             this.card.append(this._spotGrid(`${key}-position`));
             if (key === 'notifications') {
+                this.card.append(label('Notification order', 'subheading'));
+                this.card.append(this._segments([['newest-first', 'Newest first'], ['oldest-first', 'Oldest first']],
+                    this.settings.get_string('notifications-order'), value => this.settings.set_string('notifications-order', value)));
                 this.card.append(this._step('Maximum height (px)', this.settings.get_int('notifications-max-height'), 240, 1600, 40,
                     value => this.settings.set_int('notifications-max-height', value)));
                 this.card.append(label('Show more history before scrolling. Limited to the available screen height.', 'muted'));

@@ -4508,6 +4508,7 @@ class Bar {
 
     _close(animate = false) {
         this._popupContent?._stopDashboardMotion?.();
+        for (const controller of this._notificationControllers ?? []) controller.stop();
         for (const controller of this._groupTabControllers ?? []) controller.stopTabs?.();
         for (const controller of this._calendarControllers ?? []) controller.stop();
         this._dashboardSizeTimeline?.stop();
