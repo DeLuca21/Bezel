@@ -4002,6 +4002,8 @@ class Bar {
                     this._dashboardGesture();
                     return Clutter.EVENT_STOP;
                 }
+                if (this._popupContent?._handleEscape?.())
+                    return Clutter.EVENT_STOP;
                 const focus = this._anchor;
                 this._close(true);
                 if (focus?.can_focus)
@@ -4161,12 +4163,27 @@ class Bar {
     _setDashboardSize(width, height, duration = 0) {
         if (!this._popout) return;
         height = this._popupHeightLimit(height);
+        const innerWidth = Math.max(1, width - 36);
+        const chromeHeight = this._popupChrome?.get_preferred_height(innerWidth)[1] ?? 0;
+        const footerHeight = this._popupFooter?.get_preferred_height(innerWidth)[1] ?? 0;
+        const fitViewport = (h, chrome, footer) => {
+            if (this._popupScrolls() && this._popupScroll?.get_parent?.()) {
+                const room = Math.max(48, h - chrome - footer - 36);
+                this._popupScroll.height = room;
+                this._popupScroll.get_parent().height = room;
+            }
+        };
         if (this._dashboardSizeTimeline && this._dashboardSizeTarget?.width === width
-            && this._dashboardSizeTarget?.height === height)
+            && this._dashboardSizeTarget?.height === height) {
+            // Chrome can change while the frame remains at its height cap.
+            Object.assign(this._dashboardSizeTarget, {chromeHeight, footerHeight});
+            fitViewport(this._popout.height, chromeHeight, footerHeight);
             return;
+        }
         this._dashboardSizeTimeline?.stop();
         this._dashboardSizeTimeline = null;
-        this._dashboardSizeTarget = {width, height};
+        const sizeTarget = {width, height, chromeHeight, footerHeight};
+        this._dashboardSizeTarget = sizeTarget;
         const fromWidth = this._popout.width;
         const fromHeight = this._popout.height;
         const from = this._popupGeometry ? {...this._popupGeometry} : null;
@@ -4177,10 +4194,10 @@ class Bar {
         const target = {...this._popupGeometry};
         const side = ['left', 'right'].includes(this._popupEdge);
         if (side && from) target.y = from.y;
-        const chromeHeight = this._popupChrome?.height ?? 0;
-        const footerHeight = this._popupFooter?.height ?? 0;
+        else if (this._popupEdge === 'bottom' && from)
+            target.y = from.y + fromHeight - height;
         const paint = progress => {
-            if (!this._popout) return;
+            if (!this._popout?.get_stage?.()) return;
             const w = fromWidth + (width - fromWidth) * progress;
             const h = fromHeight + (height - fromHeight) * progress;
             const x = from ? from.x + (target.x - from.x) * progress : target.x;
@@ -4188,11 +4205,7 @@ class Bar {
             this._popout.set_size(w, h);
             this._popout.set_position(x, y);
             this._popupGeometry = {...target, x, y, width: w, height: h};
-            if (this._popupScrolls() && this._popupScroll) {
-                const room = Math.max(48, h - chromeHeight - footerHeight - 36);
-                this._popupScroll.height = room;
-                this._popupScroll.get_parent().height = room;
-            }
+            fitViewport(h, sizeTarget.chromeHeight, sizeTarget.footerHeight);
             this._popupPlate?._bezelSyncPlate?.();
             this._layoutDismissStrips();
             this._clipPopup(this._popupProgress);
@@ -4509,6 +4522,7 @@ class Bar {
     _close(animate = false) {
         this._popupContent?._stopDashboardMotion?.();
         for (const controller of this._notificationControllers ?? []) controller.stop();
+        for (const controller of this._launcherControllers ?? []) controller.stop();
         for (const controller of this._groupTabControllers ?? []) controller.stopTabs?.();
         for (const controller of this._calendarControllers ?? []) controller.stop();
         this._dashboardSizeTimeline?.stop();

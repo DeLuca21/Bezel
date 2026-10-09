@@ -5,11 +5,30 @@ import {PRESETS} from './theme.js';
 import {readBars, applyPreset} from './config.js';
 import {savedLayouts, restoreLayout, rememberLayout, layoutValues} from './profiles.js';
 
+const MEDIA_NAME = /\.(jpe?g|png|webp|svg|gif|mp4|webm|mkv|mov)$/i;
+const IMAGE_NAME = /\.(jpe?g|png|webp|svg|gif)$/i;
+
+export function filePreview(info, file) {
+    let thumb = null, type = '', size = 0, fallback = null;
+    try { thumb = info.get_attribute_byte_string('thumbnail::path'); } catch { /* Attribute is optional. */ }
+    try { type = info.get_content_type() || ''; } catch { /* Content type is optional. */ }
+    try { size = info.get_size(); } catch { /* Size is optional. */ }
+    try { fallback = info.get_icon(); } catch { /* Icon is optional. */ }
+    const name = file?.get_basename?.() ?? '';
+    const media = type.startsWith('image/') || type.startsWith('video/') || MEDIA_NAME.test(name);
+    const image = thumb ? Gio.File.new_for_path(thumb)
+        : (type.startsWith('image/') || IMAGE_NAME.test(name)) && size < 20000000 ? file : null;
+    return {gicon: image ? new Gio.FileIcon({file: image}) : fallback, media};
+}
+
 export function bezelResults(bar) {
     const settings = bar._overlay._settings;
     const open = (page, barIndex = -1, tab = 'contents') => bar._overlay.openSettings({page, barIndex, tab});
     const result = [];
-    const add = (name, keywords, page, barIndex, tab) => result.push({name, keywords: `bezel settings options ${keywords}`, detail: 'Open Bezel settings', icon: 'preferences-system-symbolic', run: () => open(page, barIndex, tab)});
+    const add = (name, keywords, page, barIndex = -1, tab) => result.push({name, keywords: `bezel settings options ${keywords}`,
+        category: barIndex >= 0 ? `bar-${barIndex}` : 'settings', barIndex, detail: 'Open Bezel settings',
+        icon: 'preferences-system-symbolic', run: () => open(page, barIndex, tab),
+        alternate: () => bar._overlay.openPreferences(), alternateLabel: 'All Bezel settings'});
     for (const [name, words, page] of [
         ['Themes and colours', 'appearance palette custom', 'look'], ['Layouts and bars', 'presets saved layout', 'bar'],
         ['Screen border', 'frame width radius shadow dashboard notifications position', 'frame'],
@@ -19,14 +38,21 @@ export function bezelResults(bar) {
     ]) add(name, words, page);
     readBars(settings).forEach((item, index) => {
         const name = `${item.edge} ${item.kind} ${index + 1}`;
+        result.push({name, collection: `bar-${index}`, category: 'settings', barIndex: index,
+            keywords: `bezel bar ${item.edge} ${item.kind} appearance behaviour modules`,
+            detail: 'Behaviour, modules, size, appearance and app icons', icon: 'view-grid-symbolic',
+            primaryLabel: 'Browse', run: () => open('bar', index),
+            alternate: () => open('bar', index), alternateLabel: 'Edit bar'});
         for (const [title, words, tab] of [
             ['Behaviour', 'autohide floating reserve space', 'contents'], ['Modules and groups', 'contents add remove reorder', 'contents'],
             ['Size and spacing', 'thickness length margin icon size rounding', 'size'], ['Appearance', 'colour opacity padding', 'appearance'],
             ['App icons', 'hover lift highlight click focused running indicator pins', 'apps'],
         ]) add(`${title} · ${name}`, words, 'bar', index, tab);
     });
-    for (const palette of PRESETS) result.push({name: palette.name, keywords: 'bezel theme palette colours appearance',
-        detail: `${settings.get_string('theme') === palette.id ? 'Current theme' : 'Apply theme'} · Enter to apply`, icon: 'applications-graphics-symbolic', run: () => settings.set_string('theme', palette.id)});
+    const currentTheme = settings.get_string('theme');
+    for (const palette of PRESETS) result.push({name: palette.name, category: 'themes', swatch: palette, keywords: 'bezel theme palette colours appearance',
+        detail: currentTheme === palette.id ? 'Current theme' : 'Apply theme', selected: currentTheme === palette.id,
+        icon: 'applications-graphics-symbolic', run: () => settings.set_string('theme', palette.id), alternate: () => open('look'), alternateLabel: 'Edit colours'});
     const apply = callback => {
         const previous = {name: 'Before launcher layout change', values: layoutValues(settings)};
         settings.set_string('launcher-layout-undo', JSON.stringify(previous));
@@ -34,13 +60,39 @@ export function bezelResults(bar) {
         rememberLayout(settings);
     };
     for (const [id, name] of [['caelestia', 'Bezel'], ['panel', 'Panel'], ['dock', 'Dock'], ['hybrid', 'Top + dock'], ['islands', 'Islands'], ['split', 'Split']])
-        result.push({name: `${name} layout`, keywords: 'bezel layout preset', detail: 'Apply layout · previous setup available through Undo layout', icon: 'view-grid-symbolic', run: () => apply(() => applyPreset(settings, id))});
-    for (const profile of savedLayouts(settings)) result.push({name: profile.name, keywords: 'bezel saved layout', detail: 'Load saved layout · restores its settings', icon: 'document-open-symbolic', run: () => apply(() => restoreLayout(settings, profile))});
-    if (settings.get_string('launcher-layout-undo')) result.push({name: 'Undo layout change', keywords: 'bezel restore previous layout', detail: 'Restore setup before the last launcher layout change', icon: 'edit-undo-symbolic', run: () => {
+        result.push({name: `${name} layout`, category: 'layouts', keywords: 'bezel layout preset', detail: 'Apply layout · previous setup available through Undo layout', icon: 'view-grid-symbolic', run: () => apply(() => applyPreset(settings, id)), alternate: () => open('bar'), alternateLabel: 'Edit bars'});
+    for (const profile of savedLayouts(settings)) result.push({name: profile.name, category: 'layouts', keywords: 'bezel saved layout', detail: 'Load saved layout · restores its settings', icon: 'document-open-symbolic', run: () => apply(() => restoreLayout(settings, profile)), alternate: () => open('bar'), alternateLabel: 'Edit bars'});
+    if (settings.get_string('launcher-layout-undo')) result.push({name: 'Undo layout change', category: 'layouts', keywords: 'bezel restore previous layout', detail: 'Restore setup before the last launcher layout change', icon: 'edit-undo-symbolic', run: () => {
         restoreLayout(settings, JSON.parse(settings.get_string('launcher-layout-undo')));
         settings.set_string('launcher-layout-undo', '');
     }});
     return result;
+}
+
+// Category actions open a focused picker; specific names remain searchable directly.
+export function bezelSearchResults(bar, text, collection = null) {
+    const items = bezelResults(bar);
+    const open = page => bar._overlay.openSettings({page});
+    const groups = [
+        {name: 'Themes', collection: 'themes', keywords: 'bezel theme scheme colour color palette appearance',
+            detail: 'Choose a colour theme', icon: 'applications-graphics-symbolic',
+            alternateLabel: 'Edit colours', alternate: () => open('look')},
+        {name: 'Layouts', collection: 'layouts', keywords: 'bezel layout presets saved bars dock panel',
+            detail: 'Choose a preset or saved layout', icon: 'view-grid-symbolic',
+            alternateLabel: 'Edit bars', alternate: () => open('bar')},
+        {name: 'Bezel settings', collection: 'settings', keywords: 'bezel settings preferences options customize',
+            detail: 'Browse settings by section', icon: 'preferences-system-symbolic',
+            alternateLabel: 'Open settings', alternate: () => open('look')},
+    ];
+    if (collection) {
+        if (/^bar-\d+$/.test(collection))
+            return items.filter(item => item.category === collection);
+        return [...(collection === 'settings' ? groups.slice(0, 2) : []), ...items.filter(item => item.category === collection)];
+    }
+    const general = /^(bezel|settings?|preferences?|options?|themes?|schemes?|colou?rs?|palettes?|appearance|layouts?|presets?)$/i.test(text.trim());
+    const scoreName = createSearchScorer(text);
+    return [...groups, ...items.filter(item => text.trim() && !general && (item.category === 'settings'
+        || Number.isFinite(scoreName(item))))];
 }
 
 // Bounded, cancellable directory traversal. Never follow symlinks or inspect hidden trees.
@@ -61,7 +113,7 @@ export async function searchFiles(query, roots, cancellable, onProgress = null) 
         seen.add(path);
         let enumerator;
         try {
-            enumerator = await new Promise((resolve, reject) => directory.enumerate_children_async('standard::name,standard::type,standard::is-symlink', Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, GLib.PRIORITY_DEFAULT, cancellable, (file, res) => {
+            enumerator = await new Promise((resolve, reject) => directory.enumerate_children_async('standard::name,standard::type,standard::is-symlink,standard::icon,standard::content-type,standard::size,thumbnail::path', Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, GLib.PRIORITY_DEFAULT, cancellable, (file, res) => {
                 try { resolve(file.enumerate_children_finish(res)); } catch (error) { reject(error); }
             }));
             while (!cancellable.is_cancelled() && visited < 15000) {
@@ -75,7 +127,7 @@ export async function searchFiles(query, roots, cancellable, onProgress = null) 
                     if (name.startsWith('.')) continue;
                     const file = directory.get_child(name);
                     const folder = info.get_file_type() === Gio.FileType.DIRECTORY;
-                    const item = {name, file, folder, detail: file.get_path()};
+                    const item = {name, file, folder, detail: file.get_path(), ...filePreview(info, file)};
                     item.score = score(item);
                     // Keep only the best visible results, with stable tie-breaking.
                     if (Number.isFinite(item.score) && (found.length < 60 || compareSearchResults(item, found[found.length - 1]) < 0)) {
@@ -105,7 +157,14 @@ export async function searchFiles(query, roots, cancellable, onProgress = null) 
 }
 
 export function commandArgv(text) {
-    const [ok, argv] = GLib.shell_parse_argv(text);
+    if (!String(text ?? '').trim())
+        throw new Error('Enter an installed program and its arguments');
+    let ok, argv;
+    try {
+        [ok, argv] = GLib.shell_parse_argv(text);
+    } catch {
+        throw new Error('Enter an installed program and its arguments');
+    }
     if (!ok || !argv.length || !GLib.find_program_in_path(argv[0])) throw new Error('Enter an installed program and its arguments');
     return argv;
 }

@@ -1502,7 +1502,7 @@ export class SettingsWindow {
         this.card.append(label('Search folders (separate with ; and press Enter)', 'caption'));
         this.card.append(roots);
         this.card.append(label('Hidden folders and symlinks are excluded. Searches cover up to 6 levels and 15,000 entries. Use a full path to browse deeper folders.', 'caption'));
-        this.card.append(label('Actions > · Files / · Web ? · Commands $ · Shift+Enter uses the secondary action', 'caption'));
+        this.card.append(label('All · System > · Files / · Web ? · Run $ · Bezel · GNOME. Shift+Enter uses the secondary action.', 'caption'));
 
     }
 
