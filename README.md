@@ -38,7 +38,7 @@ Bezel draws panels, docks, and popouts over GNOME Shell. Workspaces, apps, audio
 - **Quick controls** for volume, network, and Bluetooth, using GNOME’s own device lists.
 - **Dashboard** for the calendar, media, performance, and workspaces.
 - **Extension icons** hosted on a Bezel bar, with size, spacing, and order.
-- **Palettes** including Catppuccin, Rosé Pine, Nord, and Bezel’s own colours, plus a custom palette.
+- **Palettes** including Catppuccin, Rosé Pine, Nord, Bezel’s own colours, a custom palette, and colours derived automatically from your wallpaper.
 
 ---
 
@@ -106,6 +106,8 @@ In **Opening & motion > Session animations**, enable login, lock, and unlock ind
 In **Opening & motion**, Off, Fade, or Retreat runs for layout, preset, and palette changes. New installs use Retreat at 500 ms. Transitions respect GNOME’s reduced-motion preference.
 
 Preset cards and saved-layout chips sit above an interactive desktop preview and independently scrollable editor. Click a bar to select it, then use Contents, Size & space, or Apps & logo. Modules appear as chips inside sections and groups. Palettes show swatch cards; custom colours use GNOME’s picker. Switching layouts with unsaved changes offers Cancel, Discard, or Save and switch.
+
+In **Appearance > Palette**, choose **Wallpaper** to follow your current background. Pick Automatic or a source swatch, choose muted, vibrant or monochrome colours, and follow the system light/dark style or choose one explicitly. Unreadable backgrounds retain the previous palette. Bars with their own colours keep those overrides.
 
 Right-click a bar for settings, edit mode, panel or dock, floating, autohide, and remove. Edit mode outlines the bars, puts **+** on empty screen edges and on each section, and lets you drag what is already there. Edit mode never opens settings automatically. Right-click a module while editing to remove it, create a group, or move it into an existing group. Groups can contain any modules and empty spaces; removing a group keeps its contents. Resize spaces from their edit menu or click their chip in settings for an exact pixel size. App pins stay on the app’s right-click menu.
 

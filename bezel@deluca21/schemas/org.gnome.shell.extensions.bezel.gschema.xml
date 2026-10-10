@@ -1,6 +1,28 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
   <schema id="org.gnome.shell.extensions.bezel" path="/org/gnome/shell/extensions/bezel/">
+    <key name="wallpaper-palette" type="s"><default>'{}'</default></key>
+    <key name="wallpaper-status" type="s"><default>''</default></key>
+    <key name="wallpaper-swatch" type="i"><default>-1</default><range min="-1" max="5"/></key>
+    <key name="wallpaper-variant" type="s"><default>'muted'</default><choices><choice value="muted"/><choice value="vibrant"/><choice value="monochrome"/></choices></key>
+    <key name="wallpaper-style" type="s"><default>'system'</default><choices><choice value="system"/><choice value="light"/><choice value="dark"/></choices></key>
+    <key name="settings-layout" type="s"><default>'sidebar'</default><choices><choice value="classic"/><choice value="sidebar"/></choices><summary>Settings window layout</summary></key>
+    <key name="liquid-motion" type="b"><default>false</default></key>
+    <key name="liquid-glass-drawers" type="b"><default>false</default></key>
+    <key name="liquid-glass-docks" type="b"><default>false</default></key>
+    <key name="liquid-glass-panels" type="b"><default>false</default></key>
+    <key name="liquid-glass-frame" type="b"><default>false</default></key>
+    <key name="liquid-live-blur" type="b"><default>false</default></key>
+    <key name="liquid-edge-highlight" type="b"><default>false</default><summary>Highlight glass edges</summary></key>
+    <key name="disable-startup-overview" type="b"><default>false</default><summary>Disable overview on startup</summary></key>
+    <key name="liquid-hover-hold" type="i"><default>1200</default><range min="0" max="10000"/></key>
+    <key name="liquid-shift" type="b"><default>false</default></key>
+    <key name="liquid-pour" type="b"><default>false</default></key>
+    <key name="liquid-open-style" type="s"><default>'grow'</default><choices><choice value="grow"/><choice value="drip"/><choice value="drip-grow"/><choice value="drop-expand"/><choice value="unfold"/></choices></key>
+    <key name="liquid-blur-radius" type="i"><default>24</default><range min="0" max="64"/></key>
+    <key name="liquid-tint" type="i"><default>18</default><range min="0" max="100"/></key>
+    <key name="liquid-duration-scale" type="i"><default>100</default><range min="25" max="300"/></key>
+
     <key name="layout-transition" type="s"><default>'retreat'</default><choices><choice value="none"/><choice value="fade"/><choice value="slide"/><choice value="retreat"/><choice value="wipe"/></choices></key>
     <key name="layout-transition-duration" type="i"><default>500</default><range min="0" max="1600"/></key>
     <key name="layout-transition-request" type="i"><default>0</default></key>
@@ -104,6 +126,7 @@
         <choice value="bezel-sand"/>
         <choice value="bezel-ember"/>
         <choice value="bezel-monochrome"/>
+        <choice value="wallpaper"/>
         <choice value="custom"/>
       </choices>
     </key>

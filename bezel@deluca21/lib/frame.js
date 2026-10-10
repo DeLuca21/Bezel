@@ -1,9 +1,15 @@
 import St from 'gi://St';
-import {paintFrame} from './drawing.js';
+import {LiquidMaterial, liquidEnabled} from './liquidMaterial.js';
+import {paintFrame, paintFrameShadow} from './drawing.js';
 import {frameRegions} from './frame-regions.js';
 
 export class DesktopFrame {
-    constructor(monitor, theme, sides, state) {
+    constructor(monitor, theme, sides, state, settings = null) {
+        this.liquidSettings = settings;
+        this.glass = settings ? liquidEnabled(settings, 'glass-frame') : false;
+        // Panel glass belongs to the bar plate; it must not replace an entire
+        // frame tile (including the border beside an otherwise solid desktop).
+        this.glassEdges = [];
         this.monitor = monitor;
         this.popup = null;
         this.notification = null;
@@ -42,14 +48,53 @@ export class DesktopFrame {
         const retained = new Map();
         this.lastDirty = [];
         for (const {rect, dynamic, edges} of regions) {
-            const key = JSON.stringify(rect);
+            const glass = this.glass || (dynamic && (popup?.glass || notification?.glass)) || edges?.some(edge => this.glassEdges.includes(edge));
+            const drawerOnly = glass && !this.glass && !this.glassEdges.includes(popup?.edge)
+                && !edges?.some(edge => this.glassEdges.includes(edge));
+            const key = JSON.stringify([rect, Boolean(glass), drawerOnly]);
             let area = this.surfaces.get(key);
             if (!area) {
-                area = new St.DrawingArea({reactive: false});
+                if (glass) {
+                    const material = new LiquidMaterial(this.monitor, this.liquidSettings, this.theme.bg);
+                    area = material.actor;
+                    area._liquidMaterial = material;
+                    if (drawerOnly) {
+                        const base = new St.DrawingArea({reactive: false});
+                        base.set_position(rect[0], rect[1]); base.set_size(rect[2], rect[3]);
+                        this.actor.add_child(base);
+                        base.connect('repaint', () => {
+                            const cr = base.get_context();
+                            try {
+                                cr.translate(-rect[0], -rect[1]);
+                                paintFrame(cr, width, height, this.sides, this.state.radius, this.theme.bg, 0);
+                            } finally { cr.$dispose(); }
+                        });
+                        area._liquidBase = base;
+                    }
+
+                } else area = new St.DrawingArea({reactive: false});
                 area.set_position(rect[0], rect[1]);
                 area.set_size(rect[2], rect[3]);
                 this.actor.add_child(area);
-                area.connect('repaint', () => {
+                if (glass) {
+                    const shadow = new St.DrawingArea({reactive: false});
+                    shadow.set_position(rect[0], rect[1]); shadow.set_size(rect[2], rect[3]);
+                    this.actor.add_child(shadow);
+                    shadow.connect('repaint', () => {
+                        const cr = shadow.get_context();
+                        try {
+                            cr.translate(-rect[0], -rect[1]);
+                            const spread = this.spread ?? 1;
+                            const sides = Object.fromEntries(Object.entries(this.sides).map(([edge, value]) => [edge, value * spread]));
+                            paintFrameShadow(cr, width, height, sides, this.state.radius * spread,
+                                this.state.shadow * spread, this.popup, this.notification);
+                        } finally { cr.$dispose(); }
+                    });
+                    area._liquidShadow = shadow;
+                    area.connect('destroy', () => { area._liquidBase?.destroy(); shadow.destroy(); });
+                }
+
+                if (!glass) area.connect('repaint', () => {
                     const cr = area.get_context();
                     try {
                         const [w, h] = area.get_surface_size();
@@ -66,11 +111,19 @@ export class DesktopFrame {
                 });
             }
             area.opacity = Math.round((this.fade ?? 1) * 255);
+            if (area._liquidBase) area._liquidBase.opacity = area.opacity;
+            if (area._liquidShadow) area._liquidShadow.opacity = area.opacity;
             const content = JSON.stringify([dynamic || cramped ? this.sides : edges.map(edge => this.sides[edge]),
                 this.spread, dynamic ? popup : null, dynamic ? notification : null, cramped]);
             if (area._frameContent !== content) {
                 area._frameContent = content;
-                area.queue_repaint();
+                if (glass) {
+                    const spread = this.spread ?? 1;
+                    const sides = Object.fromEntries(Object.entries(this.sides).map(([edge, value]) => [edge, value * spread]));
+                    area._liquidMaterial.frame(rect, width, height, sides, this.state.radius * spread, dynamic || cramped ? this.popup : null, dynamic || cramped ? this.notification : null, drawerOnly);
+                } else area.queue_repaint();
+                area._liquidBase?.queue_repaint();
+                area._liquidShadow?.queue_repaint();
                 const [x, y, w, h] = rect;
                 this.lastDirty.push({x, y, width: w, height: h});
             }
@@ -86,8 +139,11 @@ export class DesktopFrame {
         const next = Math.max(0, Math.min(1, Number.isFinite(alpha) ? alpha : 0));
         const opacity = Math.round(next * 255);
         this.fade = next;
-        for (const area of this.areas)
+        for (const area of this.areas) {
             area.opacity = opacity;
+            if (area._liquidBase) area._liquidBase.opacity = opacity;
+            if (area._liquidShadow) area._liquidShadow.opacity = opacity;
+        }
     }
 
     // shown 1 is the resting border. shown 0 has grown the opening out to the
@@ -99,8 +155,9 @@ export class DesktopFrame {
         this.spread = next;
         for (const area of this.areas) {
             area._frameContent = null;
-            area.queue_repaint();
+            if (!area._liquidMaterial) area.queue_repaint();
         }
+        if (this.areas.some(area => area._liquidMaterial)) this.repaint();
     }
 
     setReveal(id, edge, thickness, progress) {

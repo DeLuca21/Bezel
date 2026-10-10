@@ -1,3 +1,4 @@
+import {wallpaperTheme} from './wallpaperColors.js';
 export const PRESETS = [
     {
         id: 'catppuccin-latte',
@@ -101,6 +102,13 @@ const PRESET_BY_ID = Object.fromEntries(PRESETS.map(theme => [theme.id, theme]))
 
 export function resolveTheme(settings) {
     const id = settings.get_string('theme');
+    if (id === 'wallpaper') {
+        try {
+            const theme = JSON.parse(settings.get_string('wallpaper-palette')).theme;
+            if (['bg', 'surface', 'fg', 'muted', 'accent', 'group', 'border'].every(key => /^#[0-9a-f]{6}$/i.test(theme?.[key]))) return {...theme, id, name: 'Wallpaper'};
+        } catch {}
+        return wallpaperTheme();
+    }
     if (id === 'custom') {
         return {
             id,

@@ -29,6 +29,8 @@ import {sideWidths, reservedWidths, cornerRadius, zonePlacement} from './geometr
 import {paintCorner, paintPillBackdrop} from './drawing.js';
 import {Services} from './services.js';
 import {DesktopFrame} from './frame.js';
+import {LiquidMaterial, liquidEnabled} from './liquidMaterial.js';
+import {LiquidDrawer, pourToDrawer} from './liquidMotion.js';
 import {LoginAnimation} from './loginAnimation.js';
 import {monthGrid, openCalendarDate} from './calendar.js';
 import {Weather, weatherWidget, railTemp} from './weather.js';
@@ -68,7 +70,9 @@ export class BezelOverlay {
                 this.queueRebuild();
                 return;
             }
-            if (['layout-transition', 'layout-transition-duration'].includes(key)) return;
+            if (key === 'liquid-shift' && settings.get_boolean(key)) settings.set_boolean('liquid-pour', false);
+            if (key === 'liquid-pour' && settings.get_boolean(key)) settings.set_boolean('liquid-shift', false);
+            if (['layout-transition', 'layout-transition-duration', 'liquid-open-style', 'liquid-pour', 'liquid-shift', 'liquid-duration-scale'].includes(key)) return;
             if (key === 'edit-mode')
                 this._syncEditEscape();
             if (key === 'preferences-bar') {
@@ -87,6 +91,7 @@ export class BezelOverlay {
                 this.openSettings();
                 return;
             }
+            if (['wallpaper-status', 'wallpaper-swatch', 'wallpaper-style', 'wallpaper-variant'].includes(key)) return;
             if (key === 'theme')
                 this._animateLayout = true;
             if (key === 'indicator-monitor') {
@@ -191,7 +196,7 @@ export class BezelOverlay {
                 const monitor = {...physicalMonitor, y: physicalMonitor.y + topInset, height: physicalMonitor.height - topInset};
                 const side = sideWidths(state);
                 if (state.border) {
-                    const frame = new DesktopFrame(monitor, theme, side, state);
+                    const frame = new DesktopFrame(monitor, theme, side, state, this._settings);
                     chrome(frame.actor, false, false);
                     frame.actor.visible = !global.display.get_monitor_in_fullscreen(monitor.index);
                     this._chrome.push(frame.actor);
@@ -421,7 +426,9 @@ export class BezelOverlay {
         Main.overview.hide();
         for (const record of this._indicators?.records.values() ?? [])
             record.menu?.close();
-        bar._open('launcher', bar._actor, () => buildLauncher(bar), 'bottom');
+        const floating = liquidEnabled(this._settings, 'motion') && (bar._state.kind === 'dock'
+            || bar._state.sections === 'pills' || bar._state.margin > 0 || bar._state.length < 100);
+        bar._open('launcher', bar._actor, () => buildLauncher(bar), floating ? null : 'bottom');
         bar._launcherEntry.grab_key_focus();
     }
 
@@ -635,6 +642,7 @@ export class BezelOverlay {
     }
 
     _clear() {
+        this._liquidPour?.cancel();
         this._loginAnimation?.destroy();
         this._loginAnimation = null;
         this._editAdds = [];
@@ -708,6 +716,7 @@ class Bar {
     _build() {
         const vertical = this._vertical;
         this._attachedToFrame = this._state.border && this._state.kind !== 'dock' && !this._state.margin && this._state.length === 100;
+        this._liquidGlass = liquidEnabled(this._overlay._settings, this._state.kind === 'dock' ? 'glass-docks' : 'glass-panels');
         this._joinedAutohide = this._attachedToFrame && this._state.autohide;
         const pills = this._state.sections === 'pills';
         const pad = this._barPadding();
@@ -729,8 +738,15 @@ class Bar {
         // reserved region. CSS shadows change blur paths for wider radii and
         // can abruptly lose strength on thin panels. Attached in-frame bars
         // use the screen border fill instead of a second plate.
-        if (!pills && !this._attachedToFrame) {
-            this._backdrop = this._backdropPlate(area => this._paintBarBackdrop(area));
+        if (!pills && (!this._attachedToFrame || (this._liquidGlass && !liquidEnabled(this._overlay._settings, 'glass-frame')))) {
+            if (this._liquidGlass) {
+                this._glass = new LiquidMaterial(this._monitor, this._overlay._settings, this._theme.bg);
+                this._glass.setSurfaceOpacity(this._state.barOpacity / 100);
+                this._glass.shadow(this._shadowDepth(), this._attachedToFrame ? 0 : this._state.rounding);
+                this._glass.syncShape = () => this._glass.rectangle(this._glass.actor.width, this._glass.actor.height, this._attachedToFrame ? 0 : this._state.rounding);
+                this._glass.actor.connect('notify::allocation', this._glass.syncShape);
+                this._backdrop = this._glass.actor;
+            } else this._backdrop = this._backdropPlate(area => this._paintBarBackdrop(area));
             this._actor.add_child(this._backdrop);
         }
         this._actor.add_child(this._content);
@@ -768,7 +784,22 @@ class Bar {
                     });
                     pad._bezelGroupPadding = true;
                     pad.add_child(actor);
-                    const background = new St.Widget({
+                    const groupGlass = fill && this._liquidGlass ? new LiquidMaterial(this._monitor, this._overlay._settings, fill) : null;
+                    if (groupGlass) {
+                        groupGlass.setSurfaceOpacity(appearance.opacity / 100);
+                        groupGlass.syncShape = () => {
+                            const box = shell.get_allocation_box();
+                            const width = box.get_width(), height = box.get_height();
+                            if (![width, height].every(Number.isFinite) || !(width > 0 && height > 0)) return;
+                            const allocated = groupGlass.actor.get_allocation_box();
+                            if (allocated.get_width() === width && allocated.get_height() === height
+                                && groupGlass._shape?.[2] === width && groupGlass._shape?.[3] === height) return;
+                            if (allocated.x1 !== 0 || allocated.y1 !== 0 || allocated.get_width() !== width || allocated.get_height() !== height)
+                                groupGlass.actor.allocate(new Clutter.ActorBox({x1: 0, y1: 0, x2: width, y2: height}));
+                            groupGlass.rectangle(width, height, appearance.rounding);
+                        };
+                    }
+                    const background = groupGlass?.actor ?? new St.Widget({
                         x_expand: true, y_expand: true,
                         style: fill ? `background-color: ${hexToRgba(fill, appearance.opacity / 100)}; border-radius: ${appearance.rounding}px;` : '',
                     });
@@ -777,9 +808,25 @@ class Bar {
                         clip_to_allocation: false,
                         x_expand: false, y_expand: false,
                     });
+                    shell._bezelPlate = background;
                     shell.add_child(background);
                     shell.add_child(pad);
                     shell._bezelPack = pad;
+                    actor._bezelGroupAnchor = shell;
+                    if (actor._bezelSharedFaces?.length) {
+                        const highlight = new St.Widget({reactive: false, x_expand: true, y_expand: true, opacity: 0,
+                            style: `background-color: ${hexToRgba(this._theme.accent, 0.18)}; border-radius: ${appearance.rounding}px;`});
+                        shell.add_child(highlight);
+                        // Capture the cluster before actor becomes its wrapper.
+                        const cluster = actor;
+                        const syncCluster = () => { highlight.opacity = cluster._bezelSharedFaces.some(face => face.hover || face.has_key_focus()) ? 255 : 0; };
+                        for (const face of actor._bezelSharedFaces) {
+                            face.style = `${face.style || ''} background-color: transparent;`;
+                            face.connect('notify::hover', syncCluster);
+                            face.connect('key-focus-in', syncCluster);
+                            face.connect('key-focus-out', syncCluster);
+                        }
+                    }
                     actor = shell;
                 }
             } else {
@@ -908,6 +955,14 @@ class Bar {
             return Clutter.EVENT_PROPAGATE;
         const [x, y] = event.get_coords();
         const picked = event.get_source();
+        // Captured events arrive before icon handlers, and their source may be
+        // a container. Resolve the icon by allocation before the bar menu.
+        const appIcon = this._appsRow?.get_children().find(icon => icon._bezelAppId && inside(icon, x, y));
+        if (appIcon) {
+            this._cancel('_appHover');
+            this._openAppActions(appIcon._bezelAppId, Shell.AppSystem.get_default().lookup_app(appIcon._bezelAppId.slice(4)), appIcon);
+            return Clutter.EVENT_STOP;
+        }
         // App menus also work when apps belong to a custom module group.
         for (let actor = picked; actor && actor !== this._actor; actor = actor.get_parent?.()) {
             if (actor._bezelAppId)
@@ -1160,7 +1215,7 @@ class Bar {
         const cell = new St.Widget({layout_manager: new Clutter.BinLayout(),
             x_expand: false, y_expand: false, clip_to_allocation: false});
         if (this._state.sections === 'pills') {
-            const plate = this._pillPlate(zone, place);
+            const plate = this._liquidGlass ? this._glassPill(zone) : this._pillPlate(zone, place);
             cell.add_child(plate);
             cell._bezelPlate = plate;
         }
@@ -1342,7 +1397,7 @@ class Bar {
 
     _popupCardStyle(radii) {
         const chrome = this._popupChromeStyle;
-        const bg = this._popupPlate ? 'transparent' : chrome.bg;
+        const bg = this._popupPlate || this._popupGlass ? 'transparent' : chrome.bg;
         return `background-color: ${bg}; color: ${chrome.fg}; border-radius: ${radii}; padding: ${chrome.pad};`;
     }
 
@@ -1391,7 +1446,7 @@ class Bar {
                     x: depth, y: depth,
                     w: Math.max(1, width - depth * 2),
                     h: Math.max(1, height - depth * 2),
-                }, this._popupPaintRadius ?? this._state.radius, this._theme.bg, 1, depth);
+                }, this._popupPaintRadius ?? this._state.radius, this._popupGlass ? null : this._theme.bg, 1, depth);
             } finally {
                 cr.$dispose();
             }
@@ -1453,8 +1508,7 @@ class Bar {
             if (sw > 0 && sh > 0)
                 cr.scale(sw / width, sh / height);
             const depth = this._shadowDepth();
-            const radius = this._state.kind === 'dock' || this._state.margin || this._state.length < 100
-                ? this._state.rounding : 0;
+            const radius = this._attachedToFrame ? 0 : this._state.rounding;
             paintPillBackdrop(cr, {x: depth, y: depth,
                 w: Math.max(1, width - depth * 2), h: Math.max(1, height - depth * 2)},
             radius, this._theme.bg, this._state.barOpacity / 100, depth);
@@ -1463,8 +1517,37 @@ class Bar {
         }
     }
 
+    _glassPill(zone) {
+        const material = new LiquidMaterial(this._monitor, this._overlay._settings, this._theme.bg);
+        const plate = material.actor;
+        material.setSurfaceOpacity(this._state.barOpacity / 100);
+        material.shadow(this._shadowDepth(), 18);
+        const sync = () => {
+            if (!plate.mapped || !zone.mapped) return;
+            const [ax, ay] = plate.get_transformed_position();
+            const bounds = zone.get_children().filter(child => child.visible).map(child => {
+                const [x, y] = child.get_transformed_position();
+                const [w, h] = child.get_transformed_size();
+                return this._vertical ? [y - ay, y - ay + h] : [x - ax, x - ax + w];
+            });
+            if (!bounds.length || !bounds.flat().every(Number.isFinite)) return;
+            const along = this._vertical ? plate.height : plate.width;
+            const start = Math.max(2, Math.min(...bounds.map(b => b[0])) - 6);
+            const end = Math.min(along - 2, Math.max(...bounds.map(b => b[1])) + 6);
+            const rect = this._vertical ? [2, start, Math.max(1, plate.width - 4), Math.max(1, end - start)]
+                : [start, 2, Math.max(1, end - start), Math.max(1, plate.height - 4)];
+            material.rectangle(plate.width, plate.height, Math.min(18, rect[2] / 2, rect[3] / 2), rect);
+        };
+        material.syncShape = sync;
+        plate._bezelSyncPlate = sync;
+        plate.connect('notify::allocation', sync);
+        plate.connect('notify::mapped', sync);
+        zone.connectObject('notify::allocation', sync, plate);
+        return plate;
+    }
+
     _sectionPill(scroll, zone, place) {
-        const plate = this._pillPlate(zone, place);
+        const plate = this._liquidGlass ? this._glassPill(zone) : this._pillPlate(zone, place);
         scroll.clip_to_allocation = false;
         scroll.x_expand = true;
         scroll.y_expand = true;
@@ -1635,6 +1718,8 @@ class Bar {
 
     _wire(actor) {
         if (actor instanceof St.Button) {
+            if (actor._bezelClickWired) return;
+            actor._bezelClickWired = true;
             actor.can_focus = true;
             actor.add_style_class_name('bezel-button');
             actor.connect('clicked', () => {
@@ -3025,6 +3110,7 @@ class Bar {
     _customGroupFace(members, group, icon) {
         const box = new St.BoxLayout({orientation: this._content.orientation, style: 'spacing: 6px;',
             x_align: Clutter.ActorAlign.CENTER});
+        box._bezelSharedFaces = [];
         const ids = group.face === 'single' ? [null] : members.map(item => item.id);
         for (const id of ids) {
             const direct = id && (group.clicks?.[id] === 'direct' || ['apps', 'workspaces'].includes(moduleType(id)));
@@ -3034,7 +3120,11 @@ class Bar {
             if (!direct) {
                 const panel = () => buildGroupPopout(this, group, group.clicks?.[id] === 'tab' ? id : null);
                 face._groupTabModule = group.clicks?.[id] === 'tab' ? id : null;
-                face._activate = () => this._toggle(`group:${group.id}`, face, panel);
+                if (!face._groupTabModule) {
+                    face._bezelSharedGroup = box;
+                    box._bezelSharedFaces.push(face);
+                }
+                face._activate = () => this._toggle(`group:${group.id}`, this._drawerAnchor(face), panel);
                 face.accessible_name = id ? GROUP_ITEMS[moduleType(id)]?.title || id : group.name;
                 this._hoverDrawer(`group:${group.id}`, face, panel, typeof group.hover === 'boolean' ? group.hover : members.some(member => this._hoverFor(member.id)));
             }
@@ -3514,7 +3604,7 @@ class Bar {
             }
             if (event.get_button() !== 3)
                 return Clutter.EVENT_PROPAGATE;
-            this._open(id, button, () => this._appMenu(id, app));
+            this._openAppActions(id, app, button);
             return Clutter.EVENT_STOP;
         });
         button.connect('notify::hover', () => {
@@ -3532,8 +3622,52 @@ class Bar {
         return button;
     }
 
+    _openAppActions(id, app, anchor) {
+        this._cancel('_appHover');
+        this._open(`app-actions:${id}`, anchor, () => {
+            const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 10px;'});
+            box.add_child(label(this._theme.fg, 17, app?.get_name() ?? 'Application unavailable'));
+            for (const entry of this._appContextEntries(id, app)) {
+                if (entry === 'sep') {
+                    box.add_child(new St.Widget({height: 1, style: `background-color: ${this._theme.border}; margin: 4px 0;`}));
+                } else box.add_child(this._action(entry.title, entry.icon, entry.run));
+            }
+            return box;
+        });
+        this._persistPopup();
+    }
+
+    _appContextEntries(id, app) {
+        const pinned = this._state.pinned.includes(id);
+        const entries = [{title: pinned ? 'Unpin from this bar' : 'Pin to this bar', icon: 'view-pin-symbolic', run: () => {
+            if (pinned) this._overlay.unpin(id, this._index);
+            else this._overlay.pin(id.slice(4), this._index);
+        }}];
+        if (!app) return entries;
+        entries.push({title: 'New window', icon: 'window-new-symbolic', run: () => app.open_new_window(-1)});
+        const info = app.get_app_info();
+        for (const action of info?.list_actions() || []) {
+            entries.push({title: info.get_action_name(action), icon: 'application-x-executable-symbolic',
+                run: () => app.launch_action(action, global.get_current_time(), -1)});
+        }
+        if (app.get_windows().length) {
+            entries.push('sep');
+            entries.push({title: 'Quit', icon: 'application-exit-symbolic', run: () => { this._close(); app.request_quit(); }});
+            entries.push({title: 'Force quit', icon: 'process-stop-symbolic', run: () => {
+                this._close();
+                for (const window of app.get_windows()) window.kill();
+            }});
+        }
+        return entries;
+    }
+
     _appMenu(id, app) {
-        const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, style: 'spacing: 10px;'});
+        const box = new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, reactive: true, style: 'spacing: 10px;'});
+        box.connect('button-press-event', (_actor, event) => {
+            if (event.get_button() !== 3) return Clutter.EVENT_PROPAGATE;
+            this._openAppActions(id, app, this._anchor || this._actor);
+            return Clutter.EVENT_STOP;
+        });
         box.add_child(label(this._theme.fg, 17, app?.get_name() ?? 'Application unavailable'));
         const windows = app?.get_windows() ?? [];
         const source = windows[0]?.get_compositor_private();
@@ -3541,17 +3675,11 @@ class Bar {
             const width = Math.min(270, source.width);
             const height = Math.min(170, width * source.height / source.width);
             const preview = new Clutter.Clone({source, width, height});
-            const wrap = new St.Widget({width, height, clip_to_allocation: true});
-            wrap.add_child(preview);
+            const wrap = new St.Button({width, height, clip_to_allocation: true, can_focus: true, accessible_name: windows[0].get_title() || app.get_name()});
+            wrap.set_child(preview);
+            wrap.connect('clicked', () => { this._close(); Main.activateWindow(windows[0]); });
             box.add_child(wrap);
         }
-        const pinned = this._state.pinned.includes(id);
-        box.add_child(this._action(pinned ? 'Unpin from this bar' : 'Pin to this bar', 'view-pin-symbolic', () => {
-            if (pinned)
-                this._overlay.unpin(id, this._index);
-            else
-                this._overlay.pin(id.slice(4), this._index);
-        }));
         if (app)
             box.add_child(this._action('New window', 'window-new-symbolic', () => app.open_new_window(-1)));
         for (const win of windows)
@@ -3782,19 +3910,31 @@ class Bar {
     }
 
     _hoverDrawer(id, button, build, enabled) {
+        // A group replaces the face's individual drawer binding.
+        if (button._bezelHoverSignal) {
+            button.disconnect(button._bezelHoverSignal);
+            this._cancel(button._bezelHoverTimer);
+        }
         button.track_hover = true;
         const timer = `_drawerHover_${id}`;
-        button.connect('notify::hover', () => {
+        button._bezelHoverTimer = timer;
+        button._drawerId = id;
+        button._bezelHoverSignal = button.connect('notify::hover', () => {
             this._cancel(timer);
             if (button.hover && enabled && !this._state.editMode && !Main.overview.visible) {
                 this._later(timer, this._state.hoverDelay, () => {
-                    if (button.hover && !Main.overview.visible && (this._popoutId !== id || this._popoutInstance !== (this._moduleInstance || null) || String(id).startsWith('group:') && this._anchor !== button))
-                        this._open(id, button, build, null, true);
+                    const anchor = this._drawerAnchor(button);
+                    if (button.hover && !Main.overview.visible && (this._popoutId !== id || this._popoutInstance !== (this._moduleInstance || null) || String(id).startsWith('group:') && this._anchor !== anchor))
+                        this._open(id, anchor, build, null, true);
                 });
             } else {
                 this._closeSoon();
             }
         });
+    }
+
+    _drawerAnchor(face) {
+        return face._bezelSharedGroup?._bezelGroupAnchor ?? face;
     }
 
     _toggle(id, anchor, build) {
@@ -3823,6 +3963,8 @@ class Bar {
         }
         if (hover && this._overlay._bars.some(bar => bar !== (this._moduleOwner || this) && bar._containsPointer()))
             return;
+        if (!this._liquidPourOpening) this._overlay._liquidPour?.finish();
+        if (!this._liquidPourOpening && pourToDrawer(this, id, anchor, build, edge, hover)) return;
         for (const bar of this._overlay._bars)
             bar._close();
         this._close();
@@ -3852,7 +3994,10 @@ class Bar {
             location = `bottom-${this._state.edge}`;
         const radius = Math.max(12, this._state.radius);
         const frame = this._overlay._frames.get(monitor.index);
-        if (location === 'icon' && frame && id !== 'status')
+        const liquid = liquidEnabled(this._overlay._settings, 'motion');
+        const separate = liquid && (this._state.kind === 'dock' || this._state.sections === 'pills'
+            || (this._state.margin ?? 0) > 0 || this._state.length < 100);
+        if (location === 'icon' && frame && id !== 'status' && !separate)
             location = this._snapPopupLocation(monitor, frame.sides, anchor) ?? location;
         edge = location === 'icon' ? (edge ?? this._state.edge) : location.split('-')[0];
         if (!['top', 'bottom', 'left', 'right'].includes(edge)) edge = this._state.edge;
@@ -3861,9 +4006,11 @@ class Bar {
         // they are a full-length edge; otherwise the card sits on the thin hide.
         const floating = (this._state.margin ?? 0) > 0;
         const attached = Boolean(frame) && !global.display.get_monitor_in_fullscreen(monitor.index)
-            && (cornered || location !== 'icon' || id === 'launcher' || this._joinedAutohide
-                || (this._state.kind !== 'dock' && !floating));
+            && (cornered || location !== 'icon' || (id === 'launcher' && !separate) || this._joinedAutohide
+                || (this._state.kind !== 'dock' && !floating && !separate));
         this._popupFrame = attached ? frame : null;
+        this._popupGlass = liquidEnabled(this._overlay._settings, 'glass-drawers')
+            || Boolean(attached && (frame.glass || this._liquidGlass));
         this._popupEdge = edge;
         this._popupLocation = location;
         const joined = cornered ? {
@@ -3897,6 +4044,28 @@ class Bar {
             clip_to_allocation: false,
         });
         this._popupPlate = this._popupShadow > 0 ? this._popupBackdropPlate() : null;
+        if (this._popupGlass && !attached) {
+            this._popupMaterial = new LiquidMaterial(this._monitor, this._overlay._settings, this._theme.bg);
+            const material = this._popupMaterial;
+            chrome(material.actor, false, false);
+            material.actor.hide();
+            this._popupCleanups.push(() => drop(material.actor));
+            material.syncShape = () => {
+                if (!this._popout?.get_stage() || !this._popupGeometry) return;
+                const {x, y, width, height} = this._popupGeometry;
+                material.actor.set_position(x, y);
+                material.actor.set_size(width, height);
+                material.rectangle(width, height, radius);
+                const [pivotX, pivotY] = this._popout.get_pivot_point();
+                material.actor.set_pivot_point(pivotX, pivotY);
+                material.actor.set_scale(this._popout.scale_x, this._popout.scale_y);
+                material.actor.opacity = this._popout.opacity;
+                const clip = this._popout.get_clip();
+                if (clip) material.actor.set_clip(...clip);
+                material.actor.visible = this._popout.visible && this._popout.opacity > 0;
+            };
+            this._popupMaterial.actor.connect('notify::allocation', this._popupMaterial.syncShape);
+        }
         if (this._popupPlate)
             this._popout.add_child(this._popupPlate);
         this._popupBox = new St.BoxLayout({
@@ -3919,7 +4088,7 @@ class Bar {
         scroll.clip_to_allocation = true;
         scroll.set_child(content);
         this._popupBox.add_child(decorateScroll(scroll, this._theme, false,
-            () => this._popoutId === 'dashboard' && Boolean(this._dashboardPageMotion || this._dashboardSizeTimeline)));
+            () => this._popoutId === 'dashboard' && Boolean(this._dashboardPageMotion || this._dashboardSizeTimeline), this._popupGlass));
         this._popupFooter = content._bezelFooter ?? null;
         if (this._popupFooter) this._popupBox.add_child(this._popupFooter);
         this._popupScroll = scroll;
@@ -3976,6 +4145,7 @@ class Bar {
         if (id === 'power' && powerDim(this._state.modules.find(item => item.id === 'power'), this._overlay._settings))
             this._overlay._showDim(monitor, this._opening());
         chrome(this._popout, true, false);
+        if (this._popupMaterial) this._popout.get_parent().set_child_below_sibling(this._popupMaterial.actor, this._popout);
         content._preparePopup?.();
         const app = String(id).startsWith('app:');
         const stable = content._preparePopup || id === 'dashboard' || id === 'osd' || id === 'clock' || id === 'shelf' || rail;
@@ -3991,6 +4161,8 @@ class Bar {
             this._placePopup();
         else
             this._fitPopup();
+        if (liquidEnabled(this._overlay._settings, 'motion'))
+            this._liquidDrawer = new LiquidDrawer(this);
         this._clipPopup(0);
         this._popout.opacity = 255;
         this._animatePopup(1);
@@ -4400,26 +4572,35 @@ class Bar {
     _clipPopup(progress = this._popupProgress ?? 0) {
         if (!this._popout || !this._popupGeometry)
             return;
+        if (this._liquidDrawer) progress = this._liquidDrawer.update(progress);
+        // A zero-depth clip padded for shadows still exposes a full-width
+        // strip. Hide the real card until it has a revealed body.
+        this._popout.opacity = progress > 0 ? 255 : 0;
+        if (this._popupPlate) this._popupPlate.opacity = Math.round(Math.min(1, Math.max(0, progress) * 6) * 255);
         const {width, height, edge, corner} = this._popupGeometry;
         const horizontal = edge === 'left' || edge === 'right';
         const depth = (horizontal ? width : height) * progress;
         const attach = Boolean(this._popupFrame);
-        const pad = this._popupPlate ? (this._popupShadow ?? 0) : 0;
+        const pad = this._popupPlate || this._popupMaterial?.shadowActor ? (this._popupShadow ?? 0) : 0;
         this._popout.set_clip((edge === 'right' ? width - depth : 0) - pad,
             (edge === 'bottom' ? height - depth : 0) - pad,
             Math.max(0, horizontal ? depth : width) + pad * 2,
             Math.max(0, horizontal ? height : depth) + pad * 2);
+        this._popupMaterial?.syncShape?.();
         if (attach && (progress <= 0 || progress >= 1))
             this._applyPopupJoin(this._state.radius, progress >= 1);
         if (progress <= 0) {
             this._popupFrame?.setPopup(null);
             return;
         }
+        const breadth = this._liquidDrawer?.style === 'grow' ? Math.max(0, Math.min(1, progress)) : 1;
         this._popupFrame?.setPopup({
-            x: this._popupGeometry.x,
-            y: this._popupGeometry.y,
-            width, height, edge,
+            x: this._popupGeometry.x + (horizontal ? 0 : width * (1 - breadth) / 2),
+            y: this._popupGeometry.y + (horizontal ? height * (1 - breadth) / 2 : 0),
+            width: horizontal ? width : width * breadth,
+            height: horizontal ? height * breadth : height, edge,
             corner: corner || false,
+            glass: this._popupGlass,
             progress,
         });
     }
@@ -4467,16 +4648,21 @@ class Bar {
 
     _watchHoverPopup() {
         if (!this._popout || !this._hoverPopup || this._popupTarget === 0) return;
-        if (this._containsPointer()) {
+        const transfer = liquidEnabled(this._overlay._settings, 'shift') || liquidEnabled(this._overlay._settings, 'pour');
+        if (this._containsPointer() || transfer && (this._actor.hover || this._overlay._liquidPour)) {
             this._outsideSince = 0;
         } else {
             this._outsideSince ||= GLib.get_monotonic_time();
-            if (GLib.get_monotonic_time() - this._outsideSince >= 300000) {
+            if (GLib.get_monotonic_time() - this._outsideSince >= (liquidEnabled(this._overlay._settings, 'motion')
+                ? this._overlay._settings.get_int('liquid-hover-hold')
+                : 300) * 1000) {
                 this._close(true);
                 return;
             }
         }
-        this._later('_hoverWatch', 100, () => this._watchHoverPopup());
+        const watchInterval = liquidEnabled(this._overlay._settings, 'motion')
+            ? Math.max(10, Math.min(100, this._overlay._settings.get_int('liquid-hover-hold'))) : 100;
+        this._later('_hoverWatch', watchInterval, () => this._watchHoverPopup());
     }
 
     _closeSoon() {
@@ -4490,7 +4676,7 @@ class Bar {
         this._popupTarget = target;
         const from = this._popupProgress;
         const duration = allowsMotion(St.Settings.get(), St.ReducedMotion)
-            ? Math.round(this._state.animationDuration * Math.abs(target - from) * (target === 0 ? 0.65 : 1)) : 0;
+            ? Math.round(this._state.animationDuration * (this._liquidDrawer ? this._overlay._settings.get_int('liquid-duration-scale') / 100 : 1) * Math.abs(target - from) * (target === 0 ? 0.65 : 1)) : 0;
         const paint = progress => {
             if (!this._popout)
                 return;
@@ -4506,7 +4692,7 @@ class Bar {
         }
         const timeline = new Clutter.Timeline({duration, actor: this._popout});
         this._popupTimeline = timeline;
-        timeline.set_progress_mode(Clutter.AnimationMode.EASE_OUT_EXPO);
+        timeline.set_progress_mode(this._liquidDrawer ? Clutter.AnimationMode.LINEAR : Clutter.AnimationMode.EASE_OUT_EXPO);
         timeline.connect('new-frame', () => paint(from + (target - from) * timeline.get_progress()));
         timeline.connect('completed', () => {
             this._popupTimeline = null;
@@ -4520,6 +4706,7 @@ class Bar {
     }
 
     _close(animate = false) {
+        if (this._overlay._liquidPour?.source === this) { this._overlay._liquidPour.cancel(); return; }
         this._popupContent?._stopDashboardMotion?.();
         for (const controller of this._notificationControllers ?? []) controller.stop();
         for (const controller of this._launcherControllers ?? []) controller.stop();
@@ -4537,6 +4724,10 @@ class Bar {
         this._popupTimeline?.stop();
         this._popupTimeline = null;
         if (this._popoutId === 'notifications') this._overlay._notifications?.setHistoryOpen(false);
+        this._liquidDrawer?.destroy();
+        this._liquidDrawer = null;
+        this._popupMaterial = null;
+        this._popupGlass = false;
         this._popupFrame?.setPopup(null);
         this._popupFrame = null;
         this._popupGeometry = null;

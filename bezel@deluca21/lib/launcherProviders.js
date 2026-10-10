@@ -1,7 +1,7 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {createSearchScorer, compareSearchResults} from './search.js';
-import {PRESETS} from './theme.js';
+import {PRESETS, resolveTheme} from './theme.js';
 import {readBars, applyPreset} from './config.js';
 import {savedLayouts, restoreLayout, rememberLayout, layoutValues} from './profiles.js';
 
@@ -33,6 +33,7 @@ export function bezelResults(bar) {
         ['Themes and colours', 'appearance palette custom', 'look'], ['Layouts and bars', 'presets saved layout', 'bar'],
         ['Screen border', 'frame width radius shadow dashboard notifications position', 'frame'],
         ['Launcher and shortcuts', 'search files folders web engine commands keyboard shortcut launcher width', 'shortcuts'],
+        ['Liquid', 'experimental liquid motion grow drip pour glass blur frame dock panel tint', 'liquid'],
         ['Opening and motion', 'animation duration hover delay edge dashboard power', 'opening'],
         ['Desktop options', 'weather hide gnome panel overview dock notifications date time format', 'desktop'],
     ]) add(name, words, page);
@@ -50,7 +51,7 @@ export function bezelResults(bar) {
         ]) add(`${title} · ${name}`, words, 'bar', index, tab);
     });
     const currentTheme = settings.get_string('theme');
-    for (const palette of PRESETS) result.push({name: palette.name, category: 'themes', swatch: palette, keywords: 'bezel theme palette colours appearance',
+    for (const palette of [...PRESETS, {...resolveTheme({get_string: key => key === 'theme' ? 'wallpaper' : settings.get_string(key)}), id: 'wallpaper', name: 'Wallpaper'}]) result.push({name: palette.name, category: 'themes', swatch: palette, keywords: 'bezel theme palette colours appearance',
         detail: currentTheme === palette.id ? 'Current theme' : 'Apply theme', selected: currentTheme === palette.id,
         icon: 'applications-graphics-symbolic', run: () => settings.set_string('theme', palette.id), alternate: () => open('look'), alternateLabel: 'Edit colours'});
     const apply = callback => {

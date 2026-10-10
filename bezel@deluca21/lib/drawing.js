@@ -217,6 +217,7 @@ export function paintPillBackdrop(cr, rect, radius, color, opacity, shadow) {
         }
         cr.restore();
     }
+    if (!color) return;
     const hex = `${color}`.replace('#', '');
     const rgb = [0, 2, 4].map(index => parseInt(hex.slice(index, index + 2), 16) / 255);
     roundedRect(cr, rect.x, rect.y, rect.w, rect.h, radius);
@@ -280,8 +281,8 @@ function paintOutside(cr, width, height, opening, color, shadow, coverage = 1) {
     cr.rectangle(0, 0, width, height);
     cr.appendPath(opening);
     cr.setFillRule(Cairo.FillRule.EVEN_ODD);
-    source(cr, color, coverage);
-    cr.fill();
+    if (color) { source(cr, color, coverage); cr.fill(); }
+    else cr.newPath();
     if (shadow > 0 && coverage > 0) {
         cr.save();
         cr.appendPath(opening);
@@ -303,4 +304,12 @@ export function paintFrame(cr, width, height, sides, radius, color, shadow, popu
     cr.setOperator(Cairo.Operator.OVER);
     openingPath(cr, width, height, sides, radius, popup, notification);
     paintOutside(cr, width, height, cr.copyPath(), color, shadow, coverage);
+}
+
+// Shadows are independent of surface fill, so glass never needs a Cairo slab.
+export function paintFrameShadow(cr, width, height, sides, radius, shadow, popup = null, notification = null) {
+    cr.setOperator(Cairo.Operator.CLEAR); cr.paint();
+    cr.setOperator(Cairo.Operator.OVER);
+    openingPath(cr, width, height, sides, radius, popup, notification);
+    paintOutside(cr, width, height, cr.copyPath(), null, shadow);
 }
