@@ -213,7 +213,7 @@ export class IndicatorBridge {
     }
 
     prepare(actor) {
-        if (!actor || actor._bezelGap)
+        if (!actor || actor._bezelGap || !this.bar._actor)
             return;
         if (actor instanceof St.Icon && !this.icons.has(actor)) {
             const record = {size: actor.icon_size, style: actor.get_style(), x: actor.x_align};

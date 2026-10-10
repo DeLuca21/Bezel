@@ -259,7 +259,7 @@ export function pourToDrawer(bar, id, anchor, build, edge, hover) {
         material.mask.set('join', [0, 0, 0, stream?.[4] ?? 0]);
         if (stream) material.mask.set('stream', [stream[0] - x, stream[1] - y, stream[2] - x, stream[3] - y]);
     };
-    overlay._liquidPour = {actor, frame: attachedFrame, source: old, timeline, paint, finish: () => finish(true), cancel: () => finish(false)};
+    overlay._liquidPour = {actor, frame: attachedFrame, source: old, destination: bar, timeline, paint, finish: () => finish(true), cancel: () => finish(false)};
     timeline.connect('new-frame', () => paint(timeline.get_progress()));
     timeline.connect('completed', () => finish(true));
     paint(0);

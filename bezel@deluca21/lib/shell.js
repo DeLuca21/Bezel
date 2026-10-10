@@ -1,5 +1,5 @@
 import {LayoutTransition} from './layoutTransition.js';
-import {activateApp, appClickHandler} from './appActivation.js';
+import {activateApp, appClickHandler, appWindows} from './appActivation.js';
 import {AppIconGeometry} from './appIconGeometry.js';
 import {moduleType, moduleView} from './moduleIdentity.js';
 import {moduleFeatures} from './moduleFeatures.js';
@@ -3592,12 +3592,20 @@ class Bar {
         const updateGeometry = this._overlay.appIconGeometry.add(button, app, this);
         const click = appClickHandler(app, this._state.appClick, () => this._toggle(id, button, () => this._appMenu(id, app)));
         button._activate = () => {
+            this._cancel('_appHover');
+            this._appHoverActor = null;
             updateGeometry();
-            if (global.get_pointer()[2] & Clutter.ModifierType.CONTROL_MASK) activateApp(app, true);
+            const newWindow = global.get_pointer()[2] & Clutter.ModifierType.CONTROL_MASK;
+            if (newWindow || this._state.appClick !== 'previews' || appWindows(app).length <= 1)
+                this._close();
+            if (newWindow) activateApp(app, true);
             else click();
         };
         button.connect('button-press-event', (_actor, event) => {
             if (event.get_button() === 2) {
+                this._cancel('_appHover');
+                this._appHoverActor = null;
+                this._close();
                 updateGeometry();
                 activateApp(app, true);
                 return Clutter.EVENT_STOP;
@@ -3614,6 +3622,7 @@ class Bar {
                 this._appHoverActor = button;
                 this._later('_appHover', this._state.hoverDelay + 150, () => {
                     this._appHoverActor = null;
+                    if (!button.hover || Main.overview.visible || this._destroyed) return;
                     this._open(id, button, () => this._appMenu(id, app), null, true);
                 });
             } else
@@ -3669,17 +3678,28 @@ class Bar {
             return Clutter.EVENT_STOP;
         });
         box.add_child(label(this._theme.fg, 17, app?.get_name() ?? 'Application unavailable'));
-        const windows = app?.get_windows() ?? [];
-        const source = windows[0]?.get_compositor_private();
+        if (app) {
+            const changed = app.connect('windows-changed', () => {
+                if (this._popoutId === id) this._close(true);
+            });
+            this._popupCleanups.push(() => app.disconnect(changed));
+        }
+        const windows = appWindows(app);
+        const previewWindow = windows.find(win => {
+            const actor = win.get_compositor_private();
+            return actor && actor.width > 0 && actor.height > 0;
+        });
+        const source = previewWindow?.get_compositor_private();
         if (source && source.width > 0 && source.height > 0) {
             const width = Math.min(270, source.width);
             const height = Math.min(170, width * source.height / source.width);
             const preview = new Clutter.Clone({source, width, height});
-            const wrap = new St.Button({width, height, clip_to_allocation: true, can_focus: true, accessible_name: windows[0].get_title() || app.get_name()});
+            const wrap = new St.Button({width, height, clip_to_allocation: true, can_focus: true, accessible_name: previewWindow.get_title() || app.get_name()});
             wrap.set_child(preview);
-            wrap.connect('clicked', () => { this._close(); Main.activateWindow(windows[0]); });
+            wrap.connect('clicked', () => { this._close(); Main.activateWindow(previewWindow); });
             box.add_child(wrap);
         }
+        if (!source) box.add_child(label(this._theme.muted, 13, windows.length ? 'Preview unavailable' : 'No open windows'));
         if (app)
             box.add_child(this._action('New window', 'window-new-symbolic', () => app.open_new_window(-1)));
         for (const win of windows)
@@ -4147,9 +4167,8 @@ class Bar {
         chrome(this._popout, true, false);
         if (this._popupMaterial) this._popout.get_parent().set_child_below_sibling(this._popupMaterial.actor, this._popout);
         content._preparePopup?.();
-        const app = String(id).startsWith('app:');
         const stable = content._preparePopup || id === 'dashboard' || id === 'osd' || id === 'clock' || id === 'shelf' || rail;
-        if (!app && !stable) {
+        if (!stable) {
             const requestFit = () => {
                 if ((this._popupProgress ?? 0) < 1)
                     return;
@@ -4166,6 +4185,12 @@ class Bar {
         this._clipPopup(0);
         this._popout.opacity = 255;
         this._animatePopup(1);
+        if (String(id).startsWith('app:')) {
+            const focusChanged = global.display.connect('notify::focus-window', () => {
+                if (this._popoutId === id) this._close();
+            });
+            this._popupCleanups.push(() => global.display.disconnect(focusChanged));
+        }
         this._press = global.stage.connect('captured-event', (_stage, event) => {
             if (event.type() === Clutter.EventType.KEY_PRESS && event.get_key_symbol() === Clutter.KEY_Escape) {
                 const auxiliary = [...(this._popupAuxActors ?? [])].find(actor => actor._bezelCloseOnEscape);
@@ -4185,8 +4210,10 @@ class Bar {
             if (this._popupCloseOutside !== false && (event.type() === Clutter.EventType.BUTTON_PRESS || event.type() === Clutter.EventType.TOUCH_BEGIN)) {
                 const [px, py] = event.get_coords();
                 const picked = global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, px, py);
-                if (!picked)
+                if (!picked) {
+                    this._close(true);
                     return Clutter.EVENT_PROPAGATE;
+                }
                 if (!this._popout.contains(picked) && picked !== this._popout
                     && !this._anchor?.contains(picked) && picked !== this._anchor
                     && ![...(this._popupAuxActors ?? [])].some(actor => actor === picked || actor.contains(picked)))
@@ -4706,7 +4733,12 @@ class Bar {
     }
 
     _close(animate = false) {
-        if (this._overlay._liquidPour?.source === this) { this._overlay._liquidPour.cancel(); return; }
+        const transfer = this._overlay._liquidPour;
+        if (transfer && (transfer.source === this || transfer.destination === this)) {
+            transfer.cancel();
+            // cancel clears the transfer before closing its destination.
+            // Continue cleanup for the source too; its frame must not linger.
+        }
         this._popupContent?._stopDashboardMotion?.();
         for (const controller of this._notificationControllers ?? []) controller.stop();
         for (const controller of this._launcherControllers ?? []) controller.stop();
@@ -4717,6 +4749,7 @@ class Bar {
         this._popupResizeTimeline?.stop();
         this._popupResizeTimeline = null;
         this._popupResizeTarget = null;
+        if (animate && this._popupTarget === 0 && this._popupTimeline) return;
         if (animate && this._popout && this._popupProgress > 0 && this._popout.visible && !this._popupInputHole) {
             this._animatePopup(0, () => this._close());
             return;
