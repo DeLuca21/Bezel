@@ -161,8 +161,13 @@ const MaterialMask = GObject.registerClass(class LiquidMaterialMask extends Shel
 });
 
 export function liquidEnabled(settings, key) {
-    return Boolean(settings?.settings_schema.has_key('liquid-motion') && settings.get_boolean('liquid-motion')
-        && (key === 'motion' || settings.get_boolean(`liquid-${key}`)));
+    const setting = `liquid-${key}`;
+    if (!settings?.settings_schema.has_key(setting)) return false;
+    // Surface materials are independent of motion; only drawer transfers
+    // require the Liquid animation style.
+    if (key === 'shift' || key === 'pour')
+        return liquidEnabled(settings, 'motion') && settings.get_boolean(setting);
+    return settings.get_boolean(setting);
 }
 
 // Atelier shell/core/glass.js uses a one-to-one window-group clone. Its
