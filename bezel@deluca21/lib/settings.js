@@ -1749,6 +1749,10 @@ export class SettingsWindow {
 
     _desktopCard() {
         this._heading('Desktop');
+        const mode = this.settings.get_string('overview-background');
+        this.card.append(this._segments([['off', 'Off'], ['dimmed', 'Dimmed wallpaper'], ['blurred', 'Blurred wallpaper'], ['gradient', 'Gradient']], mode, value => this._write(() => this.settings.set_string('overview-background', value))));
+        for (const [key, title] of mode === 'gradient' ? [['overview-gradient-strength', 'Gradient colour strength (%)']] : mode === 'off' ? [] : [['overview-dim', 'Wallpaper dimming (%)'], ...(mode === 'blurred' ? [['overview-blur', 'Blur radius (pixels)']] : [])])
+            this.card.append(this._step(title, this.settings.get_int(key), 0, 100, 5, value => this.settings.set_int(key, value)));
         this.card.append(this._toggle('Disable overview on startup', this.settings.get_boolean('disable-startup-overview'), value => this.settings.set_boolean('disable-startup-overview', value)));
         for (const [key, title] of [['weather-dashboard', 'Weather on dashboard'], ['hide-gnome-panel', 'Hide GNOME top bar'], ['hide-overview-dock', 'Hide Overview dock'], ['frame-notifications', 'Notifications on the frame']])
             this.card.append(this._toggle(title, this.settings.get_boolean(key), value => this.settings.set_boolean(key, value)));

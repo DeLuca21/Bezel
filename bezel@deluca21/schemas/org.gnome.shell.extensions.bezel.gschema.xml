@@ -202,6 +202,10 @@
     <key name="reserve-space" type="b">
       <default>true</default>
     </key>
+    <key name="overview-background" type="s"><choices><choice value="off"/><choice value="dimmed"/><choice value="blurred"/><choice value="gradient"/></choices><default>'off'</default><summary>Overview background style</summary></key>
+    <key name="overview-dim" type="i"><range min="0" max="100"/><default>35</default></key>
+    <key name="overview-blur" type="i"><range min="0" max="100"/><default>30</default></key>
+    <key name="overview-gradient-strength" type="i"><range min="0" max="100"/><default>35</default></key>
     <key name="hide-overview-dock" type="b"><default>true</default><summary>Hide the built-in dock in GNOME Overview</summary></key>
     <key name="hide-gnome-panel" type="b">
       <default>true</default>

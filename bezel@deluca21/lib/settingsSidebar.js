@@ -639,6 +639,15 @@ export class SidebarSettingsWindow extends SettingsWindow {
         this._switch(edges, 'Bottom edge opens power', this.settings.get_boolean('power-hover'), value => this.settings.set_boolean('power-hover', value));
         this._spin(edges, 'Hover delay', this.settings.get_int('hover-delay'), 100, 1000, 50, value => this.settings.set_int('hover-delay', value), 'Milliseconds before an edge drawer opens');
         this._spin(edges, 'Keep hover drawers open', this.settings.get_int('liquid-hover-hold'), 0, 10000, 50, value => this.settings.set_int('liquid-hover-hold', value), 'Minimum open time in milliseconds for Liquid drawers');
+        const backdrop = this._group('Overview background', 'Fill the space around workspace previews on every screen.');
+        const mode = this.settings.get_string('overview-background');
+        this._combo(backdrop, 'Style', [['off', 'Off'], ['dimmed', 'Dimmed wallpaper'], ['blurred', 'Blurred wallpaper'], ['gradient', 'Gradient']], mode, value => this.settings.set_string('overview-background', value), '', true);
+        if (mode === 'dimmed' || mode === 'blurred')
+            this._spin(backdrop, 'Dimming', this.settings.get_int('overview-dim'), 0, 100, 5, value => this.settings.set_int('overview-dim', value), 'Percent');
+        if (mode === 'blurred')
+            this._spin(backdrop, 'Blur radius', this.settings.get_int('overview-blur'), 0, 100, 2, value => this.settings.set_int('overview-blur', value), 'Pixels');
+        if (mode === 'gradient')
+            this._spin(backdrop, 'Colour strength', this.settings.get_int('overview-gradient-strength'), 0, 100, 5, value => this.settings.set_int('overview-gradient-strength', value), 'Percent · follows your palette');
         const gnome = this._group('GNOME shell');
         for (const [key, title, subtitle] of [['hide-gnome-panel', 'Hide GNOME top bar', 'Use Bezel bars in place of the standard top bar.'],
             ['hide-overview-dock', 'Hide Overview dock', 'Keep Bezel as your application dock in the overview.'],
