@@ -3,6 +3,8 @@ import GLib from 'gi://GLib';
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as MessageList from 'resource:///org/gnome/shell/ui/messageList.js';
+import {LiquidMaterial, liquidEnabled, MaterialActor} from './liquidMaterial.js';
+import {hexToRgba} from './theme.js';
 import {motionDuration} from './pageMotion.js';
 import {settingChoice} from './config.js';
 import {notificationJoinsFrame} from './frame-regions.js';
@@ -28,9 +30,9 @@ export class NotificationBridge {
         this.tray.clip_to_allocation = false;
         this.records = new Map();
         this.pendingStyles = new Map();
-        this.layer = new Clutter.Actor({reactive: false, layout_manager: new Clutter.FixedLayout(),
+        this.layer = new MaterialActor({x: 0, y: 0, width: global.stage.width, height: global.stage.height, reactive: false, layout_manager: new Clutter.FixedLayout(),
             x_expand: true, y_expand: true, x_align: Clutter.ActorAlign.FILL, y_align: Clutter.ActorAlign.FILL});
-        this.tray.add_child(this.layer);
+        this.parent.insert_child_below(this.layer, this.tray);
         this.bin.set_style('padding: 0; margin: 0;');
         this.signals = [
             this.bin.connect('child-added', (_bin, child) => this.decorate(child)),
@@ -40,6 +42,12 @@ export class NotificationBridge {
             this.bin.connect('notify::opacity', () => { this.layer.opacity = this.bin.opacity; }),
         ];
         for (const child of this.bin.get_children()) this.decorate(child);
+        this.paintSignal = global.stage.connect('before-paint', () => { if (this.bin?.mapped) this.position(); });
+        this.binDestroyedSignal = this.bin.connect('destroy', () => {
+            if (this.paintSignal) global.stage.disconnect(this.paintSignal);
+            this.paintSignal = null;
+            this.bin = null;
+        });
         this.position();
         // Record delivery state, never notification text. This distinguishes a
         // policy/queue skip from an acknowledged but unpainted live banner.
@@ -89,7 +97,7 @@ export class NotificationBridge {
         if (!this.bin || this.positioning) return;
         this.positioning = true;
         try {
-            const banner = this.records.keys().next().value;
+            const banner = this.tray._banner ?? this.bin.get_first_child();
             if (!banner?.has_allocation() || !this.layer.has_allocation()) return;
             const [bx, by] = banner.get_transformed_position();
             const [width, height] = banner.get_transformed_size();
@@ -106,10 +114,19 @@ export class NotificationBridge {
                 ? this.monitor.y + this.monitor.height - sides.bottom - gap - height - this.bin.y
                 : this.monitor.y + sides.top + gap + this.bin.y;
             this.tray.bannerAlignment = left ? Clutter.ActorAlign.START : Clutter.ActorAlign.END;
+            this.bin.remove_transition('translation-x');
             this.bin.translation_x += x - bx;
             this.bin.translation_y += y - by;
             this.layer.opacity = this.bin.opacity;
+            const record = this.records.get(banner);
+            if (record?.glass) {
+                const [lx, ly] = this.layer.get_transformed_position();
+                record.glass.actor.set_position(x - lx, y - ly);
+                record.glass.actor.set_size(width, height);
+                record.glass.rectangle(width, height, this.radius);
+            }
             this.frame?.setNotification({
+                glass: Boolean(record?.glass || this.frame?.glass),
                 width, height, corner, edge: bottom ? 'bottom' : 'top',
                 progress: Math.max(0, Math.min(1, (height + this.bin.y) / Math.max(1, height))),
             });
@@ -136,10 +153,18 @@ export class NotificationBridge {
             return;
         }
         const record = {style: banner.get_style(), corners: [], parts: []};
+        if (liquidEnabled(this.settings, 'glass-drawers') || this.frame?.glass) {
+            record.glass = new LiquidMaterial(this.monitor, this.settings, this.theme.bg);
+            record.glass.actor.set_size(Math.max(1, banner.width), Math.max(1, banner.height));
+            record.glass.syncShape = () => record.glass.rectangle(record.glass.actor.width, record.glass.actor.height, this.radius);
+            this.layer.add_child(record.glass.actor);
+            this.parent.set_child_below_sibling(this.layer, this.tray);
+        }
         record.destroy = banner.connect('destroy', () => {
+            record.glass?.actor.destroy();
             for (const area of record.corners) area.destroy();
             this.records.delete(banner);
-            this.frame?.setNotification(null);
+            if (!this.tray._banner || this.tray._banner === banner) this.frame?.setNotification(null);
         });
         this.records.set(banner, record);
         const radii = {
@@ -149,6 +174,11 @@ export class NotificationBridge {
             'bottom-left': `0 ${this.radius}px 0 0`,
         };
         this._bannerStyle(banner, record, radii);
+        record.actionCleanup = styleActions(banner, this.theme, {glass: !!record.glass, corners: () => {
+            const radius = Math.max(0, this.radius - 4);
+            if (!this._frameOpen()) return [radius, radius];
+            return [this._corner() === 'top-right' ? radius : 0, this._corner() === 'top-left' ? radius : 0];
+        }});
         for (const [actor, style] of [[banner._header, `color: ${this.theme.muted};`],
             [banner._header?.closeButton, `color: ${this.theme.fg}; background-color: ${this.theme.surface}; border-radius: 12px;`]]) {
             if (!actor) continue;
@@ -186,7 +216,10 @@ export class NotificationBridge {
             'bottom-right': `${this.radius}px 0 0 0`,
             'bottom-left': `0 ${this.radius}px 0 0`,
         };
-        banner.set_style(`${record.style ? `${record.style};` : ''} margin: 0; background-color: ${open ? 'transparent' : this.theme.bg}; color: ${this.theme.fg}; border: none; border-radius: ${open ? (radii ?? joined)[corner] : `${this.radius}px`}; box-shadow: ${open ? 'none' : '0 3px 10px rgba(0,0,0,0.22)'};`);
+        if (record.glass) record.glass.actor.visible = !open && this.bin.visible;
+        const style = `${record.style ? `${record.style};` : ''} margin: 0; background-color: ${open || record.glass ? 'transparent' : this.theme.bg}; color: ${this.theme.fg}; border: none; border-radius: ${open ? (radii ?? joined)[corner] : `${this.radius}px`}; box-shadow: ${open ? 'none' : '0 3px 10px rgba(0,0,0,0.22)'};`;
+        if (banner.get_style() !== style) banner.set_style(style);
+        record.actionCleanup?.refresh();
     }
 
     restyle() {
@@ -207,12 +240,17 @@ export class NotificationBridge {
         this.historyOpen = Boolean(open);
         if (open) this.wasVisible = this.bin.visible;
         this.bin.visible = open ? false : this.wasVisible ?? true;
+        this.layer.visible = this.bin.visible;
     }
 
     destroy() {
+        if (this.paintSignal) global.stage.disconnect(this.paintSignal);
+        this.paintSignal = null;
         this.setHistoryOpen(false);
         this.frame?.setNotification(null);
         if (!this.bin) return;
+        if (this.binDestroyedSignal) this.bin.disconnect(this.binDestroyedSignal);
+        this.binDestroyedSignal = 0;
         this.tray.disconnect(this.sourceAdded);
         for (const [source, ids] of this.sourceSignals)
             ids.forEach(id => source.disconnect(id));
@@ -226,6 +264,7 @@ export class NotificationBridge {
         this.pendingStyles.clear();
         this.layer?.destroy();
         for (const [banner, record] of this.records) {
+            record.actionCleanup?.();
             banner.disconnect(record.destroy);
             banner.set_style(record.style);
             for (const [actor, style] of record.parts) actor.set_style(style);
@@ -355,10 +394,10 @@ export function buildNotificationCenter(bar, embedded = false) {
         message.y_expand = true;
         if (message._actionBin?.layout_manager && 'scalingEnabled' in message._actionBin.layout_manager)
             message._actionBin.layout_manager.scalingEnabled = false;
-        message.set_style(`background-color: ${bar._theme.surface}; color: ${bar._theme.fg}; border-radius: 16px;`);
+        message.set_style(`background-color: ${bar._popupGlass ? hexToRgba(bar._theme.surface, 0.24) : bar._theme.surface}; color: ${bar._theme.fg}; border-radius: 16px;`);
         if (message._header) message._header.set_style(`color: ${bar._theme.muted};`);
         message._header?.closeButton.set_style(`color: ${bar._theme.fg}; background-color: ${bar._theme.bg}; border-radius: 12px;`);
-        styleActions(message, bar._theme);
+        styleActions(message, bar._theme, {glass: !!bar._popupGlass});
         const slot = new St.Widget({name: 'bezel-notification-slot', layout_manager: new Clutter.BinLayout(), x_expand: true,
             clip_to_allocation: true, height: 0});
         slot.add_child(message);
@@ -420,12 +459,53 @@ export function buildNotificationCenter(bar, embedded = false) {
     return box;
 }
 
-function styleActions(message, theme) {
+function styleActions(message, theme, options = {}) {
     message._header?.expandButton?.set_style(`color: ${theme.fg}; background-color: ${theme.bg}; border-radius: 12px;`);
+    const tracked = new Map();
     const apply = () => {
-        for (const button of message._buttonBox?.get_children() ?? [])
-            button.set_style(`color: ${theme.fg}; background-color: ${theme.bg}; min-height: 24px; padding: 10px 8px;`);
+        const buttons = message._buttonBox?.get_children() ?? [];
+        buttons.forEach((button, index) => {
+            // Override the shell theme's individual button rounding for the
+            // whole joined row, including interior actions and single actions.
+            const corners = options.corners?.() ?? [12, 12];
+            const left = index === 0 ? corners[0] : 0;
+            const right = index === buttons.length - 1 ? corners[1] : 0;
+            if (!tracked.has(button)) {
+                const entry = {style: button.get_style(), hover: button.track_hover, signals: []};
+                tracked.set(button, entry);
+                button.track_hover = true;
+                for (const signal of ['notify::hover', 'key-focus-in', 'key-focus-out'])
+                    entry.signals.push(button.connect(signal, () => entry.feedback()));
+                entry.signals.push(button.connect('destroy', () => tracked.delete(button)));
+            }
+            const entry = tracked.get(button);
+            entry.feedback = () => {
+                const active = button.hover || button.has_key_focus();
+                const background = active ? hexToRgba(theme.accent, options.glass ? 0.16 : 0.25)
+                    : options.glass ? hexToRgba(theme.bg, 0.12) : theme.bg;
+                button.set_style(`color: ${theme.fg}; background-color: ${background}; min-height: 24px; padding: 10px 8px; border-radius: 0 0 ${right}px ${left}px; border: none; box-shadow: none;`);
+            };
+            entry.feedback();
+        });
     };
     apply();
-    message.notification?.connectObject('action-added', apply, message);
+    const notification = message.notification;
+    const signals = ['action-added', 'action-removed'].map(signal => notification?.connect(signal, apply)).filter(Boolean);
+    let notificationAlive = !!notification;
+    if (notification) signals.push(notification.connect('destroy', () => { notificationAlive = false; }));
+    let stopped = false;
+    const cleanup = () => {
+        if (stopped) return;
+        stopped = true;
+        if (notificationAlive) signals.forEach(id => notification.disconnect(id));
+        for (const [button, entry] of tracked) {
+            entry.signals.forEach(id => button.disconnect(id));
+            button.track_hover = entry.hover;
+            button.set_style(entry.style);
+        }
+        tracked.clear();
+    };
+    message.connect('destroy', cleanup);
+    cleanup.refresh = apply;
+    return cleanup;
 }

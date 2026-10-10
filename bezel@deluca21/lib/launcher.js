@@ -175,9 +175,15 @@ export function buildLauncher(bar) {
                 highlight.opacity = 0;
                 return;
             }
-            const [x, y] = target.get_transformed_position(), [ox, oy] = overlay.get_transformed_position();
-            if (![x, y, ox, oy, target.width, target.height].every(Number.isFinite)) return;
-            highlight.set_position(x - ox, y - oy); highlight.set_size(target.width, target.height); highlight.opacity = 255;
+            const [sx, sy] = target.get_transformed_position();
+            const [ox, oy] = overlay.get_transformed_position();
+            const parent = overlay.get_parent();
+            const [pw, ph] = parent.get_transformed_size();
+            const scaleX = parent.width > 0 && pw > 0 ? pw / parent.width : 1;
+            const scaleY = parent.height > 0 && ph > 0 ? ph / parent.height : 1;
+            const x = (sx - ox) / scaleX, y = (sy - oy) / scaleY;
+            if (![x, y, target.width, target.height].every(Number.isFinite)) return;
+            highlight.set_position(x, y); highlight.set_size(target.width, target.height); highlight.opacity = 255;
         };
         const move = (target, duration) => {
             stop();
@@ -185,8 +191,14 @@ export function buildLauncher(bar) {
             if (!target?.get_stage()) { highlight.opacity = 0; return; }
             if (!duration || !highlight.opacity) { sync(target); return; }
             const from = [highlight.x, highlight.y, highlight.width, highlight.height];
-            const [x, y] = target.get_transformed_position(), [ox, oy] = overlay.get_transformed_position();
-            const to = [x - ox, y - oy, target.width, target.height];
+            const [sx, sy] = target.get_transformed_position();
+            const [ox, oy] = overlay.get_transformed_position();
+            const parent = overlay.get_parent();
+            const [pw, ph] = parent.get_transformed_size();
+            const scaleX = parent.width > 0 && pw > 0 ? pw / parent.width : 1;
+            const scaleY = parent.height > 0 && ph > 0 ? ph / parent.height : 1;
+            const x = (sx - ox) / scaleX, y = (sy - oy) / scaleY;
+            const to = [x, y, target.width, target.height];
             if (!to.every(Number.isFinite)) return;
             const t = new Clutter.Timeline({duration, actor: layer}); timeline = t;
             targetActor = target;

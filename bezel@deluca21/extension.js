@@ -1,5 +1,7 @@
+import {WallpaperPalette} from './lib/wallpaperPalette.js';
 import GObject from 'gi://GObject';
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import {Dash} from 'resource:///org/gnome/shell/ui/dash.js';
@@ -15,6 +17,8 @@ import {launchSettings} from './lib/settingsLauncher.js';
 export default class BezelExtension extends Extension {
     enable() {
         this._settings = this.getSettings();
+        this._wallpaperPalette = new WallpaperPalette(this._settings);
+        this._startupOverviewHandled = false;
         try {
             this._sessionMotion = new SessionMotion(this._settings,
                 () => this._enableDesktop(), () => this._disableDesktop(),
@@ -27,6 +31,8 @@ export default class BezelExtension extends Extension {
     }
 
     disable() {
+        this._wallpaperPalette?.destroy();
+        this._wallpaperPalette = null;
         this._sessionMotion?.destroy();
         this._sessionMotion = null;
         this._disableDesktop();
@@ -48,6 +54,29 @@ export default class BezelExtension extends Extension {
             this._syncShortcuts();
             this._dashSetting = this._settings.connect('changed::hide-overview-dock', () => this._syncOverviewDash());
             this._syncOverviewDash();
+            if (!this._startupOverviewHandled && Main.layoutManager._startingUp) {
+                this._startupOverviewHandled = true;
+                if (this._settings.get_boolean('disable-startup-overview')) {
+                    this._startupHasOverview = Main.sessionMode.hasOverview;
+                    Main.sessionMode.hasOverview = false;
+                }
+                this._startupOverviewSignal = Main.layoutManager.connect('startup-complete', () => {
+                    Main.layoutManager.disconnect(this._startupOverviewSignal);
+                    this._startupOverviewSignal = 0;
+                    this._restoreStartupOverview();
+                    if (!this._settings.get_boolean('disable-startup-overview')) return;
+                    this._startupOverviewIdle = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                        this._startupOverviewIdle = 0;
+                        Main.overview.hide();
+                        return GLib.SOURCE_REMOVE;
+                    });
+                });
+            } else if (!this._startupOverviewHandled) {
+                // Shell can enable extensions after its startup animation.
+                this._startupOverviewHandled = true;
+                if (this._settings.get_boolean('disable-startup-overview'))
+                    Main.overview.hide();
+            }
         } catch (error) {
             this.disable();
             throw error;
@@ -55,6 +84,15 @@ export default class BezelExtension extends Extension {
     }
 
     _disableDesktop() {
+        this._restoreStartupOverview();
+        if (this._startupOverviewSignal) {
+            Main.layoutManager.disconnect(this._startupOverviewSignal);
+            this._startupOverviewSignal = 0;
+        }
+        if (this._startupOverviewIdle) {
+            GLib.source_remove(this._startupOverviewIdle);
+            this._startupOverviewIdle = 0;
+        }
         if (!this._overlay && !this._settingsId) return;
         this._restoreOverviewDash();
         if (this._dashSetting) {
@@ -77,6 +115,13 @@ export default class BezelExtension extends Extension {
             this._settingsId = 0;
         }
         this._restorePanel();
+    }
+
+    _restoreStartupOverview() {
+        if (this._startupHasOverview === undefined) return;
+        if (!Main.sessionMode.hasOverview)
+            Main.sessionMode.hasOverview = this._startupHasOverview;
+        this._startupHasOverview = undefined;
     }
 
     _syncOverviewDash() {

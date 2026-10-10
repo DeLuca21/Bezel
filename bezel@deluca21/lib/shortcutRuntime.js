@@ -13,8 +13,10 @@ import {activateScreenshot, openSettings} from './tools.js';
 const column = () => new St.BoxLayout({orientation: Clutter.Orientation.VERTICAL, x_expand: true, style: 'spacing: 8px;'});
 const text = (bar, value) => new St.Label({text: value, x_expand: true, style: `color: ${bar._theme.fg}; font-size: 13px;`});
 function action(bar, name, run) {
-    const b = new St.Button({label: name, can_focus: true, x_expand: true, style: `background-color: ${bar._theme.surface}; color: ${bar._theme.fg}; padding: 10px; border-radius: 12px;`});
+    const b = new St.Button({label: name, can_focus: true, track_hover: true, style_class: 'bezel-action', x_expand: true, style: `background-color: ${bar._theme.surface}; color: ${bar._theme.fg}; padding: 10px; border-radius: 12px;`});
     if (b.get_child() instanceof St.Label) b.get_child().clutter_text.ellipsize = Pango.EllipsizeMode.END;
+    const feedback = () => { b.style = `background-color: ${bar._theme.surface}; color: ${bar._theme.fg}; padding: 10px; border-radius: 12px; box-shadow: inset 0 0 0 2px ${b.hover || b.has_key_focus() ? bar._theme.accent : 'transparent'};`; };
+    b.connect('notify::hover', feedback); b.connect('key-focus-in', feedback); b.connect('key-focus-out', feedback); feedback();
     b.connect('clicked', run); return b;
 }
 const fileFor = path => Gio.File.new_for_path(path === '~' ? GLib.get_home_dir() : path.startsWith('~/') ? `${GLib.get_home_dir()}/${path.slice(2)}` : path);
@@ -25,17 +27,19 @@ function shortcutIcon(item, size) {
 }
 export function shortcutFace(bar, options, size) {
     const item = options.shortcuts?.length === 1 ? options.shortcuts[0] : null;
-    const name = item?.name || 'Shortcuts';
+    const name = options.shortcutLabel || item?.name || 'Shortcuts';
     const orientation = bar._content?.orientation ?? (bar._vertical ? Clutter.Orientation.VERTICAL : Clutter.Orientation.HORIZONTAL);
     const row = new St.BoxLayout({orientation, style: `spacing: 6px; color: ${bar._theme.fg};`, y_align: Clutter.ActorAlign.CENTER});
-    if (options.shortcutIcons !== false || options.shortcutNames === false) row.add_child(shortcutIcon(item, size));
-    if (options.shortcutNames !== false) {
+    if (options.shortcutButtonIcon !== false || options.shortcutButtonName === false) row.add_child(options.shortcutIcon ? new St.Icon({icon_name: options.shortcutIcon, icon_size: size}) : shortcutIcon(item, size));
+    if (options.shortcutButtonName !== false) {
         const label = text(bar, name); label.y_align = Clutter.ActorAlign.CENTER;
         label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
         label.style += ` max-width: ${orientation === Clutter.Orientation.VERTICAL ? size : 140}px;`;
         row.add_child(label);
     }
-    return new St.Button({child: row, accessible_name: name, can_focus: true, x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER});
+    const button = new St.Button({child: row, accessible_name: name, can_focus: true, track_hover: true, style_class: 'bezel-button', x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER});
+    button.style = 'padding: 4px; border-radius: 12px; background-color: transparent;';
+    return button;
 }
 function commandPanel(bar, shortcut) {
     const root = column(); const status = text(bar, `Running ${shortcut.name}…`); root.add_child(status);
@@ -387,6 +391,13 @@ export function liveFolder(bar, path) {
 }
 export function shortcutsPanel(bar, options) {
     const root = column(); const details = column();
+    const grid = options.shortcutLayout === 'grid';
+    const layout = grid ? new Clutter.GridLayout() : null;
+    const items = grid ? new St.Widget({layout_manager: layout, x_expand: true}) : column();
+    if (layout) { layout.set_column_spacing(8); layout.set_row_spacing(8); }
+    const columns = Math.max(1, Math.min(4, Math.floor((bar._popupWidth - 36) / 110) || 1));
+    let index = 0;
+    root.add_child(items);
     const show = actor => { details.destroy_all_children(); details.add_child(actor); bar._popupLockedHeight = false; bar._fitPopup(); bar._later('_shortcutFit', 30, () => bar._fitPopup()); };
     for (const item of options.shortcuts || []) {
         const activate = () => {
@@ -403,12 +414,16 @@ export function shortcutsPanel(bar, options) {
             } catch (error) { show(text(bar, error.message)); }
         };
         const b = action(bar, '', activate); b.accessible_name = item.name;
-        const row = new St.BoxLayout({style: 'spacing: 8px;', x_align: Clutter.ActorAlign.CENTER});
+        const row = new St.BoxLayout({orientation: grid ? Clutter.Orientation.VERTICAL : Clutter.Orientation.HORIZONTAL, style: 'spacing: 8px;', x_align: Clutter.ActorAlign.CENTER});
+        if (grid) { b.width = Math.max(80, Math.floor((bar._popupWidth - 36 - (columns - 1) * 8) / columns)); b.y_expand = true; }
         if (options.shortcutIcons !== false || options.shortcutNames === false) {
             row.add_child(shortcutIcon(item, 24));
         }
-        if (options.shortcutNames !== false) row.add_child(text(bar, item.name)); b.set_child(row); root.add_child(b);
+        if (options.shortcutNames !== false) row.add_child(text(bar, item.name)); b.set_child(row);
+        if (layout) layout.attach(b, index % columns, Math.floor(index / columns), 1, 1);
+        else items.add_child(b);
+        index++;
     }
-    if (!root.get_n_children()) root.add_child(text(bar, 'Add shortcuts in this module’s settings.'));
+    if (!index) root.add_child(text(bar, 'Add shortcuts in this module’s settings.'));
     root.add_child(details); return root;
 }

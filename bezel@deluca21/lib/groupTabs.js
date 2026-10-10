@@ -22,23 +22,39 @@ export function groupTabs(bar, entries, build, initial = 0, selected = () => {})
     let current = -1, highlightTimeline = null, closed = false;
     const buttons = entries.map((entry, index) => {
         // Share spare row space while retaining each label's natural width.
-        const button = new St.Button({label: entry.title, can_focus: true, x_expand: true});
+        const button = new St.Button({label: entry.title, can_focus: true, track_hover: true, style_class: 'bezel-group-tab', x_expand: true});
+        button._syncTabFeedback = () => { button.style = `padding: 12px 18px; border-radius: 12px; color: ${current === index ? theme.accent : theme.muted}; background-color: ${button.hover || button.has_key_focus() ? theme.surface : 'transparent'}; box-shadow: inset 0 0 0 2px ${button.hover || button.has_key_focus() ? theme.accent : 'transparent'};`; };
+        button.connect('notify::hover', button._syncTabFeedback);
+        button.connect('key-focus-in', button._syncTabFeedback);
+        button.connect('key-focus-out', button._syncTabFeedback);
         button.connect('clicked', () => select(index)); strip.add_child(button); return button;
     });
     const syncHighlight = () => {
         if (closed || highlightTimeline || current < 0 || !buttons[current].get_stage()) return;
         const b = buttons[current];
-        const [x, y] = b.get_transformed_position(), [ox, oy] = overlay.get_transformed_position();
-        if (![x, y, ox, oy, b.width, b.height].every(Number.isFinite) || b.width <= 0) return;
-        highlight.set_position(x - ox, y - oy); highlight.set_size(b.width, b.height); highlight.opacity = 255;
+        const [sx, sy] = b.get_transformed_position();
+        const [ox, oy] = overlay.get_transformed_position();
+        const parent = overlay.get_parent();
+        const [pw, ph] = parent.get_transformed_size();
+        const scaleX = parent.width > 0 && pw > 0 ? pw / parent.width : 1;
+        const scaleY = parent.height > 0 && ph > 0 ? ph / parent.height : 1;
+        const x = (sx - ox) / scaleX, y = (sy - oy) / scaleY;
+        if (![x, y, b.width, b.height].every(Number.isFinite) || b.width <= 0) return;
+        highlight.set_position(x, y); highlight.set_size(b.width, b.height); highlight.opacity = 255;
     };
     const moveHighlight = duration => {
         highlightTimeline?.stop(); highlightTimeline = null;
         if (!duration || !highlight.opacity) { syncHighlight(); return; }
         const from = [highlight.x, highlight.y, highlight.width, highlight.height];
         const b = buttons[current];
-        const [x, y] = b.get_transformed_position(), [ox, oy] = overlay.get_transformed_position();
-        const to = [x - ox, y - oy, b.width, b.height];
+        const [sx, sy] = b.get_transformed_position();
+        const [ox, oy] = overlay.get_transformed_position();
+        const parent = overlay.get_parent();
+        const [pw, ph] = parent.get_transformed_size();
+        const scaleX = parent.width > 0 && pw > 0 ? pw / parent.width : 1;
+        const scaleY = parent.height > 0 && ph > 0 ? ph / parent.height : 1;
+        const x = (sx - ox) / scaleX, y = (sy - oy) / scaleY;
+        const to = [x, y, b.width, b.height];
         if (!to.every(Number.isFinite)) return;
         const t = new Clutter.Timeline({duration, actor: layer}); highlightTimeline = t;
         t.set_progress_mode(Clutter.AnimationMode.EASE_OUT_CUBIC);
@@ -66,7 +82,7 @@ export function groupTabs(bar, entries, build, initial = 0, selected = () => {})
         build(entries[index], page, cleanups);
         const direction = index >= current ? 1 : -1;
         current = index;
-        buttons.forEach((b, i) => b.style = `padding: 12px 18px; border-radius: 12px; color: ${i === index ? theme.accent : theme.muted};`);
+        buttons.forEach(b => b._syncTabFeedback());
         motion.show(page, direction);
         selected(index);
         moveHighlight(motionDuration(bar));

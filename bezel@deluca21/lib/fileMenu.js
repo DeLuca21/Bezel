@@ -14,7 +14,7 @@ function pointerCoords(event) {
     const x = raw?.[raw.length - 2], y = raw?.[raw.length - 1];
     if (Number.isFinite(x) && Number.isFinite(y) && (x > 2 || y > 2))
         return [x, y];
-    return global.get_pointer();
+    return global.get_pointer().slice(0, 2);
 }
 
 export function popupChromeMenu(bar, x, y, entries) {
@@ -49,6 +49,7 @@ export function popupChromeMenu(bar, x, y, entries) {
         shade.destroy();
     };
     wrap._bezelCloseOnEscape = close;
+    bar._popupCleanups?.push(close);
     for (const entry of entries) {
         if (entry === 'sep') {
             box.add_child(new St.Widget({height: 1, style: `background-color: ${theme.surface}; margin: 4px 8px;`}));

@@ -87,7 +87,11 @@ export function buildDashboard(bar) {
         if (!button?.get_stage() || button.width <= 0) return;
         const [bx, by] = button.get_transformed_position();
         const [lx, ly] = highlightLayer.get_transformed_position();
-        const target = [bx - lx, by - ly, button.width, button.height];
+        const parent = highlightLayer.get_parent();
+        const [pw, ph] = parent.get_transformed_size();
+        const scaleX = parent.width > 0 && pw > 0 ? pw / parent.width : 1;
+        const scaleY = parent.height > 0 && ph > 0 ? ph / parent.height : 1;
+        const target = [(bx - lx) / scaleX, (by - ly) / scaleY, button.width, button.height];
         if (!target.every(Number.isFinite)) return;
         const from = highlightFrom ?? target;
         const values = target.map((value, i) => from[i] + (value - from[i]) * highlightProgress);

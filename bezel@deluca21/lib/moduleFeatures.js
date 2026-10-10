@@ -2,7 +2,7 @@
 export const FEATURE_OPTIONS = {
     shelf: {shelfOpenOnDrag: ['Open when dragging files over the bar', true], shelfRemoveAfterDrop: ['Remove from shelf after a successful drop', true], shelfRemember: ['Remember shelf contents between openings', true], shelfCloseOutside: ['Close when clicking outside', true], shelfCloseAfterDrop: ['Close after dragging files out', true]},
     timer: {timerIcon: ['Show icon', true], timerName: ['Show current timer name', false], timerRemaining: ['Show remaining time', false]},
-    shortcuts: {shortcutIcons: ['Show shortcut icons', true], shortcutNames: ['Show shortcut names', true]},
+    shortcuts: {shortcutButtonIcon: ['Bar button: show icon', true], shortcutButtonName: ['Bar button: show name', true], shortcutIcons: ['Contents: show icons', true], shortcutNames: ['Contents: show names', true]},
     volume: {showOutputDevices: ['Output device selector', false]},
     microphone: {showInputDevices: ['Input device selector', true]},
     notifications: {embedded: ['Show notification list', false]},
@@ -23,6 +23,9 @@ export function normalizeFeatures(value = {}) {
         if (Number.isFinite(value[key])) result[key] = Math.min(max, Math.max(min, Math.round(value[key] ?? fallback)));
     if (['copy', 'move', 'ask'].includes(value.shelfDragAction)) result.shelfDragAction = value.shelfDragAction;
     if (['list', 'rail'].includes(value.powerStyle)) result.powerStyle = value.powerStyle;
+    if (['list', 'grid'].includes(value.shortcutLayout)) result.shortcutLayout = value.shortcutLayout;
+    if (typeof value.shortcutLabel === 'string') result.shortcutLabel = value.shortcutLabel.trim().slice(0, 80);
+    if (typeof value.shortcutIcon === 'string') result.shortcutIcon = value.shortcutIcon.trim().slice(0, 160);
     if (Array.isArray(value.shortcuts)) result.shortcuts = value.shortcuts.slice(0, 24).filter(item => item && ['app', 'folder', 'file', 'live-folder', 'command', 'action'].includes(item.type)).map(item => ({
         name: String(item.name || 'Shortcut').slice(0, 80), type: item.type, target: String(item.target || '').slice(0, 8192), showOutput: item.showOutput !== false,
     }));

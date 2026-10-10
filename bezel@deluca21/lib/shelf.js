@@ -4,7 +4,6 @@ import {FILE_LIST_GAP, FILE_LIST_ICON, FILE_TILE_GAP, FILE_TILE_ICON, FILE_TILE_
 import {loadFileView, loadShelfFiles, mergeShelfFiles, parseFileUris, saveFileView, saveShelfFiles, shelfStoragePath} from './shelfStore.js';
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
-import GObject from 'gi://GObject';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Pango from 'gi://Pango';
@@ -449,8 +448,8 @@ export function shelfView(bar, options = {}) {
         }
         if (options.shelfCloseAfterDrop !== false) bar._close();
     };
-    const startNative = () => {
-        if (disposed) return;
+    const startNative = (forDrop = false) => {
+        if (disposed || (!files.length && !forDrop && !options.openedForDrag)) return;
         retainShelfHelper(options.shelfDragAction || 'copy');
         helper.onMessage = message => {
             if (disposed) return;
@@ -487,9 +486,12 @@ export function shelfView(bar, options = {}) {
         };
         const adj = bar._popupScroll?.vadjustment;
         if (adj && !scrollSignals) {
-            scrollSignals = GObject.SignalGroup.new(St.Adjustment);
-            scrollSignals.connect_data('notify::value', () => syncNative(), 0);
-            scrollSignals.set_target(adj);
+            scrollSignals = {adjustment: adj, signal: adj.connect('notify::value', () => syncNative())};
+            bar._popupCleanups.push(() => {
+                if (!scrollSignals) return;
+                const {adjustment, signal} = scrollSignals; scrollSignals = null;
+                adjustment.disconnect(signal);
+            });
         }
         if (!nativeSync) nativeSync = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => { syncNative(); return GLib.SOURCE_CONTINUE; });
         syncNative();
@@ -542,6 +544,12 @@ export function shelfView(bar, options = {}) {
         const width = panelWidth();
         if (root.get_stage()) root.width = width;
         if (!items.length) {
+            if (covered) {
+                covered = false; bar._popupInputHole = false;
+                bar._popout.reactive = true; area.reactive = true; viewButton.reactive = true;
+                bar._resetOutsideDismiss(); bar._enableOutsideDismiss();
+            }
+            parkShelfHelper();
             lastCols = 0;
             lastLayout = '';
             area.height = 220;
@@ -653,6 +661,7 @@ export function shelfView(bar, options = {}) {
         }
         paint();
         refreshing = false;
+        if (root.mapped) startNative();
         if (covered) tiles.forEach(tile => { tile.reactive = false; });
         if (root.get_stage())
             GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => { if (!disposed) bar._fitPopup?.(); return GLib.SOURCE_REMOVE; });
@@ -694,7 +703,7 @@ export function shelfView(bar, options = {}) {
     const move = tracker.connect('dnd-position-change', (_dnd, x, y) => {
         overDrop = overShelf(x, y);
         setHighlight(overDrop && !draggingOut);
-        if (overDrop) bar._persistPopup();
+        if (overDrop) { bar._persistPopup(); startNative(true); }
     });
     const leave = tracker.connect('dnd-leave', () => {
         overDrop = false; setHighlight(false); syncNative();
@@ -728,7 +737,6 @@ export function shelfView(bar, options = {}) {
         disposed = true; endRubber(); closeMenu(); generation++; cancel.cancel();
         if (relayout) GLib.source_remove(relayout);
         if (nativeSync) GLib.source_remove(nativeSync);
-        scrollSignals?.set_target(null);
         scrollSignals = null;
         if (helper.actor) bar._popupAuxActors?.delete(helper.actor);
         parkShelfHelper();
@@ -775,7 +783,6 @@ export function openShelf(bar, anchor = bar._actor, features = {}) {
 
 const shelfOpen = bar => bar._popoutId === 'shelf' || bar._shelfOpen;
 export function shelfFace(bar, size) {
-    retainShelfHelper(moduleFeatures(bar, 'shelf').shelfDragAction || 'copy');
     const face = new St.Button({child: new St.Icon({icon_name: 'folder-download-symbolic', icon_size: size}), can_focus: true, accessible_name: 'File shelf'});
     face._activate = () => { if (shelfOpen(bar)) bar._close(); else openShelf(bar, face); };
     face.track_hover = true;
@@ -786,6 +793,8 @@ export function shelfFace(bar, size) {
     });
     const dnd = global.backend.get_dnd(); let pending = 0;
     const signal = dnd.connect('dnd-position-change', (_tracker, x, y) => {
+        // Prepare native file transfer only during a drag, never on hover.
+        retainShelfHelper(moduleFeatures(bar, 'shelf').shelfDragAction || 'copy');
         if (moduleFeatures(bar, 'shelf').shelfOpenOnDrag === false) return;
         if (bar._state.autohide) {
             const m = bar._monitor, edge = bar._state.edge;

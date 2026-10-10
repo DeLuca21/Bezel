@@ -56,6 +56,17 @@ export function setKind(settings, index, kind) {
     patchBar(settings, index, {kind: kind === 'dock' ? 'dock' : 'panel'});
 }
 
+export function movePinnedApp(settings, index, id, beforeId = '') {
+    const pinned = readBars(settings)[index]?.pinned;
+    if (!pinned?.includes(id) || id === beforeId || (beforeId && !pinned.includes(beforeId)))
+        return false;
+    const next = pinned.filter(pin => pin !== id);
+    next.splice(beforeId ? next.indexOf(beforeId) : next.length, 0, id);
+    if (next.every((pin, at) => pin === pinned[at])) return false;
+    patchBar(settings, index, {pinned: next});
+    return true;
+}
+
 export function setFloating(settings, index, floating) {
     const bar = readBars(settings)[index];
     if (!bar)
@@ -237,6 +248,19 @@ export function moveModule(settings, index, id, {place = 'center', group = '', b
     const bar = bars[index];
     if (!bar)
         return false;
+    if (id.startsWith('group:')) {
+        const groupId = id.slice(6);
+        const members = bar.modules.filter(item => item.group === groupId);
+        if (!members.length || beforeId === id) return false;
+        const spot = ['start', 'center', 'end'].includes(place) ? place : members[0].place;
+        bar.modules = bar.modules.filter(item => item.group !== groupId);
+        const targetGroup = beforeId.startsWith('group:') ? beforeId.slice(6) : '';
+        let at = bar.modules.findIndex(item => targetGroup ? item.group === targetGroup : item.id === beforeId);
+        if (at < 0) at = bar.modules.length;
+        bar.modules.splice(at, 0, ...members.map(item => ({...item, place: spot})));
+        bar.groups = barGroups(bar).map(item => item.id === groupId ? {...item, place: spot} : item);
+        saveBars(settings, bars); return true;
+    }
     const from = bar.modules.findIndex(module => module.id === id);
     if (from < 0)
         return false;
