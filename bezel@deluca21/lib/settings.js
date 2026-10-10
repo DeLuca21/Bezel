@@ -1,3 +1,5 @@
+import {WallpaperPalette} from './wallpaperPalette.js';
+import {ChipDropPreview} from './chipDropPreview.js';
 import {shortcutEditor} from './shortcutEditor.js';
 import {moduleType} from './moduleIdentity.js';
 import {FEATURE_OPTIONS, NUMBER_OPTIONS} from './moduleFeatures.js';
@@ -15,12 +17,12 @@ import {readBars, saveBars, barGroups, groupAppearance, barAppearancePreset, isS
 import {PRESETS, resolveTheme} from './theme.js';
 import {layoutPreview} from './layoutPreview.js';
 import {savedLayouts, saveLayout, restoreLayout, deleteLayout, matchingLayout, nextLayoutName, layoutIsClean, captureCleanLayout, rememberLayout, noteRevertedLayout} from './profiles.js';
-import {LOGOS} from './logos.js';
+import {LOGOS, logoFile} from './logos.js';
 import {LOGIN_THEMES} from './loginMotion.js';
 import {MODULES, addBar, removeBar, addModule, removeModule, patchBar, setFloating, setKind,
     createGroup, deleteGroup, assignGroup, resizeSpacer, reorderModule, moveModule, undoPreset, setCustomColor, patchModule, patchGroup,
     shortcutLabel, acceleratorFromEvent, assignShortcut, useRecommendedShortcuts,
-    indicatorNames, setIndicatorShown, moveIndicator, indicatorsPlaced} from './settingsModel.js';
+    indicatorNames, setIndicatorShown, moveIndicator, indicatorsPlaced, movePinnedApp} from './settingsModel.js';
 import {displayLabel, listDisplays, preferredDisplay} from './displays.js';
 
 const MODULE_NOTES = {
@@ -121,6 +123,7 @@ export class SettingsWindow {
         this.css = new Gtk.CssProvider();
         Gtk.StyleContext.add_provider_for_display(this.window.get_display(), this.css, Gtk.STYLE_PROVIDER_PRIORITY_USER + 1);
         this._build();
+        this.wallpaperPalette = new WallpaperPalette(settings);
         this.changed = settings.connect('changed', (_settings, key) => {
             if (this.writing || key === 'preview-login-animation') return;
             if (key === 'group-preview' || key === 'layout-baseline') return;
@@ -133,6 +136,7 @@ export class SettingsWindow {
         });
         this.window.connect('close-request', () => {
             this._closed = true;
+            this.wallpaperPalette.destroy();
             this._cancelScrollHold();
             this._closeItemPopover();
             settings.disconnect(this.changed);
@@ -155,7 +159,7 @@ export class SettingsWindow {
         this.groupId = this.settings.get_string('preferences-group') || null;
         try {
             const target = JSON.parse(this.settings.get_string('preferences-target') || '{}');
-            if (['bar', 'look', 'frame', 'shortcuts', 'opening', 'desktop'].includes(target.page)) this.mode = target.page;
+            if (['bar', 'look', 'frame', 'shortcuts', 'opening', 'liquid', 'desktop'].includes(target.page)) this.mode = target.page;
             if (['contents', 'size', 'appearance', 'apps'].includes(target.tab)) this.barTab = target.tab;
         } catch {}
         this._refresh();
@@ -190,6 +194,11 @@ export class SettingsWindow {
         brand.append(icon);
         brand.append(label('Bezel', 'brand'));
         header.pack_start(brand);
+        const layoutSwitch = new Gtk.Switch({active: this.settings.get_string('settings-layout') === 'sidebar', valign: Gtk.Align.CENTER,
+            tooltip_text: 'Use the new sidebar settings layout'});
+        layoutSwitch.connect('notify::active', () => this.settings.set_string('settings-layout', layoutSwitch.active ? 'sidebar' : 'classic'));
+        header.pack_end(layoutSwitch);
+        header.pack_end(label('Sidebar settings', 'muted'));
         this.editButton = button('Edit bars', () => {
             const next = !this.settings.get_boolean('edit-mode');
             this.editButton.label = next ? 'Done editing' : 'Edit bars';
@@ -347,8 +356,12 @@ export class SettingsWindow {
             .bezel-settings .preset-card { background: ${theme.surface}; padding: 7px; border-radius: 19px; }
             .bezel-settings .editor-card { background: ${theme.surface}; padding: 20px; border-radius: 24px; }
             .bezel-settings .lane, .bezel-settings .inset { background: ${theme.bg}; border-radius: 16px; padding: 12px; }
+            .bezel-settings .pinned-app { background: ${theme.surface}; border-radius: 10px; padding: 4px 10px; }
             .bezel-settings .module-chip { background: ${theme.surface}; }
             .bezel-settings .group { border: 1px solid ${theme.border}; border-radius: 15px; padding: 10px; }
+            .bezel-settings .drop-before { box-shadow: inset 0 2px ${theme.accent}; }
+            .bezel-settings .drop-after { box-shadow: inset 0 -2px ${theme.accent}; }
+            .bezel-settings .drop-gap { border: 2px dashed ${theme.accent}; border-radius: 10px; background: alpha(${theme.accent}, 0.12); }
             .bezel-settings .drop-hover { box-shadow: inset 0 0 0 2px ${theme.accent}; }
             .bezel-settings .group-title { color: ${theme.accent}; font-size: 12px; font-weight: 700; }
             .bezel-settings .segment { background: ${theme.bg}; padding: 4px; border-radius: 16px; }
@@ -387,7 +400,7 @@ export class SettingsWindow {
         if (this.settings.get_boolean('edit-mode')) this.editButton.add_css_class('is-on');
         this.selectionLabel.label = this.mode === 'bar' ? `${titleCase(bars[this.barIndex].edge)} ${bars[this.barIndex].kind} selected` : 'Click a bar to edit · + adds a bar';
         clear(this.nav);
-        for (const [id, title] of [['frame', 'Screen border'], ['shortcuts', 'Shortcuts'], ['opening', 'Opening & motion'], ['desktop', 'Desktop']])
+        for (const [id, title] of [['frame', 'Screen border'], ['shortcuts', 'Shortcuts'], ['opening', 'Opening & motion'], ['liquid', 'Liquid'], ['desktop', 'Desktop']])
             this.nav.append(button(title, () => this.choose(id), this.mode === id ? 'is-on' : '', {halign: Gtk.Align.FILL}));
         clear(this.savedChips);
         for (const profile of savedLayouts(this.settings)) {
@@ -408,7 +421,7 @@ export class SettingsWindow {
         this.scrollToken = token;
         clear(this.card);
         ({bar: () => this.groupId ? buildGroupEditor(this, bars[this.barIndex]) : this._barCard(bars[this.barIndex]), look: () => this._paletteCard(), frame: () => this._frameCard(),
-            shortcuts: () => this._shortcutCard(), opening: () => this._openingCard(), desktop: () => this._desktopCard()})[this.mode]?.();
+            shortcuts: () => this._shortcutCard(), opening: () => this._openingCard(), liquid: () => this._liquidCard(), desktop: () => this._desktopCard()})[this.mode]?.();
         this._holdScroll(position, false);
     }
 
@@ -455,7 +468,7 @@ export class SettingsWindow {
         clear(this.card);
         this.lanes = null;
         ({bar: () => this.groupId ? buildGroupEditor(this, bars[this.barIndex]) : this._barCard(bars[this.barIndex]), look: () => this._paletteCard(), frame: () => this._frameCard(),
-            shortcuts: () => this._shortcutCard(), opening: () => this._openingCard(), desktop: () => this._desktopCard()})[this.mode]?.();
+            shortcuts: () => this._shortcutCard(), opening: () => this._openingCard(), liquid: () => this._liquidCard(), desktop: () => this._desktopCard()})[this.mode]?.();
         this._holdScroll(position, false);
         this.monitor.queue_draw();
     }
@@ -703,6 +716,7 @@ export class SettingsWindow {
                 const title = horizontal(8);
                 const named = groups.find(group => group.id === groupId);
                 const nameButton = button(named?.name ?? groupId, () => this._groupPopover(nameButton, named ?? {id: groupId, name: groupId}), '', {hexpand: true});
+                this._bindDrag(nameButton, `group:${groupId}`);
                 title.append(nameButton);
                 title.append(button('×', () => {
                     this._write(() => deleteGroup(this.settings, this.barIndex, groupId), false);
@@ -754,12 +768,15 @@ export class SettingsWindow {
 
     _bindDrag(chip, id) {
         const drag = new Gtk.DragSource({actions: Gdk.DragAction.MOVE, propagation_phase: Gtk.PropagationPhase.CAPTURE});
-        drag.connect('prepare', () => Gdk.ContentProvider.new_for_value(stringValue(id)));
+        drag.connect('prepare', () => { this._settingsDragId = id; const sizeWidget = id.startsWith('group:') ? chip.get_parent()?.get_parent() || chip : chip; this._settingsDragSize = {width: sizeWidget.get_width(), height: sizeWidget.get_height()}; return Gdk.ContentProvider.new_for_value(stringValue(id)); });
         drag.connect('drag-begin', () => {
+            const face = id.startsWith('group:') ? chip.get_parent()?.get_parent() || chip : chip;
+            drag.set_icon(new Gtk.WidgetPaintable({widget: face}).get_current_image(), 0, 0);
             chip._suppressClick = true;
             this._closeItemPopover();
         });
         drag.connect('drag-end', () => GLib.timeout_add(GLib.PRIORITY_DEFAULT, 80, () => {
+            this._settingsDragId = null;
             chip._suppressClick = false;
             return GLib.SOURCE_REMOVE;
         }));
@@ -768,36 +785,38 @@ export class SettingsWindow {
 
     _bindDrop(lane, chips, place) {
         const drop = Gtk.DropTarget.new(GObject.TYPE_STRING, Gdk.DragAction.MOVE);
+        let preview = null, groupId = '', groupRegions = null;
+        const reset = () => { preview?.reset(); preview = null; lane.remove_css_class('drop-hover'); };
         const highlight = (x, y) => {
-            lane.remove_css_class('drop-hover');
-            let child = chips.get_first_child?.();
-            while (child) {
-                child.get_child?.()?.remove_css_class('drop-hover');
-                child = child.get_next_sibling?.();
+            const id = this._settingsDragId;
+            if (!id) return;
+            if (!groupRegions) {
+                groupRegions = [];
+                for (let child = chips.get_first_child(); child; child = child.get_next_sibling()) {
+                    const widget = child.get_child();
+                    if (widget?._bezelDropId?.startsWith('group:'))
+                        groupRegions.push({widget, rect: boundsOf(child, lane), membersRect: widget._members ? boundsOf(widget._members, lane) : null});
+                }
             }
-            const target = this._groupUnder(chips, lane, x, y) ?? lane;
-            target.add_css_class('drop-hover');
+            const region = id.startsWith('group:') ? null : groupRegions.find(({rect}) => rect && x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height);
+            const group = region?.widget;
+            const container = group?._members || chips;
+            groupId = group?._bezelDropId.slice(6) || '';
+            if (preview?.container !== container) { reset(); preview = new ChipDropPreview(container, widget => widget._bezelDropId); }
+            const point = region?.membersRect ? {x: x - region.membersRect.x, y: y - region.membersRect.y} : this._into(container, lane, x, y);
+            preview.motion(point.x, point.y, id, this._settingsDragSize);
         };
-        drop.connect('enter', (_target, x, y) => {
-            highlight(x, y);
-            return Gdk.DragAction.MOVE;
-        });
-        drop.connect('motion', (_target, x, y) => {
-            highlight(x, y);
-            return Gdk.DragAction.MOVE;
-        });
-        drop.connect('leave', () => {
-            lane.remove_css_class('drop-hover');
-            let child = chips.get_first_child?.();
-            while (child) {
-                child.get_child?.()?.remove_css_class('drop-hover');
-                child = child.get_next_sibling?.();
-            }
-        });
+        drop.connect('enter', (_target, x, y) => { highlight(x, y); return Gdk.DragAction.MOVE; });
+        drop.connect('motion', (_target, x, y) => { highlight(x, y); return Gdk.DragAction.MOVE; });
+        drop.connect('leave', () => { reset(); groupRegions = null; });
         drop.connect('drop', (_target, value, x, y) => {
-            lane.remove_css_class('drop-hover');
-            const text = typeof value === 'string' ? value : value?.get_string?.() ?? '';
-            if (text) this._dropOnLane(text, place, chips, lane, x, y);
+            const id = typeof value === 'string' ? value : value?.get_string?.() ?? '';
+            groupRegions = null;
+            if (!id) { reset(); return false; }
+            if (preview?.active) {
+                const before = preview.before, group = groupId;
+                reset(); this._applyDrop(id, place, group, before);
+            } else { reset(); this._dropOnLane(id, place, chips, lane, x, y); }
             return true;
         });
         lane.add_controller(drop);
@@ -933,7 +952,7 @@ export class SettingsWindow {
         anchor.add_css_class('is-on');
         this.itemPopover = popover;
         this.itemAnchor = anchor;
-        const box = vertical(10, {margin_top: 10, margin_bottom: 10, margin_start: 12, margin_end: 12, width_request: 260});
+        const box = vertical(10, {margin_top: 10, margin_bottom: 10, margin_start: 12, margin_end: 12, width_request: moduleType(current.id) === 'shortcuts' ? 640 : 260});
         const header = horizontal(8);
         header.append(label(nameOf(current.id), 'subheading', {hexpand: true}));
         header.append(button('×', () => this._closeItemPopover()));
@@ -989,7 +1008,10 @@ export class SettingsWindow {
         }
         box.append(reorder);
         this._moduleOptions(box, current, bar);
-        popover.set_child(new Gtk.ScrolledWindow({child: box, max_content_height: 560, propagate_natural_height: true, hscrollbar_policy: Gtk.PolicyType.NEVER}));
+        const optionPages = new Gtk.Stack({vhomogeneous: false, hhomogeneous: false});
+        optionPages.add_named(new Gtk.ScrolledWindow({child: box, max_content_height: 560, propagate_natural_height: true, hscrollbar_policy: Gtk.PolicyType.NEVER}), 'options');
+        popover._optionsStack = optionPages;
+        popover.set_child(optionPages);
 
         popover.connect('closed', () => {
             anchor._popoverClosedAt = GLib.get_monotonic_time();
@@ -1024,7 +1046,38 @@ export class SettingsWindow {
             box.append(label('Moving is handled by the destination app. Removing an entry from the shelf never deletes the original file.', 'muted'));
         }
         if (id !== 'shortcuts') return;
-        box.append(shortcutEditor(this, current, write));
+        box.append(label('Bar button label', 'subheading'));
+        const shortcutLabel = new Gtk.Entry({text: current.shortcutLabel || '', placeholder_text: 'Shortcuts', max_length: 80});
+        shortcutLabel.connect('changed', () => write({shortcutLabel: shortcutLabel.text}));
+        box.append(shortcutLabel);
+        box.append(label('Bar button icon', 'subheading'));
+        const icons = flow(3);
+        for (const [icon, title] of [['', 'Automatic'], ['view-grid-symbolic', 'Grid'], ['view-list-symbolic', 'List'], ['folder-symbolic', 'Folder'], ['starred-symbolic', 'Star'], ['bookmark-new-symbolic', 'Bookmark'], ['system-run-symbolic', 'Launch'], ['utilities-terminal-symbolic', 'Terminal'], ['applications-other-symbolic', 'Applications']]) {
+            const choice = button(title, () => { this._markChoice(choice); write({shortcutIcon: icon}); }, (current.shortcutIcon || '') === icon ? 'is-on' : '');
+            const face = horizontal(8);
+            face.append(new Gtk.Image({icon_name: icon || 'text-x-generic-symbolic', pixel_size: 20}));
+            face.append(label(title)); choice.set_child(face); choice.tooltip_text = title;
+            icons.insert(choice, -1);
+        }
+        box.append(icons);
+        const customIcon = new Gtk.Entry({text: current.shortcutIcon || '', placeholder_text: 'Symbolic icon name'});
+        customIcon.connect('activate', () => write({shortcutIcon: customIcon.text}));
+        box.append(customIcon);
+        box.append(label('Contents layout', 'subheading'));
+        box.append(this._segments([['list', 'List'], ['grid', 'Grid']], current.shortcutLayout || 'list', value => write({shortcutLayout: value})));
+        box.append(button('Edit shortcuts…', () => {
+            const popover = this.itemPopover;
+            if (!popover) return;
+            if (popover._shortcutStack) { popover._shortcutStack.visible_child_name = 'shortcuts'; return; }
+            const stack = popover._optionsStack;
+            const page = vertical(8, {width_request: 640});
+            page.append(button('← Module options', () => { stack.visible_child_name = 'options'; }));
+            page.append(shortcutEditor(this, current, write));
+            stack.add_named(new Gtk.ScrolledWindow({child: page, max_content_height: 500, propagate_natural_height: true, hscrollbar_policy: Gtk.PolicyType.NEVER}), 'shortcuts');
+            popover._shortcutStack = stack;
+            stack.visible_child_name = 'shortcuts';
+            popover.popup();
+        }));
     }
 
     _moduleOptions(box, current, bar, writeOverride = null) {
@@ -1270,6 +1323,9 @@ export class SettingsWindow {
                 this._markChoice(widget);
                 this._write(() => patchBar(this.settings, this.barIndex, {logoIcon: `distro:${id}`}), false);
             }, bar.logoIcon === `distro:${id}` ? 'is-on' : '');
+            const face = horizontal(8);
+            face.append(new Gtk.Image({gicon: new Gio.FileIcon({file: logoFile(`distro:${id}`)}), pixel_size: 24}));
+            face.append(label(name)); widget.set_child(face); widget.tooltip_text = name;
             logos.insert(widget, -1);
         }
         box.append(logos);
@@ -1339,11 +1395,47 @@ export class SettingsWindow {
         this.card.append(this._segments([['none', 'None'], ['line', 'Accent line'], ['background', 'Background'], ['both', 'Line + background']], bar.appFocus,
             value => patchBar(this.settings, this.barIndex, {appFocus: value})));
         this.card.append(label('Pinned applications', 'subheading'));
+        this.card.append(label('Drag to reorder. Use × to unpin.', 'muted'));
+        this.card.append(this._pinnedApps(bar));
+    }
+
+    _pinnedApps(bar) {
         const pins = flow(3);
-        for (const id of bar.pinned) pins.insert(button(`${GioUnix.DesktopAppInfo.new(id.slice(4))?.get_display_name() ?? id.slice(4)} ×`, () => {
-            this._write(() => patchBar(this.settings, this.barIndex, {pinned: readBars(this.settings)[this.barIndex].pinned.filter(pin => pin !== id)}), false);
-            this._queueCard();
-        }), -1);
+        const index = this.barIndex;
+        const bindDrop = (widget, targetId = '') => {
+            const drop = Gtk.DropTarget.new(GObject.TYPE_STRING, Gdk.DragAction.MOVE);
+            drop.connect('enter', () => { widget.add_css_class('drop-hover'); return Gdk.DragAction.MOVE; });
+            drop.connect('leave', () => widget.remove_css_class('drop-hover'));
+            drop.connect('drop', (_target, value, x) => {
+                widget.remove_css_class('drop-hover');
+                const text = typeof value === 'string' ? value : value?.get_string?.() ?? '';
+                if (!text.startsWith('pin:app:')) return false;
+                const id = text.slice(4);
+                const current = readBars(this.settings)[index]?.pinned ?? [];
+                if (!current.includes(id)) return false;
+                let before = targetId;
+                if (targetId && x > widget.get_width() / 2)
+                    before = current[current.indexOf(targetId) + 1] ?? '';
+                this._write(() => movePinnedApp(this.settings, index, id, before), false);
+                this._queueCard();
+                return true;
+            });
+            widget.add_controller(drop);
+        };
+        for (const id of bar.pinned) {
+            const name = GioUnix.DesktopAppInfo.new(id.slice(4))?.get_display_name() ?? id.slice(4);
+            const chip = horizontal(6, {tooltip_text: `Drag to reorder ${name}`});
+            chip.add_css_class('pinned-app');
+            chip.append(label(name, '', {hexpand: true, valign: Gtk.Align.CENTER}));
+            chip.append(button('×', () => {
+                if (chip._suppressClick) return;
+                this._write(() => patchBar(this.settings, index, {pinned: readBars(this.settings)[index].pinned.filter(pin => pin !== id)}), false);
+                this._queueCard();
+            }, '', {tooltip_text: `Unpin ${name}`}));
+            this._bindDrag(chip, `pin:${id}`);
+            bindDrop(chip, id);
+            pins.insert(chip, -1);
+        }
         const add = button('+ Pin an app', () => {
             const popover = new Gtk.Popover(); popover.set_parent(add);
             const box = vertical(6);
@@ -1362,7 +1454,10 @@ export class SettingsWindow {
             box.append(new Gtk.ScrolledWindow({child: apps, min_content_width: 260, min_content_height: 280, hscrollbar_policy: Gtk.PolicyType.NEVER}));
             popover.set_child(box); popover.connect('closed', () => GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => { popover.unparent(); return GLib.SOURCE_REMOVE; })); popover.popup();
         });
-        pins.insert(add, -1); this.card.append(pins);
+        add.tooltip_text = 'Pin an application, or drop a pinned app here to move it to the end';
+        bindDrop(add);
+        pins.insert(add, -1);
+        return pins;
     }
 
     _formatChoices(bar = null, parent = null, part = 'both', secondsControl = true) {
@@ -1414,7 +1509,7 @@ export class SettingsWindow {
         const current = this.settings.get_string('theme');
         const custom = {id: 'custom', name: 'Custom', ...Object.fromEntries(['bg', 'surface', 'accent', 'fg'].map(key => [key, this.settings.get_string(`custom-${key}`)]))};
         const list = vertical(6);
-        for (const palette of [...PRESETS, custom]) {
+        for (const palette of [...PRESETS, {...resolveTheme(this.settings.get_string('theme') === 'wallpaper' ? this.settings : {get_string: key => key === 'theme' ? 'wallpaper' : this.settings.get_string(key)}), id: 'wallpaper', name: 'Wallpaper'}, custom]) {
             const row = horizontal(10);
             row.append(this._swatches(palette, 22));
             row.append(label(palette.name, '', {hexpand: true, valign: Gtk.Align.CENTER}));
@@ -1426,11 +1521,30 @@ export class SettingsWindow {
                 this._markChoice(tile);
                 this._write(() => this.settings.set_string('theme', palette.id), false);
                 this._loadCss();
-                if ((palette.id === 'custom') !== wasCustom) this._queueCard();
+                if ((palette.id === 'custom') !== wasCustom || palette.id === 'wallpaper' || current === 'wallpaper') this._queueCard();
             });
             list.append(tile);
         }
         this.card.append(list);
+        if (current === 'wallpaper') {
+            this.card.append(label('Colours follow your wallpaper automatically. Choose a source swatch and how colourful the palette feels.'));
+            this.card.append(this._segments([['system', 'System style'], ['light', 'Light'], ['dark', 'Dark']],
+                this.settings.get_string('wallpaper-style'), value => this.settings.set_string('wallpaper-style', value)));
+            this.card.append(this._segments([['muted', 'Muted'], ['vibrant', 'Vibrant'], ['monochrome', 'Monochrome']],
+                this.settings.get_string('wallpaper-variant'), value => this.settings.set_string('wallpaper-variant', value)));
+            let swatches = [];
+            try { swatches = JSON.parse(this.settings.get_string('wallpaper-palette')).swatches ?? []; } catch {}
+            const row = horizontal(6);
+            row.append(button('Automatic', () => this.settings.set_int('wallpaper-swatch', -1)));
+            swatches.forEach((color, index) => {
+                const tile = new Gtk.Button({tooltip_text: `Use ${color}`, child: this._swatches({bg: color, surface: color, accent: color, fg: color}, 22)});
+                if (index === this.settings.get_int('wallpaper-swatch')) tile.add_css_class('is-on');
+                tile.connect('clicked', () => this.settings.set_int('wallpaper-swatch', index)); row.append(tile);
+            });
+            this.card.append(row);
+            const status = this.settings.get_string('wallpaper-status');
+            if (status) this.card.append(label(status));
+        }
         if (current !== 'custom') return;
         this.card.append(label('Make it your own', 'subheading'));
         for (const [key, title] of [['bg', 'Frame'], ['surface', 'Cards'], ['fg', 'Text'], ['muted', 'Secondary text'], ['accent', 'Accent'], ['group', 'Group accent'], ['border', 'Dividers']]) {
@@ -1610,8 +1724,32 @@ export class SettingsWindow {
         this.card.append(this._step('Layout transition (ms)', this.settings.get_int('layout-transition-duration'), 0, 1600, 40, value => this.settings.set_int('layout-transition-duration', value)));
     }
 
+    _liquidCard() {
+        this._heading('Liquid', 'Experimental motion. With Liquid off, Bezel keeps its usual wipe. Glass replaces the solid plate; attached drawers keep their border shoulders.');
+        this.card.append(this._toggle('Liquid motion', this.settings.get_boolean('liquid-motion'), value => this.settings.set_boolean('liquid-motion', value)));
+        this.card.append(label('Open style', 'subheading'));
+        this.card.append(this._segments([['grow', 'Grow'], ['drip', 'Drip'], ['drip-grow', 'Drip then grow'], ['drop-expand', 'Drop & expand'], ['unfold', 'Unfold']], this.settings.get_string('liquid-open-style'), value => this.settings.set_string('liquid-open-style', value)));
+        this.card.append(label('Grow expands both axes with a spring. Drip swells, detaches and becomes the card. Drip then grow finishes the droplet before revealing. Drop & expand travels from the local edge to the center. Unfold reveals at full width and settles with a bounce.', 'caption'));
+        this.card.append(label('Between drawers', 'subheading'));
+        this.card.append(this._segments([['off', 'Off'], ['shift', 'Shift'], ['pour', 'Pour']],
+            this.settings.get_boolean('liquid-shift') ? 'shift' : this.settings.get_boolean('liquid-pour') ? 'pour' : 'off', value => {
+                this.settings.set_boolean('liquid-shift', value === 'shift');
+                this.settings.set_boolean('liquid-pour', value === 'pour');
+            }));
+        this.card.append(label('Shift follows the screen border with its shoulders attached. Pour drains one drawer into the next. These apply when another drawer is already open.', 'caption'));
+        this.card.append(this._step('Hover drawer hold (ms)', this.settings.get_int('liquid-hover-hold'), 0, 10000, 50, value => this.settings.set_int('liquid-hover-hold', value)));
+        for (const [key, title] of [['drawers', 'Glass drawers'], ['docks', 'Glass docks'], ['panels', 'Glass panels'], ['frame', 'Glass screen border']])
+            this.card.append(this._toggle(title, this.settings.get_boolean(`liquid-glass-${key}`), value => this.settings.set_boolean(`liquid-glass-${key}`, value)));
+        this.card.append(label('A drawer joined to a glass border inherits its material. Panels attached to that border share its glass.', 'caption'));
+        this.card.append(this._toggle('Live window blur (expensive)', this.settings.get_boolean('liquid-live-blur'), value => this.settings.set_boolean('liquid-live-blur', value)));
+        this.card.append(this._toggle('Glass edge highlight', this.settings.get_boolean('liquid-edge-highlight'), value => this.settings.set_boolean('liquid-edge-highlight', value)));
+        for (const [key, title, min, max, step] of [['blur-radius', 'Blur radius', 0, 64, 2], ['tint', 'Tint (%)', 0, 100, 2], ['duration-scale', 'Motion duration (%)', 25, 300, 25]])
+            this.card.append(this._step(title, this.settings.get_int(`liquid-${key}`), min, max, step, value => this.settings.set_int(`liquid-${key}`, value)));
+    }
+
     _desktopCard() {
         this._heading('Desktop');
+        this.card.append(this._toggle('Disable overview on startup', this.settings.get_boolean('disable-startup-overview'), value => this.settings.set_boolean('disable-startup-overview', value)));
         for (const [key, title] of [['weather-dashboard', 'Weather on dashboard'], ['hide-gnome-panel', 'Hide GNOME top bar'], ['hide-overview-dock', 'Hide Overview dock'], ['frame-notifications', 'Notifications on the frame']])
             this.card.append(this._toggle(title, this.settings.get_boolean(key), value => this.settings.set_boolean(key, value)));
         this._formatChoices(null);

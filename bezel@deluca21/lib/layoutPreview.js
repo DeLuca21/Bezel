@@ -2,7 +2,7 @@ import Gtk from 'gi://Gtk';
 import {readBars, barGroups, groupAppearance, groupFillColor} from './config.js';
 import {resolveTheme} from './theme.js';
 
-export function layoutPreview(settings, bars = null, frame = null, height = 170, selection = null) {
+export function layoutPreview(settings, bars = null, frame = null, height = 170, selection = null, palette = null) {
     const area = new Gtk.DrawingArea({content_height: height, hexpand: true});
     let targets = [];
     if (selection) {
@@ -15,7 +15,7 @@ export function layoutPreview(settings, bars = null, frame = null, height = 170,
         area.tooltip_text = 'Click a bar to select and edit it';
     }
     area.set_draw_func((_area, cr, width, h) => {
-        const theme = resolveTheme(settings);
+        const theme = palette ?? resolveTheme(settings);
         const color = (hex, alpha = 1) => cr.setSourceRGBA(...[1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255), alpha);
         const rect = (x, y, w, hh, radius, hex, alpha = 1, outline = false) => {
             const r = Math.min(radius, w / 2, hh / 2);
