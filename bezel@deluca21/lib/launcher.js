@@ -128,9 +128,9 @@ export function buildLauncher(bar) {
             return;
         }
         try {
-            // Capture the action before closing destroys the launcher actors.
+            // Capture the action before dismissing the launcher.
             const run = alternate && item.alternate ? item.alternate : item.run;
-            if (!item.keepOpen || alternate) bar._close();
+            if (!item.keepOpen || alternate) bar._close(true);
             const key = rowKey(item);
             const result = run();
             if (item.keepOpen && !alternate) {
