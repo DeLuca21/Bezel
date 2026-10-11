@@ -78,8 +78,27 @@ export function barMotion(theme, progress, edge) {
 // Displacement always points from the desktop towards the configured bar.
 export function iconMotion(progress, position = 0.5) {
     const distance = Math.min(1, Math.abs(position - 0.5) * 2);
-    const t = Math.max(0, Math.min(1, (progress - 0.44 - distance * 0.065) / 0.38));
+    const t = Math.max(0, Math.min(1, (progress - 0.12 - distance * 0.065) / 0.5));
     const catchUp = spread(t);
     return {opacity: smooth(t / 0.52), scale: 0.96 + 0.04 * catchUp,
         across: 1 - catchUp, along: (0.5 - position) * (1 - catchUp) * 0.45};
+}
+
+// Move complete widgets/groups independently of the stretching bar plate.
+export function contentMotion(theme, progress, edge, position = 0.5) {
+    if (theme === 'liquid') {
+        const arrival = iconMotion(progress, position);
+        const distance = Math.min(1, Math.abs(position - 0.5) * 2);
+        const t = (progress - 0.12 - distance * 0.065) / 0.5;
+        return {...arrival, gather: 1 - spread(t)};
+    }
+    if (theme === 'curtain' || theme === 'cascade') {
+        const delay = theme === 'cascade' ? {top: 0.06, left: 0.18, right: 0.24, bottom: 0.38}[edge] : 0.18;
+        const t = (progress - delay - 0.25) / 0.35;
+        return {opacity: smooth(t / 0.7), scale: 0.96 + 0.04 * spread(t),
+            across: 0, along: 0, gather: 1 - spread(t)};
+    }
+    const t = theme === 'fade' ? (progress - 0.12) / 0.8 : progress / 0.9;
+    return {opacity: smooth(t), scale: 1, across: theme === 'glide' ? 1 - spread(t) : 0,
+        along: 0, gather: 0};
 }

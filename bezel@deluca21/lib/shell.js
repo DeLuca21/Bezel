@@ -835,6 +835,7 @@ class Bar {
             }
             if (!actor)
                 continue;
+            actor._bezelSessionContent = true;
             const place = item.place || PLACES[item.id] || 'end';
             zones[place].add_child(actor);
             this._order.push({id: dragId, actor});

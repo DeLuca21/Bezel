@@ -14,6 +14,8 @@ import {LiquidPath, MAX_PATH_PARTS} from './liquidPath.js';
 // Blur samples a padded local crop so adjacent frame tiles frost identically.
 // No Cairo colour layer sits above glass, and empty mask pixels are transparent.
 const declarations = `
+uniform vec4 liquid_login_clips[4];
+uniform float liquid_login_clip;
 uniform vec4 liquid_boxes[3];
 uniform vec3 liquid_corners;
 uniform float liquid_shapes;
@@ -118,6 +120,15 @@ if (liquid_shapes > 0.5) {
     }
     if (liquid_join.w > 0.25) d = blendDistance(d, bridgeDistance(p, liquid_stream, liquid_join.w), 12.0);
 }
+if (liquid_login_clip > 0.5) {
+    float clipDistance = 1e6;
+    for (int i = 0; i < 4; i++) {
+        vec4 b = liquid_login_clips[i];
+        if (b.z > 0.0 && b.w > 0.0)
+            clipDistance = min(clipDistance, boxDistance(p, b, min(b.z, b.w) * 0.5));
+    }
+    d = max(d, clipDistance);
+}
 float coverage = 1.0 - smoothstep(-0.6, 0.6, d);
 vec4 material = cogl_color_out;
 vec3 straight = material.rgb / max(material.a, 0.00001);
@@ -158,7 +169,7 @@ const MaterialMask = GObject.registerClass(class LiquidMaterialMask extends Shel
         const previous = this._values.get(name);
         if (previous?.length === values.length && previous.every((v, i) => v === values[i])) return;
         this._values.set(name, [...values]);
-        const arity = name.startsWith('path_type[') ? 2 : name.startsWith('path[') || name.startsWith('boxes[') ? 4 : values.length;
+        const arity = name.startsWith('path_type[') ? 2 : name.startsWith('path[') || name.startsWith('boxes[') || name.startsWith('login_clips[') ? 4 : values.length;
         this.set_uniform_float(this.get_uniform_location(`liquid_${name}`), arity, values);
         if (repaint) this.queue_repaint();
     }
@@ -294,6 +305,8 @@ export class LiquidMaterial {
         this.actor.queue_repaint = () => this.syncBackground();
         this.actor._bezelSyncPlate = this.actor.queue_repaint;
         this.mask = new MaterialMask();
+        this.mask.set('login_clip', [0]);
+        this.mask.set('login_clips[0]', Array(16).fill(0));
         this.mask.set('shapes', [0]);
         this.mask.set('boxes[0]', Array(12).fill(0));
         this.mask.set('corners', [0, 0, 0]);
@@ -445,6 +458,24 @@ export class LiquidMaterial {
         this.mask.set('radius', [radius]);
         if (changed) this.syncShadow?.();
         this.syncBackground();
+    }
+    login(width, height, motion, shadow, popup, notification) {
+        if (motion.solid) this.rectangle(width, height, 0);
+        else this.frame([0, 0, width, height], width, height, motion.sides, motion.radius, popup, notification);
+        const clipping = motion.edges && Object.values(motion.edges).some(value => value < 1);
+        this.mask.set('login_clip', [clipping ? 1 : 0]);
+        if (!clipping) return;
+        const boxes = ['left', 'top', 'right', 'bottom'].flatMap(edge => {
+            const vertical = edge === 'left' || edge === 'right';
+            const length = vertical ? height : width;
+            const thickness = Math.min(vertical ? width : height,
+                Math.max(0, motion.sides[edge] + motion.radius + shadow));
+            const span = (length + 2 * thickness) * motion.edges[edge];
+            return [vertical ? (edge === 'left' ? -thickness : width - thickness) : (width - span) / 2,
+                vertical ? (height - span) / 2 : (edge === 'top' ? -thickness : height - thickness),
+                vertical ? thickness * 2 : span, vertical ? span : thickness * 2];
+        });
+        this.mask.set('login_clips[0]', boxes);
     }
     frame(rect, width, height, sides, radius, popup, notification, drawerOnly = false) {
         this.mask.set('frame', [1]);

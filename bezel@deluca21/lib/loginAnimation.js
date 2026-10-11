@@ -6,10 +6,11 @@ import * as Config from 'resource:///org/gnome/shell/misc/config.js';
 
 import {allowsMotion, chromeOptions} from './compat.js';
 import {paintLoginFrame} from './drawing.js';
-import {openingMotion, barMotion, iconMotion, THEME_DURATIONS} from './loginMotion.js';
+import {openingMotion, barMotion, contentMotion, THEME_DURATIONS} from './loginMotion.js';
 import {readState} from './config.js';
 import {sideWidths} from './geometry.js';
 import {resolveTheme} from './theme.js';
+import {LiquidMaterial, liquidEnabled} from './liquidMaterial.js';
 
 export function playLockAnimation(settings) {
     const parent = Main.screenShield?.actor;
@@ -22,7 +23,7 @@ export function playLockAnimation(settings) {
     const frames = new Map(Main.layoutManager.monitors.map(monitor =>
         [monitor.index, {monitor, sides}]));
     return new LoginAnimation([], frames, resolveTheme(settings), state, undefined, false,
-        {parent, transientFrame: true});
+        {parent, reverse: true, settings});
 }
 
 // Bound CPU raster work and texture size on 4K/HiDPI displays. The compositor
@@ -70,7 +71,7 @@ function iconActors(actor) {
     if (actor._bezelBalance || actor._bezelGap) return [];
     // Keep each button's glyph, label and running dot together. Descend through
     // groups and scroll views so app buttons get their own arrival timing.
-    if (actor instanceof St.Button || actor instanceof St.Label || actor instanceof St.Icon)
+    if (actor._bezelSessionContent || actor instanceof St.Button || actor instanceof St.Label || actor instanceof St.Icon)
         return [actor];
     const children = actor.get_children();
     return children.length ? children.flatMap(iconActors) : [actor];
@@ -100,12 +101,14 @@ export class LoginAnimation {
         this._frames = [];
         this._progress = 0;
         this._parent = options.parent;
-        this._transientFrame = options.transientFrame;
+        this._reverse = options.reverse ?? false;
+        this._settings = options.settings;
         this._theme = Object.hasOwn(THEME_DURATIONS, state.loginAnimationTheme) ? state.loginAnimationTheme : 'liquid';
 
         try {
             for (const monitor of Main.layoutManager.monitors) {
                 const frame = frames.get(monitor.index);
+                const glass = frame?.glass ?? (this._settings && liquidEnabled(this._settings, 'glass-frame'));
                 const savedFrame = this._theme !== 'fade' && frame?.actor ? rememberActor(frame.actor) : null;
                 if (savedFrame) this._frames.push(savedFrame);
                 const first = bars.find(bar => bar._monitor.index === monitor.index);
@@ -117,6 +120,16 @@ export class LoginAnimation {
                 const area = new St.DrawingArea({reactive: false, opacity: 0,
                     x: target.x, y: target.y, width: paintWidth, height: paintHeight});
                 area.set_scale(target.width / paintWidth, target.height / paintHeight);
+                if (glass) {
+                    // Lock samples wallpaper only, never desktop windows.
+                    const material = new LiquidMaterial(target, frame?.liquidSettings ?? this._settings, theme.bg, true,
+                        this._parent ? {live: false} : {});
+                    const plate = material.actor;
+                    plate.set_size(target.width, target.height);
+                    plate.opacity = 0;
+                    area._loginMaterial = material;
+                    area._loginPlate = plate;
+                }
                 area._loginFrame = savedFrame;
                 area._loginGeometry = () => JSON.stringify([frame?.sides, frame?.popup, frame?.notification]);
                 this._surfaces.push(area);
@@ -127,7 +140,8 @@ export class LoginAnimation {
                         cr.scale(width / target.width, height / target.height);
                         const motion = openingMotion(this._theme, this._progress, target.width, target.height,
                             frame?.sides ?? {left: 0, right: 0, top: 0, bottom: 0}, frame ? state.radius : 0);
-                        paintLoginFrame(cr, target.width, target.height, motion, theme.bg, frame ? state.shadow : 0,
+                        if (area._loginMaterial && motion.solid) return;
+                        paintLoginFrame(cr, target.width, target.height, motion, area._loginMaterial ? null : theme.bg, frame ? state.shadow : 0,
                             frame?.popup?.corner ? null : frame?.popup,
                             frame?.popup?.corner ? frame.popup : frame?.popup ? null : frame?.notification);
                     } finally { cr.$dispose(); }
@@ -136,12 +150,25 @@ export class LoginAnimation {
                 else Main.layoutManager.addChrome(area, chromeOptions(Config.PACKAGE_VERSION, false, false, true));
                 if (first)
                     area.get_parent().set_child_below_sibling(area, first._actor);
+                if (area._loginPlate) {
+                    const plate = area._loginPlate;
+                    plate.set_position(target.x, target.y);
+                    if (this._parent) this._parent.add_child(plate);
+                    else Main.layoutManager.addChrome(plate, chromeOptions(Config.PACKAGE_VERSION, false, false, true));
+                    area.get_parent().set_child_below_sibling(plate, area);
+                }
+                area._loginMotion = progress => openingMotion(this._theme, progress, target.width, target.height,
+                    frame?.sides ?? {left: 0, right: 0, top: 0, bottom: 0}, frame ? state.radius : 0);
+                area._loginUpdate = motion => area._loginMaterial?.login(target.width, target.height, motion,
+                    frame ? state.shadow : 0, frame?.popup?.corner ? null : frame?.popup,
+                    frame?.popup?.corner ? frame.popup : frame?.popup ? null : frame?.notification);
             }
             for (const bar of bars) {
                 // Autohide owns its own scale, clip and opacity throughout login.
                 if (bar._state.autohide) continue;
                 const actor = bar._actor;
                 this._bars.push(Object.assign(rememberActor(actor), {edge: bar._state.edge, icons: new Map(),
+                    backdrop: bar._backdrop,
                     pullDistance: Math.min(10, Math.min(bar._monitor.width, bar._monitor.height) * 0.008),
                     iconDistance: Math.min(7, (bar._state.iconSize ?? 22) * 0.25)}));
             }
@@ -193,6 +220,7 @@ export class LoginAnimation {
     }
 
     _paint(progress) {
+        progress = this._reverse ? 1 - progress : progress;
         this._progress = progress;
         for (const frame of this._frames) {
             if (!frame.destroyed) { beginActor(frame, false); frame.actor.opacity = 0; }
@@ -200,9 +228,9 @@ export class LoginAnimation {
         for (const area of this._surfaces) {
             area.opacity = Math.round((area._loginFrame?.opacity ?? 255) * openingMotion(this._theme, progress, 1, 1,
                 {left: 0, right: 0, top: 0, bottom: 0}, 0).opacity);
-            if (this._transientFrame) {
-                const tail = Math.max(0, Math.min(1, (progress - 0.75) / 0.25));
-                area.opacity = Math.round(area.opacity * (1 - tail * tail * (3 - 2 * tail)));
+            if (area._loginPlate) {
+                area._loginPlate.opacity = area.opacity;
+                area._loginUpdate(area._loginMotion(progress));
             }
             const geometry = this._theme === 'fade' ? '' : area._loginGeometry();
             if (!['fade', 'glide', 'soft-fade'].includes(this._theme) || area._loginPainted !== geometry) {
@@ -225,7 +253,7 @@ export class LoginAnimation {
             actor.opacity = Math.round(opacity * motion.opacity);
             // Apps may start or exit during login; discover replacements and
             // never write to the destroyed buttons from the previous frame.
-            const current = new Set(actor.get_children().flatMap(iconActors));
+            const current = new Set(actor.get_children().filter(child => child !== bar.backdrop).flatMap(iconActors));
             for (const [icon, saved] of bar.icons) {
                 if (saved.destroyed || !current.has(icon)) {
                     restoreActor(saved);
@@ -237,15 +265,16 @@ export class LoginAnimation {
                 const saved = bar.icons.get(icon);
                 beginActor(saved);
                 const placement = iconPlacement(icon, actor, vertical);
-                const arrival = this._theme === 'liquid' ? iconMotion(progress, placement.position)
-                    : {opacity: motion.contentOpacity, scale: 1, across: 0, along: 0};
+                const arrival = contentMotion(this._theme, progress, edge, placement.position);
                 icon.set_pivot_point(0.5, 0.5);
                 // Counter the surface stretch so glyphs keep their natural
                 // proportions and spacing throughout their arrival.
                 icon.set_scale(saved.scaleX * arrival.scale / motion.x, saved.scaleY * arrival.scale / motion.y);
                 icon.opacity = Math.round(saved.opacity * arrival.opacity);
                 const across = direction * bar.iconDistance * arrival.across;
-                const along = bar.iconDistance * arrival.along;
+                const length = vertical ? actor.height : actor.width;
+                const along = bar.iconDistance * arrival.along +
+                    (0.5 - placement.position) * length * arrival.gather;
                 icon.translation_x = saved.translationX / motion.x +
                     (saved.pivot[0] - 0.5) * icon.width * (1 - saved.scaleX) / motion.x +
                     (placement.x - actor.width * motion.pivot[0]) * (1 / motion.x - 1) / placement.scaleX +
@@ -276,6 +305,10 @@ export class LoginAnimation {
         this._frames = [];
         for (const area of this._surfaces) {
             if (!this._parent) Main.layoutManager.removeChrome(area);
+            if (area._loginPlate) {
+                if (!this._parent) Main.layoutManager.removeChrome(area._loginPlate);
+                area._loginPlate.destroy();
+            }
             area.destroy();
         }
         this._surfaces = [];
