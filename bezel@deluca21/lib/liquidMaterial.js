@@ -37,6 +37,8 @@ uniform float liquid_simple_frame;
 uniform float liquid_solid;
 uniform float liquid_shadow;
 uniform float liquid_highlight;
+uniform float liquid_brightness;
+uniform float liquid_contrast;
 float boxDistance(vec2 p, vec4 b, float r) {
     r = min(r, min(b.z, b.w) * 0.5);
     vec2 q = abs(p - b.xy - b.zw * 0.5) - b.zw * 0.5 + r;
@@ -118,6 +120,8 @@ if (liquid_shapes > 0.5) {
 }
 float coverage = 1.0 - smoothstep(-0.6, 0.6, d);
 vec4 material = cogl_color_out;
+vec3 straight = material.rgb / max(material.a, 0.00001);
+material.rgb = clamp(((straight - vec3(0.5)) * liquid_contrast + vec3(0.5)) * liquid_brightness, 0.0, 1.0) * material.a;
 if (liquid_solid > 0.5) material = vec4(liquid_tint.rgb, 1.0);
 else material = vec4(mix(material.rgb, liquid_tint.rgb * material.a, liquid_tint.a), material.a);
 float rim = liquid_highlight * (1.0 - smoothstep(0.0, 1.4, abs(d))) * step(d, 0.0);
@@ -163,6 +167,8 @@ const MaterialMask = GObject.registerClass(class LiquidMaterialMask extends Shel
 export function liquidEnabled(settings, key) {
     const setting = `liquid-${key}`;
     if (!settings?.settings_schema.has_key(setting)) return false;
+    if (key.startsWith('glass-') && settings.settings_schema.has_key('liquid-glass-enabled')
+        && !settings.get_boolean('liquid-glass-enabled')) return false;
     // Surface materials are independent of motion; only drawer transfers
     // require the Liquid animation style.
     if (key === 'shift' || key === 'pour')
@@ -177,26 +183,34 @@ const WindowsClone = GObject.registerClass(class BezelLiquidWindowsClone extends
     vfunc_allocate(box) { this.set_allocation(box); }
 });
 class WindowScene {
-    constructor(container, resolution = 1) {
+    constructor(container, resolution = 1, source = global.window_group) {
         this.resolution = resolution;
-        this.actor = new WindowsClone({source: global.window_group, reactive: false});
+        this.ownsActor = source === global.window_group;
+        this.actor = this.ownsActor ? new WindowsClone({source, reactive: false}) : source;
         this.actor.set_scale(resolution, resolution);
         this.actor.set_size(global.stage.width, global.stage.height);
         container.add_child(this.actor);
+        this.actor.show();
     }
     position(x, y) {
         this.actor.set_position(-x * this.resolution, -y * this.resolution);
         this.actor.set_size(global.stage.width, global.stage.height);
+        if (!this.ownsActor) this.actor.allocate(new Clutter.ActorBox({x1: -x * this.resolution, y1: -y * this.resolution,
+            x2: -x * this.resolution + global.stage.width, y2: -y * this.resolution + global.stage.height}));
     }
-    destroy() { this.actor.destroy(); }
+    destroy() {
+        if (this.ownsActor) this.actor.destroy();
+        else this.actor.get_parent()?.remove_child(this.actor);
+    }
 }
 
 // All live materials on a monitor clone this single blurred scene. Blur
 // damage is cached at the source instead of replaying every window per tile.
 const liveScenes = new Map();
-function acquireLiveScene(monitor, radius, live = true) {
+function acquireLiveScene(monitor, radius, live = true, windowSource = null) {
     const scale = St.ThemeContext.get_for_stage(global.stage).scale_factor;
-    const key = `${monitor.index}:${monitor.x}:${monitor.y}:${monitor.width}:${monitor.height}:${radius}:${scale}:${live}`;
+    if (windowSource) windowSource._bezelSceneId ??= GLib.uuid_string_random();
+    const key = `${monitor.index}:${monitor.x}:${monitor.y}:${monitor.width}:${monitor.height}:${radius}:${scale}:${live}:${windowSource?._bezelSceneId ?? 'desktop'}`;
     let scene = liveScenes.get(key);
     if (!scene) {
         // Frost removes fine detail anyway. Render live desktop damage at half
@@ -205,11 +219,19 @@ function acquireLiveScene(monitor, radius, live = true) {
         const width = monitor.width * resolution, height = monitor.height * resolution;
         const actor = new Clutter.Actor({x: monitor.x, y: monitor.y, width, height,
             reactive: false, clip_to_allocation: true, layout_manager: new Clutter.FixedLayout()});
-        const wallpaper = new Clutter.Actor({width: monitor.width, height: monitor.height});
-        wallpaper.set_scale(resolution, resolution);
-        actor.add_child(wallpaper);
-        const manager = new Background.BackgroundManager({container: wallpaper, monitorIndex: monitor.index, controlPosition: false, useContentSize: false});
-        const windows = live ? new WindowScene(actor, resolution) : null;
+        const managers = [];
+        const wallpapers = [];
+        for (const output of monitor.virtual ? Main.layoutManager.monitors : [monitor]) {
+            const wallpaper = new Clutter.Actor({x: (output.x - monitor.x) * resolution,
+                y: (output.y - monitor.y) * resolution, width: output.width, height: output.height});
+            wallpaper.set_scale(resolution, resolution);
+            actor.add_child(wallpaper);
+            const manager = new Background.BackgroundManager({container: wallpaper, monitorIndex: output.index,
+                controlPosition: false, useContentSize: false});
+            managers.push(manager);
+            wallpapers.push({wallpaper, manager, output});
+        }
+        const windows = live ? new WindowScene(actor, resolution, windowSource ?? global.window_group) : null;
         windows?.position(monitor.x, monitor.y);
         const blur = new Shell.BlurEffect({mode: Shell.BlurMode.ACTOR, radius: radius * scale * resolution, brightness: 1});
         actor.add_effect_with_name('liquid-shared-blur', blur);
@@ -219,17 +241,20 @@ function acquireLiveScene(monitor, radius, live = true) {
         // before its clones paint the cached offscreen blur.
         actor.allocate(new Clutter.ActorBox({x1: monitor.x, y1: monitor.y,
             x2: monitor.x + width, y2: monitor.y + height}));
-        const allocateWallpaper = () => {
-            wallpaper.allocate(new Clutter.ActorBox({x1: 0, y1: 0, x2: monitor.width, y2: monitor.height}));
-            manager.backgroundActor.set_position(0, 0);
-            manager.backgroundActor.set_size(monitor.width, monitor.height);
-            manager.backgroundActor.allocate(new Clutter.ActorBox({x1: 0, y1: 0, x2: monitor.width, y2: monitor.height}));
-            actor.queue_redraw();
-        };
-        manager.connect('changed', allocateWallpaper);
-        allocateWallpaper();
+        for (const {wallpaper, manager, output} of wallpapers) {
+            const allocateWallpaper = () => {
+                wallpaper.allocate(new Clutter.ActorBox({x1: (output.x - monitor.x) * resolution, y1: (output.y - monitor.y) * resolution,
+                    x2: (output.x - monitor.x) * resolution + output.width, y2: (output.y - monitor.y) * resolution + output.height}));
+                manager.backgroundActor.set_position(0, 0);
+                manager.backgroundActor.set_size(output.width, output.height);
+                manager.backgroundActor.allocate(new Clutter.ActorBox({x1: 0, y1: 0, x2: output.width, y2: output.height}));
+                actor.queue_redraw();
+            };
+            manager.connect('changed', allocateWallpaper);
+            allocateWallpaper();
+        }
         actor.hide();
-        scene = {actor, manager, windows, blur, resolution, references: 0, key};
+        scene = {actor, managers, windows, blur, resolution, references: 0, key};
         liveScenes.set(key, scene);
     }
     scene.references++;
@@ -239,7 +264,7 @@ function releaseLiveScene(scene) {
     if (--scene.references > 0) return;
     liveScenes.delete(scene.key);
     scene.windows?.destroy();
-    scene.manager.destroy();
+    for (const manager of scene.managers) manager.destroy();
     scene.actor.destroy();
 }
 
@@ -258,9 +283,11 @@ export const MaterialActor = GObject.registerClass(class BezelLiquidMaterialActo
 });
 
 export class LiquidMaterial {
-    constructor(monitor, settings, color, glass = true) {
+    constructor(monitor, settings, color, glass = true, options = {}) {
         this.monitor = monitor;
-        this.margin = glass ? Math.ceil(settings.get_int('liquid-blur-radius') * 2) : 0;
+        const live = options.live ?? liquidEnabled(settings, 'live-blur');
+        const blurRadius = options.radius ?? settings.get_int('liquid-blur-radius');
+        this.margin = glass ? Math.ceil(blurRadius * 2) : 0;
         this.actor = new MaterialActor({reactive: false, clip_to_allocation: true,
             layout_manager: new Clutter.FixedLayout(), x_expand: true, y_expand: true,
             background_color: new Cogl.Color({red: 255, green: 255, blue: 255, alpha: 1})});
@@ -284,11 +311,12 @@ export class LiquidMaterial {
         this.mask.set('radius', [0]);
         this.mask.set('solid', [glass ? 0 : 1]);
         this.mask.set('shadow', [0]);
-        this.mask.set('highlight', [glass && settings.get_boolean('liquid-edge-highlight') ? 1 : 0]);
-        this.tint = [...[1, 3, 5].map(i => parseInt(color.slice(i, i + 2), 16) / 255), settings.get_int('liquid-tint') / 100];
+        this.mask.set('highlight', [glass && (options.highlight ?? settings.get_boolean('liquid-edge-highlight')) ? 1 : 0]);
+        this.tint = [...[1, 3, 5].map(i => parseInt(color.slice(i, i + 2), 16) / 255), (options.tint ?? settings.get_int('liquid-tint')) / 100];
         this.mask.set('tint', this.tint);
+        this.mask.set('brightness', [(options.brightness ?? settings.get_int('liquid-brightness')) / 100]);
+        this.mask.set('contrast', [(options.contrast ?? settings.get_int('liquid-contrast')) / 100]);
         if (glass) {
-            const live = liquidEnabled(settings, 'live-blur');
             const crop = new Clutter.Actor({width: 1, height: 1, reactive: false, clip_to_allocation: true,
                 layout_manager: new Clutter.FixedLayout(),
                 // Opaque sampling padding prevents unblurred wallpaper bleeding
@@ -297,7 +325,7 @@ export class LiquidMaterial {
                 background_color: new Cogl.Color({red: 127, green: 127, blue: 127, alpha: 255})});
             this.crop = crop;
             this.actor.add_child(crop);
-            this.liveScene = acquireLiveScene(monitor, settings.get_int('liquid-blur-radius'), live);
+            this.liveScene = acquireLiveScene(monitor, blurRadius, live, options.windowSource);
             this.liveClone = new WindowsClone({source: this.liveScene.actor, reactive: false});
             this.liveClone.set_scale(1 / this.liveScene.resolution, 1 / this.liveScene.resolution);
             crop.add_child(this.liveClone);
@@ -376,7 +404,7 @@ export class LiquidMaterial {
             x += node.translation_x || 0;
             y += node.translation_y || 0;
         }
-        const physical = Main.layoutManager.monitors[this.monitor.index] ?? this.monitor;
+        const physical = this.monitor.virtual ? this.monitor : Main.layoutManager.monitors[this.monitor.index] ?? this.monitor;
         if (a.mapped) {
             const position = a.get_transformed_position();
             if (position.every(Number.isFinite)) [x, y] = position;

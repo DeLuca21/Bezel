@@ -8,11 +8,30 @@
     <key name="wallpaper-style" type="s"><default>'system'</default><choices><choice value="system"/><choice value="light"/><choice value="dark"/></choices></key>
     <key name="settings-layout" type="s"><default>'sidebar'</default><choices><choice value="classic"/><choice value="sidebar"/></choices><summary>Settings window layout</summary></key>
     <key name="liquid-motion" type="b"><default>false</default></key>
+    <key name="liquid-glass-enabled" type="b"><default>true</default><summary>Enable glass while preserving individual surface choices</summary></key>
+    <key name="app-glass-highlight" type="b"><default>true</default></key>
+    <key name="notifications-animation" type="s"><default>'default'</default><choices><choice value="default"/><choice value="grow"/><choice value="drip"/><choice value="drip-grow"/><choice value="drop-expand"/><choice value="unfold"/></choices></key>
+    <key name="app-blur-finish" type="s"><default>'blur'</default><choices><choice value="blur"/><choice value="glass"/></choices><summary>Application backdrop finish</summary></key>
     <key name="liquid-glass-drawers" type="b"><default>false</default></key>
     <key name="liquid-glass-docks" type="b"><default>false</default></key>
     <key name="liquid-glass-panels" type="b"><default>false</default></key>
     <key name="liquid-glass-frame" type="b"><default>false</default></key>
     <key name="liquid-live-blur" type="b"><default>false</default></key>
+    <key name="liquid-brightness" type="i"><default>100</default><range min="0" max="200"/></key>
+    <key name="liquid-contrast" type="i"><default>100</default><range min="0" max="200"/></key>
+    <key name="app-blur-brightness" type="i"><default>100</default><range min="0" max="200"/></key>
+    <key name="app-blur-type" type="s"><default>'dynamic'</default><choices><choice value="dynamic"/><choice value="static"/></choices></key>
+    <key name="app-blur-sigma" type="i"><default>12</default><range min="0" max="100"/></key>
+    <key name="app-blur-window-opacity" type="i"><default>200</default><range min="0" max="255"/></key>
+    <key name="app-blur-opaque-focused" type="b"><default>false</default></key>
+    <key name="app-blur-overview" type="b"><default>false</default></key>
+    <key name="app-blur-unblur-fullscreen" type="b"><default>true</default></key>
+    <key name="app-blur-round-maximized" type="b"><default>false</default></key>
+    <key name="app-blur-enabled" type="b"><default>false</default></key>
+    <key name="app-blur-policy" type="s"><default>'whitelist'</default><choices><choice value="whitelist"/><choice value="blacklist"/></choices></key>
+    <key name="app-blur-whitelist" type="as"><default>[]</default></key>
+    <key name="app-blur-blacklist" type="as"><default>[]</default></key>
+    <key name="app-blur-corner-radius" type="i"><default>12</default><range min="0" max="64"/></key>
     <key name="liquid-edge-highlight" type="b"><default>false</default><summary>Highlight glass edges</summary></key>
     <key name="disable-startup-overview" type="b"><default>false</default><summary>Disable overview on startup</summary></key>
     <key name="liquid-hover-hold" type="i"><default>1200</default><range min="0" max="10000"/></key>

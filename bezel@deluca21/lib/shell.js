@@ -65,6 +65,7 @@ export class BezelOverlay {
         this._layoutTransition = new LayoutTransition(this);
         this._loginPending = Main.layoutManager._startingUp && !Main.sessionMode.isGreeter && !Main.sessionMode.isLocked;
         this._id = settings.connect('changed', (_settings, key) => {
+            if (key.startsWith('app-blur-')) return;
             if (key === 'layout-transition-request') {
                 this._animateLayout = true;
                 this.queueRebuild();
@@ -4622,6 +4623,7 @@ class Bar {
         }
         const breadth = this._liquidDrawer?.style === 'grow' ? Math.max(0, Math.min(1, progress)) : 1;
         this._popupFrame?.setPopup({
+            bounds: {x: this._popupGeometry.x, y: this._popupGeometry.y, width, height},
             x: this._popupGeometry.x + (horizontal ? 0 : width * (1 - breadth) / 2),
             y: this._popupGeometry.y + (horizontal ? height * (1 - breadth) / 2 : 0),
             width: horizontal ? width : width * breadth,

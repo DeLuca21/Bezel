@@ -51,7 +51,7 @@ export class OverviewBackground {
                     width: monitor.width, height: monitor.height, reactive: false,
                     clip_to_allocation: true});
                 this._actor.add_child(tile);
-                // Blur My Shell uses a raised St.Widget per monitor to avoid
+                // Raise each monitor wallpaper slightly to avoid
                 // Mutter's multi-monitor offscreen rendering glitch.
                 const wallpaper = new St.Widget({width: monitor.width, height: monitor.height,
                     z_position: 1,

@@ -1,3 +1,4 @@
+import {appPickerList} from './appPickerPreferences.js';
 import {WallpaperPalette} from './wallpaperPalette.js';
 import {ChipDropPreview} from './chipDropPreview.js';
 import {shortcutEditor} from './shortcutEditor.js';
@@ -1580,6 +1581,7 @@ export class SettingsWindow {
             this.card.append(label(title, 'subheading'));
             this.card.append(this._spotGrid(`${key}-position`));
             if (key === 'notifications') {
+                this.card.append(this._segments([['default', 'Default'], ['grow', 'Grow'], ['drip', 'Drip'], ['drip-grow', 'Drip then grow'], ['drop-expand', 'Drop then expand'], ['unfold', 'Unfold']], this.settings.get_string('notifications-animation'), value => this.settings.set_string('notifications-animation', value)));
                 this.card.append(label('Notification order', 'subheading'));
                 this.card.append(this._segments([['newest-first', 'Newest first'], ['oldest-first', 'Oldest first']],
                     this.settings.get_string('notifications-order'), value => this.settings.set_string('notifications-order', value)));
@@ -1738,13 +1740,40 @@ export class SettingsWindow {
             }));
         this.card.append(label('Shift follows the screen border with its shoulders attached. Pour drains one drawer into the next. These apply when another drawer is already open.', 'caption'));
         this.card.append(this._step('Hover drawer hold (ms)', this.settings.get_int('liquid-hover-hold'), 0, 10000, 50, value => this.settings.set_int('liquid-hover-hold', value)));
+        this.card.append(this._toggle('Enable glass', this.settings.get_boolean('liquid-glass-enabled'), value => { this.settings.set_boolean('liquid-glass-enabled', value); this._refresh(); }));
+        const glassSurfaces = vertical(6);
+        glassSurfaces.sensitive = this.settings.get_boolean('liquid-glass-enabled');
+        this.card.append(glassSurfaces);
         for (const [key, title] of [['drawers', 'Glass drawers'], ['docks', 'Glass docks'], ['panels', 'Glass panels'], ['frame', 'Glass screen border']])
-            this.card.append(this._toggle(title, this.settings.get_boolean(`liquid-glass-${key}`), value => this.settings.set_boolean(`liquid-glass-${key}`, value)));
+            glassSurfaces.append(this._toggle(title, this.settings.get_boolean(`liquid-glass-${key}`), value => this.settings.set_boolean(`liquid-glass-${key}`, value)));
         this.card.append(label('A drawer joined to a glass border inherits its material. Panels attached to that border share its glass.', 'caption'));
         this.card.append(this._toggle('Live window blur (expensive)', this.settings.get_boolean('liquid-live-blur'), value => this.settings.set_boolean('liquid-live-blur', value)));
         this.card.append(this._toggle('Glass edge highlight', this.settings.get_boolean('liquid-edge-highlight'), value => this.settings.set_boolean('liquid-edge-highlight', value)));
         for (const [key, title, min, max, step] of [['blur-radius', 'Blur radius', 0, 64, 2], ['tint', 'Tint (%)', 0, 100, 2], ['duration-scale', 'Motion duration (%)', 25, 300, 25]])
             this.card.append(this._step(title, this.settings.get_int(`liquid-${key}`), min, max, step, value => this.settings.set_int(`liquid-${key}`, value)));
+        for (const [key, title] of [['brightness', 'Glass brightness (%)'], ['contrast', 'Glass contrast (%)']])
+            this.card.append(this._step(title, this.settings.get_int(`liquid-${key}`), 0, 200, 5, value => this.settings.set_int(`liquid-${key}`, value)));
+        this.card.append(label('Application blur', 'subheading'));
+        this.card.append(this._toggle('Blur applications', this.settings.get_boolean('app-blur-enabled'), value => { this.settings.set_boolean('app-blur-enabled', value); this._refresh(); }));
+        const appOptions = vertical(10);
+        appOptions.sensitive = this.settings.get_boolean('app-blur-enabled');
+        this.card.append(appOptions);
+        appOptions.append(this._segments([['whitelist', 'Only whitelist'], ['blacklist', 'Except blacklist']], this.settings.get_string('app-blur-policy'), value => { this.settings.set_string('app-blur-policy', value); this._refresh(); }));
+        for (const key of [this.settings.get_string('app-blur-policy')]) {
+            appOptions.append(appPickerList(this.settings, `app-blur-${key}`, this.window));
+        }
+        appOptions.append(this._segments([['blur', 'Blur'], ['glass', 'Glass']], this.settings.get_string('app-blur-finish'), value => { this.settings.set_string('app-blur-finish', value); this._refresh(); }));
+        const appHighlight = this._toggle('Highlight app edges', this.settings.get_boolean('app-glass-highlight'), value => this.settings.set_boolean('app-glass-highlight', value));
+        appHighlight.sensitive = this.settings.get_string('app-blur-finish') === 'glass';
+        appOptions.append(appHighlight);
+        appOptions.append(this._segments([['static', 'Static wallpaper'], ['dynamic', 'Dynamic backdrop']], this.settings.get_string('app-blur-type'), value => this.settings.set_string('app-blur-type', value)));
+        for (const [key, title, max] of [['sigma', 'Sigma', 100], ['brightness', 'Brightness (%)', 100], ['window-opacity', 'Opacity (0–255)', 255]])
+            appOptions.append(this._step(title, this.settings.get_int(`app-blur-${key}`), 0, max, 1, value => this.settings.set_int(`app-blur-${key}`, value)));
+        appOptions.append(this._step('Corner radius', this.settings.get_int('app-blur-corner-radius'), 0, 64, 1, value => this.settings.set_int('app-blur-corner-radius', value)));
+        appOptions.append(this._toggle('Round maximized and fullscreen windows', this.settings.get_boolean('app-blur-round-maximized'), value => this.settings.set_boolean('app-blur-round-maximized', value)));
+        for (const [key, title] of [['opaque-focused', 'Opaque focused window'], ['overview', 'Blur on overview'], ['unblur-fullscreen', 'Unblur when fullscreen']])
+            appOptions.append(this._toggle(title, this.settings.get_boolean(`app-blur-${key}`), value => this.settings.set_boolean(`app-blur-${key}`, value)));
+
     }
 
     _desktopCard() {

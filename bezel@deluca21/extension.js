@@ -1,3 +1,4 @@
+import {WindowPicker} from './lib/windowPicker.js';
 import {WallpaperPalette} from './lib/wallpaperPalette.js';
 import GObject from 'gi://GObject';
 import Gio from 'gi://Gio';
@@ -10,6 +11,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import {OverviewBackground} from './lib/overviewBackground.js';
+import {ApplicationBlur} from './lib/appBlur.js';
 import {BezelOverlay} from './lib/shell.js';
 import {SessionMotion} from './lib/sessionMotion.js';
 import {playLockAnimation} from './lib/loginAnimation.js';
@@ -48,6 +50,8 @@ export default class BezelExtension extends Extension {
         try {
             this._overlay = new BezelOverlay(this._settings, () => launchSettings(this.path));
             this._overviewBackground = new OverviewBackground(this._settings);
+            this._applicationBlur = new ApplicationBlur(this._settings);
+            this._windowPicker = new WindowPicker();
             this._applyPanel();
             this._superSetting = this._settings.connect('changed::super-launcher', () => this._syncSuper());
             this._syncSuper();
@@ -96,6 +100,10 @@ export default class BezelExtension extends Extension {
             this._startupOverviewIdle = 0;
         }
         if (!this._overlay && !this._settingsId) return;
+        this._windowPicker?.destroy();
+        this._windowPicker = null;
+        this._applicationBlur?.destroy();
+        this._applicationBlur = null;
         this._overviewBackground?.destroy();
         this._overviewBackground = null;
         this._restoreOverviewDash();

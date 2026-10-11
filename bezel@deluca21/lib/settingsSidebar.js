@@ -1,3 +1,4 @@
+import {appPickerList} from './appPickerPreferences.js';
 // A separate settings shell, sharing Bezel's existing editors and write paths.
 import Adw from 'gi://Adw';
 import Gtk from 'gi://Gtk';
@@ -536,17 +537,51 @@ export class SidebarSettingsWindow extends SettingsWindow {
     }
 
     _glassPage() {
+        const master = this._group('Glass');
+        this._switch(master, 'Enable glass', this.settings.get_boolean('liquid-glass-enabled'), value => this.settings.set_boolean('liquid-glass-enabled', value), 'Keep individual surface choices when glass is off.', true);
         const glass = this._group('Glass surfaces', 'Choose where to use translucent glass instead of a solid background.');
         for (const [key, title, subtitle] of [['drawers', 'Drawers', 'Dashboard, quick controls and popouts'], ['docks', 'Docks', 'All application docks'],
             ['panels', 'Bars', 'All panel bars'], ['frame', 'Screen border', 'Attached bars and drawers inherit this material']])
             this._switch(glass, title, this.settings.get_boolean(`liquid-glass-${key}`), value => this.settings.set_boolean(`liquid-glass-${key}`, value), subtitle, true);
-        const enabled = ['drawers', 'docks', 'panels', 'frame'].some(key => this.settings.get_boolean(`liquid-glass-${key}`));
+        glass.sensitive = this.settings.get_boolean('liquid-glass-enabled');
+        const enabled = this.settings.get_boolean('liquid-glass-enabled') && ['drawers', 'docks', 'panels', 'frame'].some(key => this.settings.get_boolean(`liquid-glass-${key}`));
         const finish = this._group('Glass finish', 'A shared treatment for every glass surface.');
-        finish.sensitive = enabled;
+        finish.sensitive = this.settings.get_boolean('liquid-glass-enabled') && (enabled || (this.settings.get_boolean('app-blur-enabled') && this.settings.get_string('app-blur-finish') === 'glass'));
         this._switch(finish, 'Live window blur', this.settings.get_boolean('liquid-live-blur'), value => this.settings.set_boolean('liquid-live-blur', value), 'Blurs windows behind glass. May reduce performance.');
         this._switch(finish, 'Highlight edges', this.settings.get_boolean('liquid-edge-highlight'), value => this.settings.set_boolean('liquid-edge-highlight', value));
         this._spin(finish, 'Blur radius', this.settings.get_int('liquid-blur-radius'), 0, 64, 2, value => this.settings.set_int('liquid-blur-radius', value), 'Pixels');
         this._spin(finish, 'Tint', this.settings.get_int('liquid-tint'), 0, 100, 2, value => this.settings.set_int('liquid-tint', value), 'Percent');
+        for (const [key, title] of [['brightness', 'Brightness'], ['contrast', 'Contrast']])
+            this._spin(finish, title, this.settings.get_int(`liquid-${key}`), 0, 200, 5, value => this.settings.set_int(`liquid-${key}`, value), 'Percent · 100 is unchanged');
+        const apps = this._group('Application blur', 'Cached application blur, with foreground content above the backdrop. Dynamic blurs windows behind the app; static blurs wallpaper.');
+        const appToggle = this._switch(apps, 'Blur applications', this.settings.get_boolean('app-blur-enabled'), value => this.settings.set_boolean('app-blur-enabled', value), 'Off by default; begin with a small whitelist.', true);
+        this._combo(apps, 'Apply to', [['whitelist', 'Only whitelisted apps'], ['blacklist', 'All apps except blacklist']], this.settings.get_string('app-blur-policy'), value => this.settings.set_string('app-blur-policy', value), '', true);
+        apps.description += ' Select an application window to add its window class.';
+        this._combo(apps, 'Backdrop finish', [['blur', 'Blur'], ['glass', 'Glass']], this.settings.get_string('app-blur-finish'), value => this.settings.set_string('app-blur-finish', value), 'Glass uses the shared glass finish controls.', true);
+        const highlight = this._switch(apps, 'Highlight app edges', this.settings.get_boolean('app-glass-highlight'), value => this.settings.set_boolean('app-glass-highlight', value), 'An independent highlight for app glass.');
+        highlight.sensitive = this.settings.get_string('app-blur-finish') === 'glass';
+        this._combo(apps, 'Blur type', [['static', 'Static wallpaper'], ['dynamic', 'Dynamic backdrop']], this.settings.get_string('app-blur-type'), value => this.settings.set_string('app-blur-type', value));
+        this._spin(apps, 'Sigma', this.settings.get_int('app-blur-sigma'), 0, 100, 1, value => this.settings.set_int('app-blur-sigma', value), 'Blur strength · radius is twice Sigma', this.settings.get_string('app-blur-finish') === 'blur');
+        this._spin(apps, 'Brightness', this.settings.get_int('app-blur-brightness'), 0, 100, 5, value => this.settings.set_int('app-blur-brightness', value), 'Percent · 100 = 1.00', this.settings.get_string('app-blur-finish') === 'blur');
+        this._spin(apps, 'Opacity', this.settings.get_int('app-blur-window-opacity'), 0, 255, 5, value => this.settings.set_int('app-blur-window-opacity', value), 'Foreground content · 255 is fully opaque');
+        this._spin(apps, 'Corner radius', this.settings.get_int('app-blur-corner-radius'), 0, 64, 1, value => this.settings.set_int('app-blur-corner-radius', value), 'Pixels');
+        this._switch(apps, 'Round maximized and fullscreen windows', this.settings.get_boolean('app-blur-round-maximized'), value => this.settings.set_boolean('app-blur-round-maximized', value));
+        this._switch(apps, 'Opaque focused window', this.settings.get_boolean('app-blur-opaque-focused'), value => this.settings.set_boolean('app-blur-opaque-focused', value), 'Keep the active app fully readable; blur other selected apps.');
+        this._switch(apps, 'Blur on overview', this.settings.get_boolean('app-blur-overview'), value => this.settings.set_boolean('app-blur-overview', value));
+        this._switch(apps, 'Unblur when fullscreen', this.settings.get_boolean('app-blur-unblur-fullscreen'), value => this.settings.set_boolean('app-blur-unblur-fullscreen', value));
+        const appEnabled = this.settings.get_boolean('app-blur-enabled');
+        const disableRows = widget => {
+            for (let child = widget.get_first_child?.(); child; child = child.get_next_sibling()) {
+                if (child instanceof Adw.PreferencesRow && child !== appToggle) child.sensitive = child.sensitive && appEnabled;
+                else disableRows(child);
+            }
+        };
+        disableRows(apps);
+        for (const key of [this.settings.get_string('app-blur-policy')]) {
+            const list = appPickerList(this.settings, `app-blur-${key}`, this.window);
+            list.sensitive = appEnabled;
+            this.card.append(list);
+        }
     }
 
     _paletteCard() {
@@ -609,6 +644,7 @@ export class SidebarSettingsWindow extends SettingsWindow {
         this._switch(display, 'Use Bezel notifications', this.settings.get_boolean('frame-notifications'), value => this.settings.set_boolean('frame-notifications', value), 'Show notification history in the Bezel drawer.');
         this._glassLink(display, 'Change drawer materials in Appearance.');
         this._positionGroup('notifications', 'Drawer position');
+        this._combo(display, 'Banner animation', [['default', 'Default'], ['grow', 'Grow'], ['drip', 'Drip'], ['drip-grow', 'Drip then grow'], ['drop-expand', 'Drop then expand'], ['unfold', 'Unfold']], this.settings.get_string('notifications-animation'), value => this.settings.set_string('notifications-animation', value), 'Independent of drawer motion. Default keeps the native slide.');
         const history = this._group('History');
         this._combo(history, 'Order', [['newest-first', 'Newest first'], ['oldest-first', 'Oldest first']], this.settings.get_string('notifications-order'), value => this.settings.set_string('notifications-order', value));
         this._spin(history, 'Maximum height', this.settings.get_int('notifications-max-height'), 240, 1600, 40, value => this.settings.set_int('notifications-max-height', value), 'Pixels · limited by the available screen height');
