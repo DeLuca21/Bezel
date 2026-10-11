@@ -30,6 +30,7 @@ export class DesktopFrame {
             width: monitor.width, height: monitor.height});
         this.actor.connect('destroy', () => { this.destroyed = true; });
         this.surfaces = new Map();
+        this.spareSurfaces = [];
         this.areas = [];
         this.repaint();
     }
@@ -40,19 +41,23 @@ export class DesktopFrame {
         // Both holes belong on the same opening; dropping one leaves a
         // transparent banner sitting on the wallpaper.
         const {popup, notification} = this;
-        const regions = frameRegions(width, height, this.regionSides, this.padding, popup, notification);
+        const regions = frameRegions(width, height, this.regionSides, this.padding, popup?.bounds ? {...popup, ...popup.bounds} : popup, notification);
         const cramped = width - this.sides.left - this.sides.right < this.state.radius * 2
             || height - this.sides.top - this.sides.bottom < this.state.radius * 2
             || width <= this.regionSides.left + this.regionSides.right + this.padding * 2
             || height <= this.regionSides.top + this.regionSides.bottom + this.padding * 2;
         const retained = new Map();
-        this.lastDirty = [];
+        const available = [...this.surfaces.values(), ...this.spareSurfaces];
         for (const {rect, dynamic, edges} of regions) {
             const glass = this.glass || (dynamic && (popup?.glass || notification?.glass)) || edges?.some(edge => this.glassEdges.includes(edge));
             const drawerOnly = glass && !this.glass && !this.glassEdges.includes(popup?.edge)
                 && !edges?.some(edge => this.glassEdges.includes(edge));
             const key = JSON.stringify([rect, Boolean(glass), drawerOnly]);
             let area = this.surfaces.get(key);
+            if (area && [...retained.values()].includes(area)) area = null;
+            const kind = JSON.stringify([Boolean(glass), drawerOnly, Boolean(dynamic), edges ?? []]);
+            if (!area) area = available.find(candidate => candidate._frameKind === kind && ![...retained.values()].includes(candidate));
+            if (area) available.splice(available.indexOf(area), 1);
             if (!area) {
                 if (glass) {
                     const material = new LiquidMaterial(this.monitor, this.liquidSettings, this.theme.bg);
@@ -65,7 +70,7 @@ export class DesktopFrame {
                         base.connect('repaint', () => {
                             const cr = base.get_context();
                             try {
-                                cr.translate(-rect[0], -rect[1]);
+                                cr.translate(-area.x, -area.y);
                                 paintFrame(cr, width, height, this.sides, this.state.radius, this.theme.bg, 0);
                             } finally { cr.$dispose(); }
                         });
@@ -83,7 +88,7 @@ export class DesktopFrame {
                     shadow.connect('repaint', () => {
                         const cr = shadow.get_context();
                         try {
-                            cr.translate(-rect[0], -rect[1]);
+                            cr.translate(-area.x, -area.y);
                             const spread = this.spread ?? 1;
                             const sides = Object.fromEntries(Object.entries(this.sides).map(([edge, value]) => [edge, value * spread]));
                             paintFrameShadow(cr, width, height, sides, this.state.radius * spread,
@@ -110,10 +115,20 @@ export class DesktopFrame {
                     } finally { cr.$dispose(); }
                 });
             }
+            area.visible = true;
+            if (area._liquidBase) area._liquidBase.visible = true;
+            if (area._liquidShadow) area._liquidShadow.visible = true;
+            area._frameKind = kind;
+            if (area.x !== rect[0] || area.y !== rect[1]) area.set_position(rect[0], rect[1]);
+            if (area.width !== rect[2] || area.height !== rect[3]) area.set_size(rect[2], rect[3]);
+            for (const companion of [area._liquidBase, area._liquidShadow]) {
+                if (companion && (companion.x !== rect[0] || companion.y !== rect[1])) companion.set_position(rect[0], rect[1]);
+                if (companion && (companion.width !== rect[2] || companion.height !== rect[3])) companion.set_size(rect[2], rect[3]);
+            }
             area.opacity = Math.round((this.fade ?? 1) * 255);
             if (area._liquidBase) area._liquidBase.opacity = area.opacity;
             if (area._liquidShadow) area._liquidShadow.opacity = area.opacity;
-            const content = JSON.stringify([dynamic || cramped ? this.sides : edges.map(edge => this.sides[edge]),
+            const content = JSON.stringify([rect, dynamic || cramped ? this.sides : edges.map(edge => this.sides[edge]),
                 this.spread, dynamic ? popup : null, dynamic ? notification : null, cramped]);
             if (area._frameContent !== content) {
                 area._frameContent = content;
@@ -124,13 +139,19 @@ export class DesktopFrame {
                 } else area.queue_repaint();
                 area._liquidBase?.queue_repaint();
                 area._liquidShadow?.queue_repaint();
-                const [x, y, w, h] = rect;
-                this.lastDirty.push({x, y, width: w, height: h});
             }
             retained.set(key, area);
         }
-        for (const [key, area] of this.surfaces)
-            if (!retained.has(key)) area.destroy();
+        // Keep inactive tiles through the droplet phase and after closing.
+        // Native blur effects retain their resources for the next reveal.
+        this.spareSurfaces = available.slice(0, 32);
+        for (const area of available) {
+            area.visible = false;
+            if (area._liquidBase) area._liquidBase.visible = false;
+            if (area._liquidShadow) area._liquidShadow.visible = false;
+            area._frameContent = null;
+            if (!this.spareSurfaces.includes(area)) area.destroy();
+        }
         this.surfaces = retained;
         this.areas = [...retained.values()];
     }
@@ -178,12 +199,17 @@ export class DesktopFrame {
     setNotification(notification) {
         if (JSON.stringify(this.notification) === JSON.stringify(notification)) return;
         this.notification = notification;
+        // Drawing callbacks sample the current join. A tile can be repainted
+        // while borrowed for the banner without changing its resting cache key.
+        // Invalidate both active and pooled tiles before restoring the perimeter.
+        for (const area of [...this.surfaces.values(), ...this.spareSurfaces]) area._frameContent = null;
         this.repaint();
         this.onJoinChange?.();
     }
 
     setPopup(popup) {
-        const next = popup ? {...popup, x: popup.x - this.monitor.x, y: popup.y - this.monitor.y} : null;
+        const next = popup ? {...popup, x: popup.x - this.monitor.x, y: popup.y - this.monitor.y,
+            bounds: popup.bounds ? {...popup.bounds, x: popup.bounds.x - this.monitor.x, y: popup.bounds.y - this.monitor.y} : null} : null;
         if (JSON.stringify(this.popup) === JSON.stringify(next)) return;
         this.popup = next;
         this.repaint();

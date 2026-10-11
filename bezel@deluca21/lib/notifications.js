@@ -2,11 +2,13 @@ import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import {State as NotificationState} from 'resource:///org/gnome/shell/ui/messageTray.js';
 import * as MessageList from 'resource:///org/gnome/shell/ui/messageList.js';
 import {LiquidMaterial, liquidEnabled, MaterialActor} from './liquidMaterial.js';
 import {hexToRgba} from './theme.js';
 import {motionDuration} from './pageMotion.js';
 import {settingChoice} from './config.js';
+import {LiquidDrawer} from './liquidMotion.js';
 import {notificationJoinsFrame} from './frame-regions.js';
 
 // Keep GNOME's notification lifecycle, close button, actions, DND and history.
@@ -26,7 +28,7 @@ export class NotificationBridge {
         this.theme = theme;
         this.framed = framed;
         this.radius = Math.max(12, radius);
-        this.original = {clip: this.tray.clip_to_allocation, style: this.bin.get_style(), align: this.tray.bannerAlignment, x: this.bin.translation_x, y: this.bin.translation_y};
+        this.original = {trayClip: this.tray.has_clip ? this.tray.get_clip() : null, binClip: this.bin.has_clip ? this.bin.get_clip() : null, clip: this.tray.clip_to_allocation, style: this.bin.get_style(), align: this.tray.bannerAlignment, x: this.bin.translation_x, y: this.bin.translation_y};
         this.tray.clip_to_allocation = false;
         this.records = new Map();
         this.pendingStyles = new Map();
@@ -36,13 +38,16 @@ export class NotificationBridge {
         this.bin.set_style('padding: 0; margin: 0;');
         this.signals = [
             this.bin.connect('child-added', (_bin, child) => this.decorate(child)),
+            this.bin.connect('child-removed', () => this.position()),
+            this.bin.connect('notify::visible', () => this.position()),
+            this.bin.connect('notify::mapped', () => this.position()),
             this.bin.connect('notify::allocation', () => this.position()),
-            this.tray.connect('notify::allocation', () => this.position()),
             this.bin.connect('notify::y', () => this.position()),
             this.bin.connect('notify::opacity', () => { this.layer.opacity = this.bin.opacity; }),
         ];
+        this.trayAllocationSignal = this.tray.connect('notify::allocation', () => this.position());
         for (const child of this.bin.get_children()) this.decorate(child);
-        this.paintSignal = global.stage.connect('before-paint', () => { if (this.bin?.mapped) this.position(); });
+        this.paintSignal = global.stage.connect('before-paint', () => this.position());
         this.binDestroyedSignal = this.bin.connect('destroy', () => {
             if (this.paintSignal) global.stage.disconnect(this.paintSignal);
             this.paintSignal = null;
@@ -95,12 +100,20 @@ export class NotificationBridge {
 
     position() {
         if (!this.bin || this.positioning) return;
+        if (!this.bin.mapped || !this.bin.visible || !this.tray._banner) {
+            this.frame?.setNotification(null);
+            this.layer.opacity = 0;
+            return;
+        }
         this.positioning = true;
         try {
             const banner = this.tray._banner ?? this.bin.get_first_child();
             if (!banner?.has_allocation() || !this.layer.has_allocation()) return;
             const [bx, by] = banner.get_transformed_position();
-            const [width, height] = banner.get_transformed_size();
+            const style = this.settings.get_string('notifications-animation');
+            const custom = style !== 'default';
+            const [width, height] = custom ? [banner.width, banner.height] : banner.get_transformed_size();
+            const rawProgress = Math.max(0, Math.min(1, 1 + this.bin.y / Math.max(1, height)));
             if (![bx, by, width, height].every(Number.isFinite) || width < 1 || height < 1) return;
             const corner = this._corner();
             const gap = this.framed ? 0 : 12;
@@ -110,15 +123,56 @@ export class NotificationBridge {
             const x = left
                 ? this.monitor.x + sides.left + gap
                 : this.monitor.x + this.monitor.width - sides.right - gap - width;
+            const offset = custom ? 0 : this.bin.y;
             const y = bottom
-                ? this.monitor.y + this.monitor.height - sides.bottom - gap - height - this.bin.y
-                : this.monitor.y + sides.top + gap + this.bin.y;
+                ? this.monitor.y + this.monitor.height - sides.bottom - gap - height - offset
+                : this.monitor.y + sides.top + gap + offset;
             this.tray.bannerAlignment = left ? Clutter.ActorAlign.START : Clutter.ActorAlign.END;
             this.bin.remove_transition('translation-x');
             this.bin.translation_x += x - bx;
             this.bin.translation_y += y - by;
             this.layer.opacity = this.bin.opacity;
+            // Keep the joined opening throughout the native slide; only the
+            // visible height grows or retracts. The resting border stays opaque.
+            this.bin.opacity = 255;
+            this.layer.opacity = 255;
+            const slide = this.bin.get_transition('y');
+            if (slide && this._slide !== slide) {
+                this._slide = slide;
+                if (custom) slide.set_progress_mode(Clutter.AnimationMode.LINEAR);
+                const closing = this.tray._notificationState === NotificationState.HIDING;
+                const duration = this.settings.get_int('animation-duration') * (custom ? this.settings.get_int('liquid-duration-scale') / 100 : 1) * (custom && closing ? 0.65 : 1);
+                slide.set_duration(Math.max(1, Math.round(duration)));
+            }
+            // Clip the native slide to the desktop opening. Content and its
+            // backdrop move together without crossing panel controls.
+            const openingX = this.monitor.x + sides.left;
+            const openingY = this.monitor.y + sides.top;
+            const openingW = this.monitor.width - sides.left - sides.right;
+            const openingH = this.monitor.height - sides.top - sides.bottom;
+            const [trayX, trayY] = this.tray.get_transformed_position();
+            this.tray.set_clip(openingX - trayX, openingY - trayY, openingW, openingH);
+            const [layerX, layerY] = this.layer.get_transformed_position();
+            this.layer.set_clip(openingX - layerX, openingY - layerY, openingW, openingH);
             const record = this.records.get(banner);
+            let progress = rawProgress;
+            if (custom && record) {
+                if (!record.motion) {
+                    record.adapter = {_monitor: this.monitor, _theme: this.theme, _overlay: {_settings: this.settings},
+                        _state: {animationDuration: this.settings.get_int('animation-duration')},
+                        _popupGlass: Boolean(record.glass || this.frame?.glass), _popupPaintRadius: this.radius,
+                        _popupBox: banner, _popout: this.bin};
+                    record.motion = new LiquidDrawer(record.adapter);
+                    record.motion.style = style;
+                }
+                record.adapter._popupGeometry = {x, y, width, height, edge: bottom ? 'bottom' : 'top'};
+                progress = Math.max(0, record.motion.update(rawProgress));
+                // Keep the spring overshoot and local clip used by drawers.
+                // The tray clip only prevents crossing the desktop opening.
+                const depth = height * progress;
+                this.bin.set_clip(0, bottom ? height - depth : 0, width, depth);
+                record.presentedProgress = progress;
+            }
             if (record?.glass) {
                 const [lx, ly] = this.layer.get_transformed_position();
                 record.glass.actor.set_position(x - lx, y - ly);
@@ -128,7 +182,7 @@ export class NotificationBridge {
             this.frame?.setNotification({
                 glass: Boolean(record?.glass || this.frame?.glass),
                 width, height, corner, edge: bottom ? 'bottom' : 'top',
-                progress: Math.max(0, Math.min(1, (height + this.bin.y) / Math.max(1, height))),
+                progress,
             });
         } finally { this.positioning = false; }
     }
@@ -152,7 +206,7 @@ export class NotificationBridge {
             this.pendingStyles.set(banner, [changed, destroyed]);
             return;
         }
-        const record = {style: banner.get_style(), corners: [], parts: []};
+        const record = {style: banner.get_style(), clip: banner.has_clip ? banner.get_clip() : null, corners: [], parts: []};
         if (liquidEnabled(this.settings, 'glass-drawers') || this.frame?.glass) {
             record.glass = new LiquidMaterial(this.monitor, this.settings, this.theme.bg);
             record.glass.actor.set_size(Math.max(1, banner.width), Math.max(1, banner.height));
@@ -161,6 +215,7 @@ export class NotificationBridge {
             this.parent.set_child_below_sibling(this.layer, this.tray);
         }
         record.destroy = banner.connect('destroy', () => {
+            record.motion?.destroy();
             record.glass?.actor.destroy();
             for (const area of record.corners) area.destroy();
             this.records.delete(banner);
@@ -249,6 +304,7 @@ export class NotificationBridge {
         this.setHistoryOpen(false);
         this.frame?.setNotification(null);
         if (!this.bin) return;
+        if (this.original.binClip) this.bin.set_clip(...this.original.binClip); else this.bin.remove_clip();
         if (this.binDestroyedSignal) this.bin.disconnect(this.binDestroyedSignal);
         this.binDestroyedSignal = 0;
         this.tray.disconnect(this.sourceAdded);
@@ -257,15 +313,18 @@ export class NotificationBridge {
         this.sourceSignals.clear();
         for (const timer of this.deliveryTimers) GLib.source_remove(timer);
         this.deliveryTimers.clear();
-        for (const [index, id] of this.signals.entries())
-            (index === 2 ? this.tray : this.bin).disconnect(id);
+        if (this.original.trayClip) this.tray.set_clip(...this.original.trayClip); else this.tray.remove_clip();
+        this.tray.disconnect(this.trayAllocationSignal);
+        for (const id of this.signals) this.bin.disconnect(id);
         for (const [banner, ids] of this.pendingStyles)
             ids.forEach(id => banner.disconnect(id));
         this.pendingStyles.clear();
         this.layer?.destroy();
         for (const [banner, record] of this.records) {
+            if (record.motion) { record.motion.destroy(); banner.opacity = 255; this.bin.set_scale(1, 1); }
             record.actionCleanup?.();
             banner.disconnect(record.destroy);
+            if (record.clip) banner.set_clip(...record.clip); else banner.remove_clip();
             banner.set_style(record.style);
             for (const [actor, style] of record.parts) actor.set_style(style);
             for (const area of record.corners) area.destroy();
